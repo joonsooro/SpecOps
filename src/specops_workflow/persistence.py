@@ -14,10 +14,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import TypeDecorator
+from pydantic import TypeAdapter
 
+from .artifacts import ArtifactRoot, ArtifactVersion
 from .canonical import canonical_json
-from .models import AuditEvent
-from .state import CaseState
+from .enums import *  # noqa: F403
+from .models import *  # noqa: F403
+from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState
 
 
 class UTCText(TypeDecorator):
@@ -98,8 +101,34 @@ class SqlAlchemyStore:
             for row in connection.execute(select(cases)).mappings():
                 state = CaseState(UUID(row["id"]), UUID(row["pm_actor_id"]), UUID(row["dev_lead_actor_id"]), row["created_at"], row["revision"])
                 actors = connection.execute(select(case_participants.c.actor_id).where(case_participants.c.case_id == row["id"])).scalars()
-                state.participants = {UUID(value) for value in actors}; loaded[state.id] = state
+                state.participants = {UUID(value) for value in actors}; self._hydrate_case(connection, state); loaded[state.id] = state
         return loaded
+
+    def _hydrate_case(self, connection, case: CaseState) -> None:
+        """Hydrate persisted rows only through their public Pydantic schemas."""
+        cid = str(case.id); refs = TypeAdapter(list[SourceRef]); resolutions = TypeAdapter(list[ResolutionRecord])
+        for row in connection.execute(select(delegations).where(delegations.c.case_id == cid)).mappings():
+            item = DelegationState(UUID(row["id"]), UUID(row["delegator_id"]), UUID(row["delegate_id"]), Domain(row["domain"]), frozenset(json.loads(row["command_names"])), row["artifact_kind"], UUID(row["artifact_id"]) if row["artifact_id"] else None, row["valid_from"], row["valid_until"], bool(row["later_review_required"]), row["created_at"], row["revoked_at"]); case.delegations[item.id] = item
+        for row in connection.execute(select(source_artifacts).where(source_artifacts.c.case_id == cid)).mappings():
+            item = SourceArtifactIdentity(artifact_id=UUID(row["artifact_id"]), case_id=case.id, type=SourceArtifactType(row["type"]), version=row["version"], media_type=row["media_type"], canonical_locator=row["canonical_locator"], content_hash=row["content_hash"], registered_at=row["registered_at"]); case.sources[(item.artifact_id, item.version)] = item
+        for row in connection.execute(select(ambiguity_findings).where(ambiguity_findings.c.case_id == cid)).mappings():
+            item = AmbiguityState(UUID(row["id"]), row["category"], Domain(row["domain"]), row["severity"], refs.validate_json(row["evidence_refs"]), row["clarification_question"], row["created_at"], FindingStatus(row["status"]), resolutions.validate_json(row["resolutions"]), row["resolved_at"]); case.ambiguities[item.id] = item
+        package = connection.execute(select(spec_packages).where(spec_packages.c.case_id == cid)).mappings().one_or_none()
+        if package:
+            root = ArtifactRoot(ArtifactKind.SPEC_PACKAGE, UUID(package["id"]))
+            for version in connection.execute(select(spec_package_versions).where(spec_package_versions.c.package_id == package["id"]).order_by(spec_package_versions.c.version)).mappings():
+                reqs = [Requirement(unit_id=UUID(r["unit_id"]), statement=r["statement"], domain=Domain(r["domain"]), delivery_required=bool(r["delivery_required"]), source_refs=refs.validate_json(r["source_refs"])) for r in connection.execute(select(spec_requirements).where(spec_requirements.c.package_id == package["id"], spec_requirements.c.package_version == version["version"])).mappings()]
+                decisions = [TechnicalDecision(unit_id=UUID(r["unit_id"]), statement=r["statement"], domain=Domain(r["domain"]), delivery_required=bool(r["delivery_required"]), provisional=bool(r["provisional"]), provisional_delegation_id=UUID(r["provisional_delegation_id"]) if r["provisional_delegation_id"] else None, source_refs=refs.validate_json(r["source_refs"])) for r in connection.execute(select(technical_decisions).where(technical_decisions.c.package_id == package["id"], technical_decisions.c.package_version == version["version"])).mappings()]
+                checks = [AcceptanceCheck(check_id=UUID(r["check_id"]), statement=r["statement"], domain=Domain(r["domain"]), related_unit_ids=[UUID(value) for value in json.loads(r["related_unit_ids"])], source_refs=refs.validate_json(r["source_refs"])) for r in connection.execute(select(acceptance_checks).where(acceptance_checks.c.package_id == package["id"], acceptance_checks.c.package_version == version["version"])).mappings()]
+                root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], SpecPackagePayload(requirements=reqs, technical_decisions=decisions, acceptance_checks=checks), version["state"]))
+            case.package = root
+        for row in connection.execute(select(approvals).where(approvals.c.case_id == cid)).mappings():
+            case.approvals.append(ApprovalState(UUID(row["id"]), row["artifact_kind"], UUID(row["artifact_id"]), row["artifact_version"], row["artifact_hash"], ApprovalScope(row["scope"]), UUID(row["actor_id"]), UUID(row["delegation_id"]) if row["delegation_id"] else None, None, bool(row["later_review_required"]), row["approved_at"]))
+        identity_type = TypeAdapter(JiraIdentity | GitHubIdentity)
+        for row in connection.execute(select(external_bindings).where(external_bindings.c.case_id == cid)).mappings():
+            identity = identity_type.validate_json(row["external_identity"]); item = BindingState(UUID(row["id"]), case.id, System(row["system"]), UUID(row["projection_plan_id"]), UUID(row["item_id"]), row["generation_key"], identity, row["current_plan_version"], row["current_observation_sequence"], row["confirmed_at"]); case.bindings[item.id] = item; case.metadata.setdefault("external_bindings", {})[item.item_id] = {"binding_id": item.id, "key": identity.key} if isinstance(identity, JiraIdentity) else {"binding_id": item.id, "identity": identity}
+        for row in connection.execute(select(drift_findings).where(drift_findings.c.case_id == cid)).mappings():
+            case.metadata.setdefault("findings", {})[UUID(row["id"])] = {"category": FindingCategory(row["category"]), "affected": json.loads(row["affected_binding"]), "expected": json.loads(row["expected_value"]), "observed": json.loads(row["observed_value"]), "active": bool(row["active"]), "created_at": row["created_at"], "resolved_at": row["resolved_at"]}
 
     def save_case_and_audit(self, case: CaseState, *, command_name: str, command_id: UUID, fingerprint: str, actor: Any, occurred_at: datetime, result: Any) -> None:
         result_json = result.model_dump(mode="json", exclude_none=False)

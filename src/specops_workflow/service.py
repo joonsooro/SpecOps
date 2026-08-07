@@ -33,10 +33,14 @@ ALLOWED_COMMANDS = {
 class WorkflowService:
     """Only public behavior boundary. Persistence is injected in feature 10."""
 
-    def __init__(self, *, clock: Clock | None = None, ids: UuidGenerator | None = None) -> None:
+    def __init__(self, *, clock: Clock | None = None, ids: UuidGenerator | None = None, database_url: str | None = None) -> None:
         self.clock = clock or SystemClock()
         self.ids = ids or RandomUuidGenerator()
-        self._cases: dict[UUID, CaseState] = {}
+        self._store = None
+        if database_url is not None:
+            from .persistence import SqlAlchemyStore
+            self._store = SqlAlchemyStore(database_url)
+        self._cases: dict[UUID, CaseState] = self._store.load_cases() if self._store else {}
         self._command_case: dict[UUID, UUID] = {}
 
     def _now(self) -> datetime:
@@ -70,7 +74,12 @@ class WorkflowService:
         result = result_type(receipt=receipt, **values)
         case.command_results[command.command_id] = (fingerprint, result)
         self._command_case[command.command_id] = case.id
+        self._persist_result(case, name, command, fingerprint, result)
         return result
+
+    def _persist_result(self, case: CaseState, name: str, command: BaseModel, fingerprint: str, result: BaseModel) -> None:
+        if self._store:
+            self._store.save_case_and_audit(case, command_name=name, command_id=command.command_id, fingerprint=fingerprint, actor=command.acting_actor_id, occurred_at=result.receipt.occurred_at, result=result)
 
     def _authority_scope(self, case: CaseState, actor: UUID) -> ApprovalScope | None:
         if actor == case.pm_actor_id: return ApprovalScope.BUSINESS
@@ -474,6 +483,7 @@ class WorkflowService:
         receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
         result = self._operation_result(operation, receipt); operation.last_result = result
         case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        self._persist_result(case, "start_external_operation", command, fp, result)
         return result
 
     @staticmethod
@@ -536,6 +546,7 @@ class WorkflowService:
         case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
         result = self._operation_result(operation, receipt); operation.last_result = result
         case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        self._persist_result(case, "record_operation_result", command, fp, result)
         return result
 
     def reconcile_operation(self, command: ReconcileOperationCommand) -> OperationResult:
@@ -555,6 +566,7 @@ class WorkflowService:
         case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
         result = self._operation_result(operation, receipt); operation.last_result = result
         case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        self._persist_result(case, "reconcile_operation", command, fp, result)
         return result
 
     def _validate_policy(self, case: CaseState, payload: StatusPolicyPayload) -> None:
@@ -693,6 +705,7 @@ class WorkflowService:
         case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=self._now())
         result = SnapshotResult(observation_kind="FOUND_ACCEPTED" if observation.observation_kind == ObservationKind.FOUND else "NOT_FOUND_ACCEPTED", observation=observation, binding_id=binding.id, observation_sequence=binding.current_observation_sequence, active_finding_ids=sorted(active, key=lambda item: item.bytes), receipt=receipt)
         case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        self._persist_result(case, "submit_remote_snapshot", command, fp, result)
         return result
 
     def _authorize_read(self, case: CaseState, actor: Actor) -> None:
@@ -794,6 +807,13 @@ class WorkflowService:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
         values = [item for item in case.metadata.get("intents", {}).values() if (query.after_cursor is None or item.intent_id.bytes > query.after_cursor.bytes) and not any(op.intent.intent_id == item.intent_id and op.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN, OperationStatus.SUCCEEDED} for op in case.operations.values())]
         values.sort(key=lambda item: item.intent_id.bytes); page = values[:query.limit]; return IntentPage(items=page, next_cursor=page[-1].intent_id if len(values) > query.limit else None)
+
+    def list_audit_events(self, query: AuditQuery) -> AuditPage:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        if self._store is None: return AuditPage(items=[], next_cursor=None)
+        values = [item for item in self._store.list_audit(case.id) if query.after_cursor is None or item.case_sequence > query.after_cursor]
+        page = values[:query.limit]
+        return AuditPage(items=page, next_cursor=page[-1].case_sequence if len(values) > query.limit else None)
 
     def get_case_state(self, case_id: UUID) -> CaseState:
         """Internal test/repository bridge; never returns through a public read method."""

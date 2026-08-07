@@ -199,7 +199,98 @@ class WorkflowService:
         if scopes.issubset({r.scope for r in finding.resolutions}): finding.status = FindingStatus.RESOLVED; finding.resolved_at = now
         return self._finish(case, "resolve_ambiguity_finding", command, fp, AmbiguityFindingResult, finding_id=finding.id, status=finding.status, resolutions=finding.resolutions, resolved_at=finding.resolved_at)  # type: ignore[return-value]
 
+    @staticmethod
+    def _source_sort(ref: SourceRef) -> tuple[Any, ...]:
+        location = ref.location
+        detail = getattr(location, "pointer", None) or (getattr(location, "start", None), getattr(location, "end", None)) or (getattr(location, "sheet", None), getattr(location, "a1", None))
+        return (ref.artifact_id.bytes, ref.version, location.kind, str(detail))
+
+    def _normalized_package_payload(self, payload: SpecPackagePayload) -> dict[str, Any]:
+        def refs(values: list[SourceRef]) -> list[dict[str, Any]]:
+            return [item.model_dump(mode="python", exclude_none=False) for item in sorted(values, key=self._source_sort)]
+        requirements = []
+        for item in sorted(payload.requirements, key=lambda row: row.unit_id.bytes):
+            value = item.model_dump(mode="python", exclude_none=False); value["source_refs"] = refs(item.source_refs); requirements.append(value)
+        decisions = []
+        for item in sorted(payload.technical_decisions, key=lambda row: row.unit_id.bytes):
+            value = item.model_dump(mode="python", exclude_none=False); value["source_refs"] = refs(item.source_refs); decisions.append(value)
+        checks = []
+        for item in sorted(payload.acceptance_checks, key=lambda row: row.check_id.bytes):
+            value = item.model_dump(mode="python", exclude_none=False); value["related_unit_ids"] = sorted(item.related_unit_ids, key=lambda value: value.bytes); value["source_refs"] = refs(item.source_refs); checks.append(value)
+        return {"requirements": requirements, "technical_decisions": decisions, "acceptance_checks": checks}
+
+    def _validate_package_shape(self, case: CaseState, payload: SpecPackagePayload, *, ready: bool) -> None:
+        units = [item.unit_id for item in payload.requirements] + [item.unit_id for item in payload.technical_decisions]
+        all_ids = units + [item.check_id for item in payload.acceptance_checks]
+        if len(all_ids) != len(set(all_ids)): raise DomainError(ErrorCode.INVALID_TRANSITION)
+        unit_set = set(units)
+        for item in [*payload.requirements, *payload.technical_decisions, *payload.acceptance_checks]:
+            if ready:
+                for ref in item.source_refs: self._validate_source_ref(case, ref)
+        for check in payload.acceptance_checks:
+            if len(check.related_unit_ids) != len(set(check.related_unit_ids)) or not set(check.related_unit_ids).issubset(unit_set): raise DomainError(ErrorCode.INVALID_TRANSITION)
+        for decision in payload.technical_decisions:
+            if decision.provisional:
+                delegation = case.delegations.get(decision.provisional_delegation_id)
+                if delegation is None or delegation.domain != Domain.TECHNICAL or not delegation.later_review_required:
+                    raise DomainError(ErrorCode.INVALID_TRANSITION)
+        if ready and any(item.status == FindingStatus.OPEN and item.severity == Severity.BLOCKING.value for item in case.ambiguities.values()):
+            raise DomainError(ErrorCode.BLOCKING_FINDING)
+
+    def create_spec_package(self, command: CreateSpecPackageCommand) -> SpecPackageResult:
+        case, replay, fp = self._begin("create_spec_package", command)
+        if replay: return replay  # type: ignore[return-value]
+        self._authorize(case, command.acting_actor_id, "create_spec_package", artifact_id=command.package_id)
+        if case.package is not None: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        self._validate_package_shape(case, command.payload, ready=False)
+        digest = artifact_hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
+        root = ArtifactRoot(ArtifactKind.SPEC_PACKAGE, command.package_id)
+        root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PackageState.DRAFT.value))
+        case.package = root
+        return self._finish(case, "create_spec_package", command, fp, SpecPackageResult, binding=root.binding, state=PackageState.DRAFT)  # type: ignore[return-value]
+
+    def revise_spec_package(self, command: ReviseSpecPackageCommand) -> SpecPackageResult:
+        case, replay, fp = self._begin("revise_spec_package", command)
+        if replay: return replay  # type: ignore[return-value]
+        if case.package is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        self._authorize(case, command.acting_actor_id, "revise_spec_package", artifact_id=case.package.artifact_id)
+        case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
+        self._validate_package_shape(case, command.payload, ready=False)
+        digest = artifact_hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
+        case.package.revise(ArtifactVersion(case.package.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PackageState.DRAFT.value))
+        for plan in case.plans.values():
+            current = plan.current; plan.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.STALE.value)
+        return self._finish(case, "revise_spec_package", command, fp, SpecPackageResult, binding=case.package.binding, state=PackageState.DRAFT)  # type: ignore[return-value]
+
+    def mark_spec_package_ready(self, command: MarkSpecPackageReadyCommand) -> SpecPackageResult:
+        case, replay, fp = self._begin("mark_spec_package_ready", command)
+        if replay: return replay  # type: ignore[return-value]
+        if case.package is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        self._authorize(case, command.acting_actor_id, "mark_spec_package_ready", artifact_id=case.package.artifact_id)
+        case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
+        current = case.package.current
+        if current.state != PackageState.DRAFT.value: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        self._validate_package_shape(case, current.payload, ready=True)
+        case.package.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PackageState.READY.value)
+        return self._finish(case, "mark_spec_package_ready", command, fp, SpecPackageResult, binding=case.package.binding, state=PackageState.READY)  # type: ignore[return-value]
+
+    def approve_spec_package(self, command: ApproveSpecPackageCommand) -> ApprovalResult:
+        case, replay, fp = self._begin("approve_spec_package", command)
+        if replay: return replay  # type: ignore[return-value]
+        if case.package is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
+        current = case.package.current
+        if current.state not in {PackageState.READY.value, PackageState.APPROVED.value}: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        delegation = self._authorize(case, command.acting_actor_id, "approve_spec_package", scope=command.scope, artifact_id=case.package.artifact_id)
+        if any(item.artifact_id == case.package.artifact_id and item.artifact_version == current.version and item.artifact_hash == current.semantic_hash and item.scope == command.scope and item.actor_id == command.acting_actor_id for item in case.approvals):
+            raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
+        approval = ApprovalState(self.ids.new(), ArtifactKind.SPEC_PACKAGE.value, case.package.artifact_id, current.version, current.semantic_hash, command.scope, command.acting_actor_id, delegation.id if delegation else None, delegation.delegator_id if delegation else None, delegation.later_review_required if delegation else False, self._now())
+        case.approvals.append(approval)
+        scopes = {item.scope for item in case.approvals if item.artifact_id == case.package.artifact_id and item.artifact_version == current.version and item.artifact_hash == current.semantic_hash}
+        if {ApprovalScope.BUSINESS, ApprovalScope.TECHNICAL}.issubset(scopes):
+            case.package.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PackageState.APPROVED.value)
+        return self._finish(case, "approve_spec_package", command, fp, ApprovalResult, approval_id=approval.id, scope=approval.scope, artifact_binding=case.package.binding)  # type: ignore[return-value]
+
     def get_case_state(self, case_id: UUID) -> CaseState:
         """Internal test/repository bridge; never returns through a public read method."""
         return self._case(case_id)
-

@@ -18,6 +18,8 @@ from .renderer import SENTINEL_JIRA_KEY, render_structured_body
 from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState, OperationState
 
 RESOLUTION_NAMESPACE = UUID("4a5cbf7e-bcff-5a85-b670-c9a38145704d")
+DRIFT_NAMESPACE = UUID("08f33a1b-f1af-56d7-8a0d-8ab2a87787f8")
+INTENT_NAMESPACE = UUID("b91c74fb-902f-57cb-8dc3-aa89dd91702c")
 ALLOWED_COMMANDS = {
     "create_case", "add_participant", "grant_delegation", "revoke_delegation", "register_source_artifact",
     "record_ambiguity_finding", "resolve_ambiguity_finding", "create_spec_package", "revise_spec_package",
@@ -551,6 +553,136 @@ class WorkflowService:
         now = self._now(); operation.updated_at = now
         case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
         result = self._operation_result(operation, receipt); operation.last_result = result
+        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        return result
+
+    def _validate_policy(self, case: CaseState, payload: StatusPolicyPayload) -> None:
+        pairs = [(item.system, item.native_status) for item in payload.mappings]
+        if len(pairs) != len(set(pairs)): raise DomainError(ErrorCode.INVALID_TRANSITION)
+        mapping_ids = [item.mapping_id for item in payload.mappings]; rule_ids = [item.rule_id for item in payload.rules]
+        if len(mapping_ids) != len(set(mapping_ids)) or len(rule_ids) != len(set(rule_ids)): raise DomainError(ErrorCode.INVALID_TRANSITION)
+        current_ids = {item.item_id for root in case.plans.values() for item in root.current.payload.items}
+        for mapping in payload.mappings:
+            if mapping.system == System.JIRA and not isinstance(mapping.normalized_status, JiraStatus): raise DomainError(ErrorCode.INVALID_TRANSITION)
+            if mapping.system == System.GITHUB and not isinstance(mapping.normalized_status, GitHubStatus): raise DomainError(ErrorCode.INVALID_TRANSITION)
+        for rule in payload.rules:
+            if (rule.selector == Selector.ITEM_IDS) != bool(rule.item_ids) or not set(rule.item_ids).issubset(current_ids): raise DomainError(ErrorCode.INVALID_TRANSITION)
+            if rule.target_system == System.JIRA and not isinstance(rule.target_normalized_status, JiraStatus): raise DomainError(ErrorCode.INVALID_TRANSITION)
+            if rule.target_system == System.GITHUB and not isinstance(rule.target_normalized_status, GitHubStatus): raise DomainError(ErrorCode.INVALID_TRANSITION)
+
+    @staticmethod
+    def _normalized_policy_payload(payload: StatusPolicyPayload) -> dict[str, Any]:
+        value = payload.model_dump(mode="python", exclude_none=False)
+        value["mappings"] = sorted(value["mappings"], key=lambda row: UUID(str(row["mapping_id"])).bytes)
+        value["rules"] = sorted(value["rules"], key=lambda row: UUID(str(row["rule_id"])).bytes)
+        for rule in value["rules"]:
+            rule["item_ids"] = sorted(rule["item_ids"], key=lambda item: UUID(str(item)).bytes)
+        return value
+
+    def create_status_policy(self, command: CreateStatusPolicyCommand) -> StatusPolicyResult:
+        case, replay, fp = self._begin("create_status_policy", command)
+        if replay: return replay  # type: ignore[return-value]
+        if command.acting_actor_id not in {case.pm_actor_id, case.dev_lead_actor_id}: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
+        if case.policy is not None: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        self._validate_policy(case, command.payload)
+        digest = artifact_hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
+        root = ArtifactRoot(ArtifactKind.STATUS_POLICY, command.policy_id); root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PolicyState.READY.value)); case.policy = root
+        return self._finish(case, "create_status_policy", command, fp, StatusPolicyResult, binding=root.binding, state=PolicyState.READY)  # type: ignore[return-value]
+
+    def revise_status_policy(self, command: ReviseStatusPolicyCommand) -> StatusPolicyResult:
+        case, replay, fp = self._begin("revise_status_policy", command)
+        if replay: return replay  # type: ignore[return-value]
+        if command.acting_actor_id not in {case.pm_actor_id, case.dev_lead_actor_id}: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
+        if case.policy is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        if any(item.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN} for item in case.operations.values()): raise DomainError(ErrorCode.INVALID_TRANSITION)
+        case.policy.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash); self._validate_policy(case, command.payload)
+        digest = artifact_hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
+        case.policy.revise(ArtifactVersion(case.policy.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PolicyState.READY.value))
+        case.metadata["intents"] = {}
+        return self._finish(case, "revise_status_policy", command, fp, StatusPolicyResult, binding=case.policy.binding, state=PolicyState.READY)  # type: ignore[return-value]
+
+    def approve_status_policy(self, command: ApproveStatusPolicyCommand) -> ApprovalResult:
+        case, replay, fp = self._begin("approve_status_policy", command)
+        if replay: return replay  # type: ignore[return-value]
+        if case.policy is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        case.policy.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
+        if case.policy.current.state not in {PolicyState.READY.value, PolicyState.APPROVED.value}: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        delegation = self._authorize(case, command.acting_actor_id, "approve_status_policy", scope=command.scope, artifact_id=case.policy.artifact_id)
+        if any(item.artifact_id == case.policy.artifact_id and item.artifact_version == case.policy.current.version and item.artifact_hash == case.policy.current.semantic_hash and item.scope == command.scope and item.actor_id == command.acting_actor_id for item in case.approvals): raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
+        approval = ApprovalState(self.ids.new(), ArtifactKind.STATUS_POLICY.value, case.policy.artifact_id, case.policy.current.version, case.policy.current.semantic_hash, command.scope, command.acting_actor_id, delegation.id if delegation else None, delegation.delegator_id if delegation else None, delegation.later_review_required if delegation else False, self._now()); case.approvals.append(approval)
+        scopes = {item.scope for item in case.approvals if item.artifact_id == case.policy.artifact_id and item.artifact_version == case.policy.current.version and item.artifact_hash == case.policy.current.semantic_hash}
+        if {ApprovalScope.BUSINESS, ApprovalScope.TECHNICAL}.issubset(scopes):
+            current = case.policy.current; case.policy.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PolicyState.APPROVED.value); self._derive_content_intents(case)
+        return self._finish(case, "approve_status_policy", command, fp, ApprovalResult, approval_id=approval.id, scope=approval.scope, artifact_binding=case.policy.binding)  # type: ignore[return-value]
+
+    def _derive_content_intents(self, case: CaseState) -> None:
+        if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value or case.package is None: return
+        intents: dict[UUID, OperationIntent] = {}
+        for target, root in case.plans.items():
+            if root.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}: continue
+            for item in root.current.payload.items:
+                binding_meta = case.metadata.get("external_bindings", {}).get(item.item_id)
+                action = Action.CREATE if binding_meta is None else case.metadata.get("reconciliation", {}).get((root.artifact_id, root.current.version), {}).get(item.item_id)
+                if action is None: continue
+                system = System(target.value); generation = self._generation_key(case.id, target, item.item_id)
+                labels = ["specops", "specops-retired"] if action == Action.RETIRE else ["specops"]
+                if system == System.JIRA:
+                    request = {"project_key": root.current.payload.project_key, "issue_type": item.kind.value, "summary": item.title, "rendered_description": render_structured_body(item.body, {}, sizing=True), "parent_key": None, "dependency_keys": [], "labels": labels, "generation_key": generation, "package_binding": case.package.binding.model_dump(mode="json"), "plan_binding": root.binding.model_dump(mode="json")}
+                    jira_binding = None
+                else:
+                    jira_root = case.plans[PlanTarget.JIRA]
+                    request = {"repository": item.repository, "title": item.title, "rendered_body": render_structured_body(item.body, {}, jira_key=item.body.jira_key, sizing=True), "labels": labels, "generation_key": generation, "jira_key": item.body.jira_key, "package_binding": case.package.binding.model_dump(mode="json"), "jira_plan_binding": jira_root.binding.model_dump(mode="json"), "plan_binding": root.binding.model_dump(mode="json")}
+                    jira_binding = jira_root.binding
+                owned_hash = sha256(request)
+                item_ref = {"kind": "CURRENT", "item_id": item.item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash}
+                fingerprint = sha256({"schema": "operation-request-v1", "case_id": case.id, "system": system, "action": action, "generation_key": generation, "item_ref": item_ref, "package_binding": case.package.binding, "plan_binding": root.binding, "status_policy_binding": case.policy.binding, "request_owned_content_hash": owned_hash, "external_identity": None, "expected_remote_revision": None, "target_normalized_status": None, "contributing_rule_ids": []})
+                intent_id = uuid5(INTENT_NAMESPACE, fingerprint)
+                intents[intent_id] = OperationIntent(intent_id=intent_id, system=system, item_ref=item_ref, action=action, request=request, package_binding=case.package.binding, plan_binding=root.binding, jira_plan_binding=jira_binding, status_policy_binding=case.policy.binding, request_owned_content_hash=owned_hash, fingerprint=fingerprint)
+        case.metadata["intents"] = intents
+
+    def _mapping_for(self, case: CaseState, system: System, native_status: str) -> JiraStatus | GitHubStatus | None:
+        if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value: return None
+        return next((item.normalized_status for item in case.policy.current.payload.mappings if item.system == system and item.native_status == native_status), None)
+
+    @staticmethod
+    def _lifecycle(system: System, normalized: JiraStatus | GitHubStatus | None, owned: dict[str, Any] | None) -> Lifecycle:
+        labels = (owned or {}).get("labels", [])
+        if "specops-retired" in labels and ((system == System.JIRA and normalized == JiraStatus.CANCELLED) or (system == System.GITHUB and normalized == GitHubStatus.CLOSED)): return Lifecycle.RETIRED
+        if "specops-retired" not in labels and normalized is not None and normalized.value != "UNKNOWN": return Lifecycle.ACTIVE
+        return Lifecycle.UNKNOWN
+
+    def _finding(self, case: CaseState, category: FindingCategory, components: list[Any], expected: Any, observed: Any) -> UUID:
+        name = canonical_data({"case_id": case.id, "category": category.value, "components": components, "schema": "drift-finding-v1"})
+        finding_id = uuid5(DRIFT_NAMESPACE, str(name))
+        case.metadata.setdefault("findings", {})[finding_id] = {"category": category, "expected": expected, "observed": observed, "active": True, "created_at": self._now()}
+        return finding_id
+
+    def submit_remote_snapshot(self, command: SubmitRemoteSnapshotCommand) -> SnapshotResult:
+        case, replay, fp = self._begin("submit_remote_snapshot", command)
+        if replay: return replay  # type: ignore[return-value]
+        self._authorize(case, command.acting_actor_id, "submit_remote_snapshot")
+        if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value: raise DomainError(ErrorCode.STATUS_POLICY_NOT_APPROVED)
+        observation = command.observation
+        if observation.status_policy_binding != case.policy.binding: raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+        identity_key = self._identity_key(observation.system, observation.external_identity)
+        binding = next((item for item in case.bindings.values() if item.system == observation.system and self._identity_key(item.system, item.external_identity) == identity_key and item.generation_key == observation.generation_key), None)
+        if binding is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        latest = next((item for item in reversed(binding.snapshots) if item.remote_revision is not None), None); expected = latest.remote_revision if latest else None
+        if observation.expected_previous_remote_revision != expected: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
+        binding.snapshots.append(observation); binding.current_observation_sequence += 1
+        active: list[UUID] = []
+        if observation.observation_kind == ObservationKind.NOT_FOUND:
+            active.append(self._finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id], "FOUND", "NOT_FOUND"))
+        else:
+            normalized = self._mapping_for(case, observation.system, observation.native_status)
+            if normalized is None: active.append(self._finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, [case.policy.binding.model_dump(mode="json"), binding.id, observation.native_status], "mapped status", observation.native_status))
+            lifecycle = self._lifecycle(observation.system, normalized, observation.owned_content)
+            if lifecycle == Lifecycle.UNKNOWN: active.append(self._finding(case, FindingCategory.STATUS_CONFLICT, [binding.id, "INVALID_LIFECYCLE"], "valid lifecycle", "UNKNOWN"))
+            desired = next((intent for intent in case.metadata.get("intents", {}).values() if UUID(str(intent.item_ref["item_id"])) == binding.item_id), None)
+            if desired is not None and sha256(observation.owned_content) != desired.request_owned_content_hash:
+                active.append(self._finding(case, FindingCategory.CONTENT_DRIFT, [observation.plan_binding.model_dump(mode="json"), binding.item_id, binding.id], desired.request_owned_content_hash, sha256(observation.owned_content)))
+        case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=self._now())
+        result = SnapshotResult(observation_kind="FOUND_ACCEPTED" if observation.observation_kind == ObservationKind.FOUND else "NOT_FOUND_ACCEPTED", observation=observation, binding_id=binding.id, observation_sequence=binding.current_observation_sequence, active_finding_ids=sorted(active, key=lambda item: item.bytes), receipt=receipt)
         case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
         return result
 

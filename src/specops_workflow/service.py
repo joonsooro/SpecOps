@@ -14,6 +14,7 @@ from .enums import *  # noqa: F403
 from .errors import DomainError, ErrorCode
 from .models import *  # noqa: F403
 from .ports import Clock, RandomUuidGenerator, SystemClock, UuidGenerator
+from .renderer import SENTINEL_JIRA_KEY, render_structured_body
 from .state import AmbiguityState, ApprovalState, CaseState, DelegationState
 
 RESOLUTION_NAMESPACE = UUID("4a5cbf7e-bcff-5a85-b670-c9a38145704d")
@@ -339,6 +340,17 @@ class WorkflowService:
                 elif item.parent_item_id not in items or items[item.parent_item_id].kind not in {JiraKind.STORY, JiraKind.TASK}: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
                 if (item.repository is not None) != item.implementation_required: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
                 if item.repository is not None and not self._repository_valid(item.repository): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+            else:
+                jira_root = case.plans.get(PlanTarget.JIRA)
+                if jira_root is None or payload.jira_plan_binding != jira_root.binding or jira_root.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+                if not isinstance(item.kind, GitHubKind) or item.kind != GitHubKind.ISSUE or item.implementation_required or item.repository is None or not self._repository_valid(item.repository) or item.parent_item_id is not None or item.primary_jira_item_id is None: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+                jira_items = {value.item_id: value for value in jira_root.current.payload.items}
+                primary = jira_items.get(item.primary_jira_item_id)
+                if primary is None or not primary.implementation_required or set(primary.source_unit_ids) != set(item.source_unit_ids): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+                binding = case.metadata.get("external_bindings", {}).get(item.primary_jira_item_id)
+                jira_key = binding.get("key") if isinstance(binding, dict) else None
+                if jira_key is None or item.body.jira_key != jira_key or re.fullmatch(r"[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,17}", jira_key) is None: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+            render_structured_body(item.body, {}, jira_key=item.body.jira_key, sizing=True)
             hashes[item.item_id] = self._item_hash(payload.target, payload.project_key, item)
         if payload.target == PlanTarget.JIRA:
             mapped = {unit for item in payload.items for unit in item.source_unit_ids}
@@ -350,6 +362,11 @@ class WorkflowService:
                     parent = items[ancestor]
                     if item.implementation_required and parent.implementation_required: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
                     ancestor = parent.parent_item_id
+        else:
+            jira_items = case.plans[PlanTarget.JIRA].current.payload.items
+            leaves = {item.item_id for item in jira_items if item.implementation_required}
+            primaries = [item.primary_jira_item_id for item in payload.items]
+            if len(primaries) != len(set(primaries)) or set(primaries) != leaves: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
         visiting: set[UUID] = set(); visited: set[UUID] = set()
         def visit(item_id: UUID) -> None:
             if item_id in visiting: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)

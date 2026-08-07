@@ -9,7 +9,7 @@ from uuid import UUID, uuid5
 from pydantic import BaseModel
 
 from .artifacts import ArtifactRoot, ArtifactVersion
-from .canonical import artifact_hash, canonical_data, sha256
+from .canonical import artifact_hash, canonical_data, canonical_json, sha256
 from .enums import *  # noqa: F403
 from .errors import DomainError, ErrorCode
 from .models import *  # noqa: F403
@@ -20,6 +20,7 @@ from .state import AmbiguityState, ApprovalState, BindingState, CaseState, Deleg
 RESOLUTION_NAMESPACE = UUID("4a5cbf7e-bcff-5a85-b670-c9a38145704d")
 DRIFT_NAMESPACE = UUID("08f33a1b-f1af-56d7-8a0d-8ab2a87787f8")
 INTENT_NAMESPACE = UUID("b91c74fb-902f-57cb-8dc3-aa89dd91702c")
+TRACE_NAMESPACE = UUID("fd829f7d-1009-5ec8-83a2-7ae5f4a28609")
 ALLOWED_COMMANDS = {
     "create_case", "add_participant", "grant_delegation", "revoke_delegation", "register_source_artifact",
     "record_ambiguity_finding", "resolve_ambiguity_finding", "create_spec_package", "revise_spec_package",
@@ -197,7 +198,7 @@ class WorkflowService:
         else:
             for ref in command.resolution_source_refs: self._validate_source_ref(case, ref)
             name = {"case_id": case.id, "finding_id": finding.id, "schema": "ambiguity-resolution-v1", "scope": actor_scope.value}
-            record = ResolutionRecord(resolution_id=uuid5(RESOLUTION_NAMESPACE, canonical_data(name).__str__()), scope=actor_scope, actor_id=command.acting_actor_id, delegation_id=delegation.id if delegation else None, delegator_id=delegation.delegator_id if delegation else None, later_review_required=delegation.later_review_required if delegation else False, resolution_text=command.resolution_text, resolution_source_refs=command.resolution_source_refs, recorded_at=now)
+            record = ResolutionRecord(resolution_id=uuid5(RESOLUTION_NAMESPACE, canonical_json(name).decode("utf-8")), scope=actor_scope, actor_id=command.acting_actor_id, delegation_id=delegation.id if delegation else None, delegator_id=delegation.delegator_id if delegation else None, later_review_required=delegation.later_review_required if delegation else False, resolution_text=command.resolution_text, resolution_source_refs=command.resolution_source_refs, recorded_at=now)
             finding.resolutions.append(record)
         if scopes.issubset({r.scope for r in finding.resolutions}): finding.status = FindingStatus.RESOLVED; finding.resolved_at = now
         return self._finish(case, "resolve_ambiguity_finding", command, fp, AmbiguityFindingResult, finding_id=finding.id, status=finding.status, resolutions=finding.resolutions, resolved_at=finding.resolved_at)  # type: ignore[return-value]
@@ -652,10 +653,17 @@ class WorkflowService:
         return Lifecycle.UNKNOWN
 
     def _finding(self, case: CaseState, category: FindingCategory, components: list[Any], expected: Any, observed: Any) -> UUID:
-        name = canonical_data({"case_id": case.id, "category": category.value, "components": components, "schema": "drift-finding-v1"})
-        finding_id = uuid5(DRIFT_NAMESPACE, str(name))
-        case.metadata.setdefault("findings", {})[finding_id] = {"category": category, "expected": expected, "observed": observed, "active": True, "created_at": self._now()}
+        name = {"case_id": case.id, "category": category.value, "components": components, "schema": "drift-finding-v1"}
+        finding_id = uuid5(DRIFT_NAMESPACE, canonical_json(name).decode("utf-8"))
+        existing = case.metadata.setdefault("findings", {}).get(finding_id)
+        created_at = existing["created_at"] if existing else self._now()
+        case.metadata["findings"][finding_id] = {"category": category, "expected": expected, "observed": observed, "active": True, "created_at": created_at, "resolved_at": None, "affected": {"components": canonical_data(components)}}
         return finding_id
+
+    def _resolve_finding(self, case: CaseState, category: FindingCategory, components: list[Any]) -> None:
+        finding_id = uuid5(DRIFT_NAMESPACE, canonical_json({"case_id": case.id, "category": category.value, "components": components, "schema": "drift-finding-v1"}).decode("utf-8"))
+        item = case.metadata.get("findings", {}).get(finding_id)
+        if item and item["active"]: item["active"] = False; item["resolved_at"] = self._now()
 
     def submit_remote_snapshot(self, command: SubmitRemoteSnapshotCommand) -> SnapshotResult:
         case, replay, fp = self._begin("submit_remote_snapshot", command)
@@ -674,6 +682,7 @@ class WorkflowService:
         if observation.observation_kind == ObservationKind.NOT_FOUND:
             active.append(self._finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id], "FOUND", "NOT_FOUND"))
         else:
+            self._resolve_finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id])
             normalized = self._mapping_for(case, observation.system, observation.native_status)
             if normalized is None: active.append(self._finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, [case.policy.binding.model_dump(mode="json"), binding.id, observation.native_status], "mapped status", observation.native_status))
             lifecycle = self._lifecycle(observation.system, normalized, observation.owned_content)
@@ -685,6 +694,106 @@ class WorkflowService:
         result = SnapshotResult(observation_kind="FOUND_ACCEPTED" if observation.observation_kind == ObservationKind.FOUND else "NOT_FOUND_ACCEPTED", observation=observation, binding_id=binding.id, observation_sequence=binding.current_observation_sequence, active_finding_ids=sorted(active, key=lambda item: item.bytes), receipt=receipt)
         case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
         return result
+
+    def _authorize_read(self, case: CaseState, actor: Actor) -> None:
+        if actor != "SYSTEM" and actor not in case.participants: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
+
+    def _active_findings(self, case: CaseState) -> dict[UUID, dict[str, Any]]:
+        return {key: value for key, value in case.metadata.get("findings", {}).items() if value.get("active")}
+
+    def _pending_later_review(self, case: CaseState) -> list[UUID]:
+        pending: list[UUID] = []
+        for approval in case.approvals:
+            if approval.later_review_required:
+                direct = any(item.artifact_id == approval.artifact_id and item.artifact_version == approval.artifact_version and item.artifact_hash == approval.artifact_hash and item.scope == approval.scope and item.actor_id == approval.delegator_id for item in case.approvals)
+                if not direct: pending.append(approval.id)
+        for finding in case.ambiguities.values():
+            pending.extend(record.resolution_id for record in finding.resolutions if record.later_review_required and record.reviewed_at is None)
+        return sorted(pending, key=lambda item: item.bytes)
+
+    def _setup_stage(self, case: CaseState) -> SetupStage:
+        if case.package is None: return SetupStage.INTAKE
+        if case.package.current.state != PackageState.APPROVED.value: return SetupStage.PACKAGE_REVIEW
+        jira = case.plans.get(PlanTarget.JIRA)
+        if jira is None or jira.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}: return SetupStage.JIRA_REVIEW
+        if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value: return SetupStage.STATUS_REVIEW
+        jira_intents = [item for item in case.metadata.get("intents", {}).values() if item.system == System.JIRA and item.action != Action.TRANSITION_STATUS]
+        if any(not any(op.intent.intent_id == item.intent_id and op.status == OperationStatus.SUCCEEDED for op in case.operations.values()) for item in jira_intents): return SetupStage.JIRA_APPLY
+        github = case.plans.get(PlanTarget.GITHUB)
+        if github is None or github.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}: return SetupStage.GITHUB_REVIEW
+        github_intents = [item for item in case.metadata.get("intents", {}).values() if item.system == System.GITHUB and item.action != Action.TRANSITION_STATUS]
+        if any(not any(op.intent.intent_id == item.intent_id and op.status == OperationStatus.SUCCEEDED for op in case.operations.values()) for item in github_intents): return SetupStage.GITHUB_APPLY
+        return SetupStage.LINKED
+
+    def _trace_edges(self, case: CaseState) -> list[TraceEdge]:
+        if case.package is None: return []
+        relations: list[tuple[str, TraceEndpoint, TraceEndpoint]] = []
+        payload: SpecPackagePayload = case.package.current.payload
+        for item in [*payload.requirements, *payload.technical_decisions]:
+            unit = TraceEndpoint(kind="PACKAGE_UNIT", id=item.unit_id, version=case.package.current.version)
+            relations.append(("PACKAGE_CONTAINS", TraceEndpoint(kind="SPEC_PACKAGE", id=case.package.artifact_id, version=case.package.current.version), unit))
+            for ref in item.source_refs: relations.append(("SOURCE_SUPPORTS", TraceEndpoint(kind="SOURCE_ARTIFACT", id=ref.artifact_id, version=ref.version), unit))
+        for check in payload.acceptance_checks:
+            endpoint = TraceEndpoint(kind="ACCEPTANCE_CHECK", id=check.check_id, version=case.package.current.version)
+            relations.append(("PACKAGE_CONTAINS", TraceEndpoint(kind="SPEC_PACKAGE", id=case.package.artifact_id, version=case.package.current.version), endpoint))
+            for ref in check.source_refs: relations.append(("SOURCE_SUPPORTS", TraceEndpoint(kind="SOURCE_ARTIFACT", id=ref.artifact_id, version=ref.version), endpoint))
+        jira = case.plans.get(PlanTarget.JIRA)
+        if jira:
+            for item in jira.current.payload.items:
+                target = TraceEndpoint(kind="JIRA_ITEM", id=item.item_id, version=jira.current.version)
+                for source in item.source_unit_ids: relations.append(("UNIT_PROJECTS_TO", TraceEndpoint(kind="PACKAGE_UNIT", id=source, version=case.package.current.version), target))
+                relations.append(("ITEM_BINDS_PLAN", target, TraceEndpoint(kind="PROJECTION_PLAN", id=jira.artifact_id, version=jira.current.version)))
+        github = case.plans.get(PlanTarget.GITHUB)
+        if github and jira:
+            for item in github.current.payload.items:
+                relations.append(("JIRA_MAPS_GITHUB", TraceEndpoint(kind="JIRA_ITEM", id=item.primary_jira_item_id, version=jira.current.version), TraceEndpoint(kind="GITHUB_ITEM", id=item.item_id, version=github.current.version)))
+        edges = []
+        for kind, source, target in relations:
+            name = {"case_id": case.id, "edge_type": kind, "from": source.model_dump(mode="python", exclude_none=False), "schema": "trace-edge-v1", "to": target.model_dump(mode="python", exclude_none=False)}
+            edges.append(TraceEdge(id=uuid5(TRACE_NAMESPACE, canonical_json(name).decode("utf-8")), edge_type=kind, from_endpoint=source, to_endpoint=target))
+        return sorted(edges, key=lambda item: item.id.bytes)
+
+    def get_workflow_view(self, query: QueryOne) -> WorkflowView:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        stage = self._setup_stage(case); blockers = sorted(self._active_findings(case), key=lambda item: item.bytes); pending = self._pending_later_review(case)
+        return WorkflowView(case_id=case.id, revision=case.revision, current_package=case.package.binding if case.package else None, current_jira_plan=case.plans[PlanTarget.JIRA].binding if PlanTarget.JIRA in case.plans else None, current_github_plan=case.plans[PlanTarget.GITHUB].binding if PlanTarget.GITHUB in case.plans else None, current_status_policy=case.policy.binding if case.policy else None, setup_stage=stage, foundation_ready=stage == SetupStage.LINKED and not blockers and not pending, workflow_health=WorkflowHealth.BLOCKED if blockers else WorkflowHealth.HEALTHY, blocker_ids=blockers, pending_later_review_ids=pending)
+
+    def get_traceability_map(self, query: QueryOne) -> TraceabilityMap:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id); edges = self._trace_edges(case)
+        return TraceabilityMap(case_id=case.id, complete=not any(item["category"] == FindingCategory.TRACEABILITY_GAP for item in self._active_findings(case).values()), edges=edges)
+
+    def get_delivery_view(self, query: QueryOne) -> DeliveryView:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id); items: list[DeliveryItem] = []
+        for target, root in case.plans.items():
+            for plan_item in root.current.payload.items:
+                binding = next((value for value in case.bindings.values() if value.plan_id == root.artifact_id and value.item_id == plan_item.item_id), None)
+                latest = binding.snapshots[-1] if binding and binding.snapshots else None
+                normalized = self._mapping_for(case, System(target.value), latest.native_status) if latest and latest.native_status else None
+                if normalized is None: normalized = JiraStatus.UNKNOWN if target == PlanTarget.JIRA else GitHubStatus.UNKNOWN
+                lifecycle = self._lifecycle(System(target.value), normalized, latest.owned_content if latest else None)
+                pending = [intent.intent_id for intent in case.metadata.get("intents", {}).values() if UUID(str(intent.item_ref["item_id"])) == plan_item.item_id and not any(op.intent.intent_id == intent.intent_id and op.status == OperationStatus.SUCCEEDED for op in case.operations.values())]
+                items.append(DeliveryItem(system=System(target.value), plan_id=root.artifact_id, plan_version=root.current.version, item_id=plan_item.item_id, external_identity=binding.external_identity if binding else None, normalized_status=normalized, lifecycle_state=lifecycle, remote_revision=latest.remote_revision if latest else None, pending_intent_ids=sorted(pending, key=lambda item: item.bytes)))
+        items.sort(key=lambda item: (0 if item.system == System.JIRA else 1, item.item_id.bytes))
+        if any(item.normalized_status.value == "UNKNOWN" or item.lifecycle_state == Lifecycle.UNKNOWN for item in items): state = DeliveryState.UNKNOWN
+        elif self._active_findings(case) or any(item.system == System.JIRA and item.normalized_status in {JiraStatus.BLOCKED, JiraStatus.CANCELLED} for item in items): state = DeliveryState.BLOCKED
+        else:
+            jira_impl = {item.item_id for item in case.plans.get(PlanTarget.JIRA).current.payload.items if item.implementation_required} if PlanTarget.JIRA in case.plans else set()
+            done = bool(jira_impl) and all(item.normalized_status == JiraStatus.DONE for item in items if item.item_id in jira_impl)
+            state = DeliveryState.DONE if done and self.get_workflow_view(query).foundation_ready else DeliveryState.IN_PROGRESS if any(item.normalized_status.value in {"IN_PROGRESS", "DONE", "CLOSED"} for item in items) else DeliveryState.NOT_STARTED
+        return DeliveryView(delivery_state=state, delivery_complete=state == DeliveryState.DONE, items=items)
+
+    def list_drift_findings(self, query: UUIDListQuery) -> FindingPage:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        values = []
+        for finding_id, item in sorted(case.metadata.get("findings", {}).items(), key=lambda pair: pair[0].bytes):
+            if query.after_cursor and finding_id.bytes <= query.after_cursor.bytes: continue
+            values.append(DriftFinding(id=finding_id, case_id=case.id, category=item["category"], affected=item.get("affected", {}), expected_value=item["expected"], observed_value=item["observed"], active=item["active"], created_at=item["created_at"], resolved_at=item.get("resolved_at")))
+        page = values[:query.limit]; return FindingPage(items=page, next_cursor=page[-1].id if len(values) > query.limit else None)
+
+    def list_pending_operation_intents(self, query: UUIDListQuery) -> IntentPage:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        values = [item for item in case.metadata.get("intents", {}).values() if (query.after_cursor is None or item.intent_id.bytes > query.after_cursor.bytes) and not any(op.intent.intent_id == item.intent_id and op.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN, OperationStatus.SUCCEEDED} for op in case.operations.values())]
+        values.sort(key=lambda item: item.intent_id.bytes); page = values[:query.limit]; return IntentPage(items=page, next_cursor=page[-1].intent_id if len(values) > query.limit else None)
 
     def get_case_state(self, case_id: UUID) -> CaseState:
         """Internal test/repository bridge; never returns through a public read method."""

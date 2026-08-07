@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -24,8 +26,10 @@ class StrictModel(BaseModel):
     @field_validator("*")
     @classmethod
     def reject_bad_strings(cls, value: Any) -> Any:
-        if isinstance(value, str) and (value != value.strip() or "\x00" in value or any(ord(c) < 32 for c in value)):
-            raise ValueError("strings must be trimmed and contain no ASCII control characters")
+        if type(value) is str:
+            if value != value.strip() or "\x00" in value or any(ord(c) < 32 for c in value):
+                raise ValueError("strings must be trimmed and contain no ASCII control characters")
+            value = unicodedata.normalize("NFC", value)
         return value
 
 
@@ -39,6 +43,13 @@ class ArtifactBinding(StrictModel):
 class JsonPointer(StrictModel):
     kind: Literal["JSON_POINTER"] = "JSON_POINTER"
     pointer: Annotated[str, StringConstraints(strict=True, max_length=4096)]
+
+    @field_validator("pointer")
+    @classmethod
+    def valid_rfc6901(cls, value: str) -> str:
+        if not re.fullmatch(r"(?:[^~]|~[01])*", value):
+            raise ValueError("invalid RFC 6901 escape")
+        return value
 
 
 class LineRange(StrictModel):
@@ -56,6 +67,29 @@ class WorkbookRange(StrictModel):
     kind: Literal["WORKBOOK_RANGE"] = "WORKBOOK_RANGE"
     sheet: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=31)]
     a1: ShortText
+
+    @model_validator(mode="after")
+    def valid_workbook_range(self) -> WorkbookRange:
+        if any(char in self.sheet for char in "[]:*?/\\"):
+            raise ValueError("invalid worksheet name")
+        match = re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]{0,6})(?::([A-Z]{1,3})([1-9][0-9]{0,6}))?", self.a1)
+        if match is None:
+            raise ValueError("invalid A1 range")
+
+        def column_number(column: str) -> int:
+            result = 0
+            for char in column:
+                result = result * 26 + ord(char) - 64
+            return result
+
+        first_col, first_row = column_number(match[1]), int(match[2])
+        last_col = column_number(match[3]) if match[3] else first_col
+        last_row = int(match[4]) if match[4] else first_row
+        if first_col > 16_384 or last_col > 16_384 or first_row > 1_048_576 or last_row > 1_048_576:
+            raise ValueError("A1 range exceeds worksheet bounds")
+        if (last_row, last_col) < (first_row, first_col):
+            raise ValueError("A1 range must be ordered")
+        return self
 
 
 ExactLocation = Annotated[JsonPointer | LineRange | WorkbookRange, Field(discriminator="kind")]
@@ -77,6 +111,16 @@ class SourceArtifactIdentity(StrictModel):
     canonical_locator: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=4096)]
     content_hash: Hash
     registered_at: datetime | None = None
+
+    @field_validator("canonical_locator")
+    @classmethod
+    def canonical_posix_locator(cls, value: str) -> str:
+        if not value.startswith("/") or (value != "/" and value.endswith("/")):
+            raise ValueError("locator must be an absolute canonical POSIX path")
+        segments = value.split("/")[1:]
+        if any(segment in {"", ".", ".."} for segment in segments):
+            raise ValueError("locator contains a non-canonical segment")
+        return value
 
 
 class Requirement(StrictModel):
@@ -112,6 +156,19 @@ class SpecPackagePayload(StrictModel):
     technical_decisions: Annotated[list[TechnicalDecision], Field(min_length=1, max_length=500)]
     acceptance_checks: Annotated[list[AcceptanceCheck], Field(min_length=1, max_length=500)]
 
+    @model_validator(mode="after")
+    def unique_content_ids(self) -> SpecPackagePayload:
+        values = [item.unit_id for item in self.requirements]
+        values += [item.unit_id for item in self.technical_decisions]
+        values += [item.check_id for item in self.acceptance_checks]
+        if len(values) != len(set(values)):
+            raise ValueError("package content IDs must be unique")
+        unit_ids = {item.unit_id for item in [*self.requirements, *self.technical_decisions]}
+        for check in self.acceptance_checks:
+            if len(check.related_unit_ids) != len(set(check.related_unit_ids)) or not set(check.related_unit_ids).issubset(unit_ids):
+                raise ValueError("acceptance check references must be unique existing units")
+        return self
+
 
 class BodyAcceptanceCheck(StrictModel):
     check_id: UUID
@@ -128,6 +185,17 @@ class StructuredWorkBody(StrictModel):
     dependency_item_ids: Annotated[list[UUID], Field(max_length=500)] = []
     provisional: bool
     jira_key: ShortText | None = None
+
+    @model_validator(mode="after")
+    def unique_body_ids(self) -> StructuredWorkBody:
+        if len(self.source_unit_ids) != len(set(self.source_unit_ids)):
+            raise ValueError("source unit IDs must be unique")
+        if len(self.dependency_item_ids) != len(set(self.dependency_item_ids)):
+            raise ValueError("dependency item IDs must be unique")
+        check_ids = [item.check_id for item in self.acceptance_checks]
+        if len(check_ids) != len(set(check_ids)):
+            raise ValueError("acceptance check IDs must be unique")
+        return self
 
 
 class ProjectionItem(StrictModel):
@@ -151,12 +219,32 @@ class ProjectionPlanPayload(StrictModel):
     jira_plan_binding: ArtifactBinding | None = None
     items: Annotated[list[ProjectionItem], Field(min_length=1, max_length=500)]
 
+    @model_validator(mode="after")
+    def target_shape(self) -> ProjectionPlanPayload:
+        item_ids = [item.item_id for item in self.items]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("projection item IDs must be unique")
+        if self.target == PlanTarget.JIRA:
+            if self.project_key is None or not re.fullmatch(r"[A-Z][A-Z0-9]{1,9}", self.project_key) or self.jira_plan_binding is not None:
+                raise ValueError("Jira plan requires only a canonical project key")
+        elif self.project_key is not None or self.jira_plan_binding is None:
+            raise ValueError("GitHub plan requires only a Jira-plan binding")
+        return self
+
 
 class NativeStatusMapping(StrictModel):
     mapping_id: UUID
     system: System
     native_status: ShortText
     normalized_status: JiraStatus | GitHubStatus
+
+    @model_validator(mode="after")
+    def matching_system(self) -> NativeStatusMapping:
+        if self.system == System.JIRA and not isinstance(self.normalized_status, JiraStatus):
+            raise ValueError("Jira mapping requires JiraStatus")
+        if self.system == System.GITHUB and not isinstance(self.normalized_status, GitHubStatus):
+            raise ValueError("GitHub mapping requires GitHubStatus")
+        return self
 
 
 class StatusCondition(StrictModel):
@@ -173,10 +261,35 @@ class StatusRule(StrictModel):
     target_normalized_status: JiraStatus | GitHubStatus
     all_of: Annotated[list[StatusCondition], Field(min_length=1, max_length=4)]
 
+    @model_validator(mode="after")
+    def closed_rule_shape(self) -> StatusRule:
+        if (self.selector == Selector.ITEM_IDS) != bool(self.item_ids):
+            raise ValueError("ITEM_IDS selector requires nonempty item_ids only")
+        if len(self.item_ids) != len(set(self.item_ids)):
+            raise ValueError("item_ids must be unique")
+        if self.target_system == System.JIRA:
+            if not isinstance(self.target_normalized_status, JiraStatus) or self.target_normalized_status == JiraStatus.UNKNOWN:
+                raise ValueError("Jira rule requires a non-UNKNOWN JiraStatus")
+        elif not isinstance(self.target_normalized_status, GitHubStatus) or self.target_normalized_status == GitHubStatus.UNKNOWN:
+            raise ValueError("GitHub rule requires a non-UNKNOWN GitHubStatus")
+        condition_keys = [condition.model_dump_json() for condition in self.all_of]
+        if len(condition_keys) != len(set(condition_keys)):
+            raise ValueError("status conditions must be unique")
+        return self
+
 
 class StatusPolicyPayload(StrictModel):
     mappings: Annotated[list[NativeStatusMapping], Field(min_length=1, max_length=500)]
     rules: Annotated[list[StatusRule], Field(min_length=1, max_length=1000)]
+
+    @model_validator(mode="after")
+    def unique_policy_rows(self) -> StatusPolicyPayload:
+        mapping_ids = [item.mapping_id for item in self.mappings]
+        rule_ids = [item.rule_id for item in self.rules]
+        pairs = [(item.system, item.native_status) for item in self.mappings]
+        if len(mapping_ids) != len(set(mapping_ids)) or len(rule_ids) != len(set(rule_ids)) or len(pairs) != len(set(pairs)):
+            raise ValueError("status mappings and rules must be unique")
+        return self
 
 
 class JiraIdentity(StrictModel):
@@ -191,7 +304,8 @@ class GitHubIdentity(StrictModel):
 
     @model_validator(mode="after")
     def canonical_url(self) -> GitHubIdentity:
-        if self.repository.lower() != self.repository or self.html_url != f"https://github.com/{self.repository}/issues/{self.issue_number}":
+        repository_pattern = r"^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9._-]{1,100}$"
+        if not re.fullmatch(repository_pattern, self.repository) or self.html_url != f"https://github.com/{self.repository}/issues/{self.issue_number}":
             raise ValueError("GitHub identity must use the canonical repository issue URL")
         return self
 
@@ -243,8 +357,25 @@ class GrantDelegationCommand(CommandBase):
     command_names: Annotated[list[ShortText], Field(min_length=1, max_length=25)]
     artifact_kind: ArtifactKind | None = None; artifact_id: UUID | None = None
     valid_from: datetime; valid_until: datetime; later_review_required: bool
+
+    @model_validator(mode="after")
+    def closed_delegation_shape(self) -> GrantDelegationCommand:
+        if self.valid_from.tzinfo is None or self.valid_until.tzinfo is None or self.valid_from > self.valid_until:
+            raise ValueError("delegation bounds must be ordered timezone-aware instants")
+        if len(self.command_names) != len(set(self.command_names)):
+            raise ValueError("delegated commands must be unique")
+        if (self.artifact_kind is None) != (self.artifact_id is None):
+            raise ValueError("artifact kind and ID must be supplied together")
+        return self
 class RevokeDelegationCommand(CommandBase): delegation_id: UUID
-class RegisterSourceArtifactCommand(CommandBase): identity: SourceArtifactIdentity
+class RegisterSourceArtifactCommand(CommandBase):
+    identity: SourceArtifactIdentity
+
+    @model_validator(mode="after")
+    def unregistered_identity(self) -> RegisterSourceArtifactCommand:
+        if self.identity.registered_at is not None:
+            raise ValueError("registered_at is service generated")
+        return self
 class RecordAmbiguityFindingCommand(CommandBase):
     finding_id: UUID; category: AmbiguityCategory; domain: Domain; severity: Severity
     evidence_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=100)]; clarification_question: Statement

@@ -4,23 +4,24 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import (
-    Boolean, CheckConstraint, Column, ForeignKey, Index, Integer, MetaData, String, Table, Text,
+    Boolean, CHAR, CheckConstraint, Column, ForeignKey, ForeignKeyConstraint, Index, Integer, MetaData, String, Table, Text,
     UniqueConstraint, create_engine, event, insert, select, update,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.types import TypeDecorator
 from pydantic import TypeAdapter
 
 from .artifacts import ArtifactRoot, ArtifactVersion
-from .canonical import canonical_json
+from .canonical import canonical_json, sha256
 from .enums import *  # noqa: F403
 from .models import *  # noqa: F403
-from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState
+from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState, OperationState
 
 
 class UTCText(TypeDecorator):
@@ -34,7 +35,7 @@ class UTCText(TypeDecorator):
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc) if value else None
 
 
-UUIDText = String(36); HashText = String(64); JSONText = Text; EnumText = String(64)
+UUIDText = CHAR(36); HashText = CHAR(64); JSONText = Text; EnumText = Text
 metadata = MetaData()
 
 
@@ -67,6 +68,50 @@ remote_snapshots = owned("remote_snapshots", Column("binding_id", UUIDText, prim
 traceability_edges = owned("traceability_edges", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("edge_type", EnumText, nullable=False), Column("from_kind", EnumText, nullable=False), Column("from_id", UUIDText, nullable=False), Column("from_version", Integer), Column("to_kind", EnumText, nullable=False), Column("to_id", UUIDText, nullable=False), Column("to_version", Integer), Column("created_at", UTCText(), nullable=False), UniqueConstraint("case_id", "edge_type", "from_kind", "from_id", "from_version", "to_kind", "to_id", "to_version"))
 drift_findings = owned("drift_findings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("category", EnumText, nullable=False), Column("affected_binding", JSONText, nullable=False), Column("expected_value", JSONText, nullable=False), Column("observed_value", JSONText, nullable=False), Column("active", Boolean, nullable=False), Column("created_at", UTCText(), nullable=False), Column("resolved_at", UTCText()))
 audit_events = owned("audit_events", Column("event_id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("case_sequence", Integer, nullable=False), Column("command_id", UUIDText, nullable=False), Column("command_name", Text, nullable=False), Column("command_fingerprint", HashText, nullable=False), Column("actor", Text, nullable=False), Column("occurred_at", UTCText(), nullable=False), Column("target_ids", JSONText, nullable=False), Column("before_case_revision", Integer, nullable=False), Column("after_case_revision", Integer, nullable=False), Column("metadata", JSONText, nullable=False), Column("result", JSONText, nullable=False), UniqueConstraint("case_id", "case_sequence"), UniqueConstraint("case_id", "command_id"), CheckConstraint("case_sequence = after_case_revision"))
+
+# Relationally expressible references are composite and case-scoped.  Cyclic
+# root/current-version constraints are deferred so a root and version can be
+# inserted atomically in either statement order within one unit of work.
+spec_packages.append_constraint(ForeignKeyConstraint(["id", "current_version"], ["spec_package_versions.package_id", "spec_package_versions.version"], ondelete="RESTRICT", deferrable=True, initially="DEFERRED"))
+spec_package_versions.append_constraint(ForeignKeyConstraint(["package_id", "case_id"], ["spec_packages.id", "spec_packages.case_id"], ondelete="RESTRICT", deferrable=True, initially="DEFERRED"))
+for table in (spec_requirements, acceptance_checks):
+    table.append_constraint(ForeignKeyConstraint(["package_id", "package_version", "case_id"], ["spec_package_versions.package_id", "spec_package_versions.version", "spec_package_versions.case_id"], ondelete="RESTRICT"))
+technical_decisions.append_constraint(ForeignKeyConstraint(["package_id", "package_version", "case_id"], ["spec_package_versions.package_id", "spec_package_versions.version", "spec_package_versions.case_id"], ondelete="RESTRICT"))
+technical_decisions.append_constraint(ForeignKeyConstraint(["provisional_delegation_id", "case_id"], ["delegations.id", "delegations.case_id"], ondelete="RESTRICT"))
+
+projection_plans.append_constraint(ForeignKeyConstraint(["id", "current_version"], ["projection_plan_versions.plan_id", "projection_plan_versions.version"], ondelete="RESTRICT", deferrable=True, initially="DEFERRED"))
+projection_plan_versions.append_constraint(ForeignKeyConstraint(["plan_id", "case_id"], ["projection_plans.id", "projection_plans.case_id"], ondelete="RESTRICT", deferrable=True, initially="DEFERRED"))
+projection_plan_versions.append_constraint(UniqueConstraint("plan_id", "version", "case_id"))
+projection_plan_versions.append_constraint(ForeignKeyConstraint(["package_id", "package_version", "case_id"], ["spec_package_versions.package_id", "spec_package_versions.version", "spec_package_versions.case_id"], ondelete="RESTRICT"))
+projection_plan_versions.append_constraint(ForeignKeyConstraint(["jira_plan_id", "jira_plan_version", "case_id"], ["projection_plan_versions.plan_id", "projection_plan_versions.version", "projection_plan_versions.case_id"], ondelete="RESTRICT"))
+projection_items.append_constraint(ForeignKeyConstraint(["plan_id", "plan_version", "case_id"], ["projection_plan_versions.plan_id", "projection_plan_versions.version", "projection_plan_versions.case_id"], ondelete="RESTRICT"))
+projection_items.append_constraint(ForeignKeyConstraint(["plan_id", "plan_version", "parent_item_id"], ["projection_items.plan_id", "projection_items.plan_version", "projection_items.item_id"], ondelete="RESTRICT"))
+projection_item_sources.append_constraint(ForeignKeyConstraint(["plan_id", "plan_version", "item_id"], ["projection_items.plan_id", "projection_items.plan_version", "projection_items.item_id"], ondelete="RESTRICT"))
+projection_dependencies.append_constraint(ForeignKeyConstraint(["plan_id", "plan_version", "item_id"], ["projection_items.plan_id", "projection_items.plan_version", "projection_items.item_id"], ondelete="RESTRICT"))
+projection_dependencies.append_constraint(ForeignKeyConstraint(["plan_id", "plan_version", "depends_on_item_id"], ["projection_items.plan_id", "projection_items.plan_version", "projection_items.item_id"], ondelete="RESTRICT"))
+
+status_policies.append_constraint(ForeignKeyConstraint(["id", "current_version"], ["status_policy_versions.policy_id", "status_policy_versions.version"], ondelete="RESTRICT", deferrable=True, initially="DEFERRED"))
+status_policy_versions.append_constraint(ForeignKeyConstraint(["policy_id", "case_id"], ["status_policies.id", "status_policies.case_id"], ondelete="RESTRICT", deferrable=True, initially="DEFERRED"))
+status_policy_versions.append_constraint(UniqueConstraint("policy_id", "version", "case_id"))
+approvals.append_constraint(ForeignKeyConstraint(["delegation_id", "case_id"], ["delegations.id", "delegations.case_id"], ondelete="RESTRICT"))
+external_operations.append_constraint(ForeignKeyConstraint(["plan_id", "plan_version", "case_id"], ["projection_plan_versions.plan_id", "projection_plan_versions.version", "projection_plan_versions.case_id"], ondelete="RESTRICT"))
+external_operations.append_constraint(ForeignKeyConstraint(["status_policy_id", "status_policy_version", "case_id"], ["status_policy_versions.policy_id", "status_policy_versions.version", "status_policy_versions.case_id"], ondelete="RESTRICT"))
+external_operation_attempts.append_constraint(ForeignKeyConstraint(["operation_id", "case_id"], ["external_operations.id", "external_operations.case_id"], ondelete="RESTRICT"))
+external_bindings.append_constraint(ForeignKeyConstraint(["projection_plan_id", "case_id"], ["projection_plans.id", "projection_plans.case_id"], ondelete="RESTRICT"))
+remote_snapshots.append_constraint(ForeignKeyConstraint(["binding_id", "case_id"], ["external_bindings.id", "external_bindings.case_id"], ondelete="RESTRICT"))
+remote_snapshots.append_constraint(ForeignKeyConstraint(["operation_id", "case_id"], ["external_operations.id", "external_operations.case_id"], ondelete="RESTRICT"))
+remote_snapshots.append_constraint(ForeignKeyConstraint(["status_policy_id", "status_policy_version", "case_id"], ["status_policy_versions.policy_id", "status_policy_versions.version", "status_policy_versions.case_id"], ondelete="RESTRICT"))
+for table in (traceability_edges, drift_findings):
+    table.append_constraint(ForeignKeyConstraint(["case_id"], ["cases.id"], ondelete="RESTRICT"))
+
+delegations.append_constraint(CheckConstraint("(artifact_kind IS NULL) = (artifact_id IS NULL)"))
+ambiguity_findings.append_constraint(CheckConstraint("(status = 'OPEN' AND resolved_at IS NULL) OR (status = 'RESOLVED' AND resolved_at IS NOT NULL)"))
+technical_decisions.append_constraint(CheckConstraint("(provisional = 1 AND provisional_delegation_id IS NOT NULL) OR (provisional = 0 AND provisional_delegation_id IS NULL)"))
+projection_plan_versions.append_constraint(CheckConstraint("(target = 'JIRA' AND project_key IS NOT NULL AND jira_plan_id IS NULL AND jira_plan_version IS NULL AND jira_plan_hash IS NULL) OR (target = 'GITHUB' AND project_key IS NULL AND jira_plan_id IS NOT NULL AND jira_plan_version IS NOT NULL AND jira_plan_hash IS NOT NULL)"))
+external_operation_attempts.append_constraint(CheckConstraint("(status = 'PENDING' AND completed_at IS NULL) OR (status <> 'PENDING' AND completed_at IS NOT NULL)"))
+remote_snapshots.append_constraint(CheckConstraint("(observation_kind = 'FOUND' AND remote_revision IS NOT NULL AND native_status IS NOT NULL AND owned_content IS NOT NULL AND owned_content_hash IS NOT NULL) OR (observation_kind = 'NOT_FOUND' AND remote_revision IS NULL AND native_status IS NULL AND normalized_status_at_acceptance IS NULL AND lifecycle_at_acceptance IS NULL AND owned_content IS NULL AND owned_content_hash IS NULL)"))
+drift_findings.append_constraint(CheckConstraint("(active = 1 AND resolved_at IS NULL) OR (active = 0 AND resolved_at IS NOT NULL)"))
+audit_events.append_constraint(CheckConstraint("before_case_revision >= 0 AND before_case_revision <= 9223372036854775807"))
 
 Index("ix_delegations_case_delegate_revoked", delegations.c.case_id, delegations.c.delegate_id, delegations.c.revoked_at)
 Index("ix_ambiguity_case_status_severity", ambiguity_findings.c.case_id, ambiguity_findings.c.status, ambiguity_findings.c.severity)
@@ -106,33 +151,276 @@ class SqlAlchemyStore:
 
     def _hydrate_case(self, connection, case: CaseState) -> None:
         """Hydrate persisted rows only through their public Pydantic schemas."""
-        cid = str(case.id); refs = TypeAdapter(list[SourceRef]); resolutions = TypeAdapter(list[ResolutionRecord])
+        cid = str(case.id)
+        refs = TypeAdapter(list[SourceRef])
+        resolutions = TypeAdapter(list[ResolutionRecord])
+        identity_type = TypeAdapter(JiraIdentity | GitHubIdentity)
+
+        def artifact_binding(kind: ArtifactKind, root: ArtifactRoot, version: int) -> ArtifactBinding:
+            stored = next(item for item in root.versions if item.version == version)
+            return ArtifactBinding(artifact_kind=kind, artifact_id=root.artifact_id, version=version, semantic_hash=stored.semantic_hash)
+
         for row in connection.execute(select(delegations).where(delegations.c.case_id == cid)).mappings():
-            item = DelegationState(UUID(row["id"]), UUID(row["delegator_id"]), UUID(row["delegate_id"]), Domain(row["domain"]), frozenset(json.loads(row["command_names"])), row["artifact_kind"], UUID(row["artifact_id"]) if row["artifact_id"] else None, row["valid_from"], row["valid_until"], bool(row["later_review_required"]), row["created_at"], row["revoked_at"]); case.delegations[item.id] = item
+            item = DelegationState(
+                UUID(row["id"]), UUID(row["delegator_id"]), UUID(row["delegate_id"]), Domain(row["domain"]),
+                frozenset(json.loads(row["command_names"])), row["artifact_kind"], UUID(row["artifact_id"]) if row["artifact_id"] else None,
+                row["valid_from"], row["valid_until"], bool(row["later_review_required"]), row["created_at"], row["revoked_at"],
+            )
+            case.delegations[item.id] = item
+
         for row in connection.execute(select(source_artifacts).where(source_artifacts.c.case_id == cid)).mappings():
-            item = SourceArtifactIdentity(artifact_id=UUID(row["artifact_id"]), case_id=case.id, type=SourceArtifactType(row["type"]), version=row["version"], media_type=row["media_type"], canonical_locator=row["canonical_locator"], content_hash=row["content_hash"], registered_at=row["registered_at"]); case.sources[(item.artifact_id, item.version)] = item
+            item = SourceArtifactIdentity(
+                artifact_id=UUID(row["artifact_id"]), case_id=case.id, type=SourceArtifactType(row["type"]), version=row["version"],
+                media_type=row["media_type"], canonical_locator=row["canonical_locator"], content_hash=row["content_hash"], registered_at=row["registered_at"],
+            )
+            case.sources[(item.artifact_id, item.version)] = item
+
         for row in connection.execute(select(ambiguity_findings).where(ambiguity_findings.c.case_id == cid)).mappings():
-            item = AmbiguityState(UUID(row["id"]), row["category"], Domain(row["domain"]), row["severity"], refs.validate_json(row["evidence_refs"]), row["clarification_question"], row["created_at"], FindingStatus(row["status"]), resolutions.validate_json(row["resolutions"]), row["resolved_at"]); case.ambiguities[item.id] = item
+            item = AmbiguityState(
+                UUID(row["id"]), row["category"], Domain(row["domain"]), row["severity"], refs.validate_json(row["evidence_refs"]),
+                row["clarification_question"], row["created_at"], FindingStatus(row["status"]), resolutions.validate_json(row["resolutions"]), row["resolved_at"],
+            )
+            case.ambiguities[item.id] = item
+
         package = connection.execute(select(spec_packages).where(spec_packages.c.case_id == cid)).mappings().one_or_none()
         if package:
             root = ArtifactRoot(ArtifactKind.SPEC_PACKAGE, UUID(package["id"]))
-            for version in connection.execute(select(spec_package_versions).where(spec_package_versions.c.package_id == package["id"]).order_by(spec_package_versions.c.version)).mappings():
-                reqs = [Requirement(unit_id=UUID(r["unit_id"]), statement=r["statement"], domain=Domain(r["domain"]), delivery_required=bool(r["delivery_required"]), source_refs=refs.validate_json(r["source_refs"])) for r in connection.execute(select(spec_requirements).where(spec_requirements.c.package_id == package["id"], spec_requirements.c.package_version == version["version"])).mappings()]
-                decisions = [TechnicalDecision(unit_id=UUID(r["unit_id"]), statement=r["statement"], domain=Domain(r["domain"]), delivery_required=bool(r["delivery_required"]), provisional=bool(r["provisional"]), provisional_delegation_id=UUID(r["provisional_delegation_id"]) if r["provisional_delegation_id"] else None, source_refs=refs.validate_json(r["source_refs"])) for r in connection.execute(select(technical_decisions).where(technical_decisions.c.package_id == package["id"], technical_decisions.c.package_version == version["version"])).mappings()]
-                checks = [AcceptanceCheck(check_id=UUID(r["check_id"]), statement=r["statement"], domain=Domain(r["domain"]), related_unit_ids=[UUID(value) for value in json.loads(r["related_unit_ids"])], source_refs=refs.validate_json(r["source_refs"])) for r in connection.execute(select(acceptance_checks).where(acceptance_checks.c.package_id == package["id"], acceptance_checks.c.package_version == version["version"])).mappings()]
-                root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], SpecPackagePayload(requirements=reqs, technical_decisions=decisions, acceptance_checks=checks), version["state"]))
+            versions = connection.execute(
+                select(spec_package_versions).where(spec_package_versions.c.package_id == package["id"]).order_by(spec_package_versions.c.version)
+            ).mappings()
+            for version in versions:
+                criteria = (spec_requirements.c.package_id == package["id"], spec_requirements.c.package_version == version["version"])
+                reqs = [
+                    Requirement(unit_id=UUID(row["unit_id"]), statement=row["statement"], domain=Domain(row["domain"]), delivery_required=bool(row["delivery_required"]), source_refs=refs.validate_json(row["source_refs"]))
+                    for row in connection.execute(select(spec_requirements).where(*criteria)).mappings()
+                ]
+                decisions = [
+                    TechnicalDecision(
+                        unit_id=UUID(row["unit_id"]), statement=row["statement"], domain=Domain(row["domain"]), delivery_required=bool(row["delivery_required"]),
+                        provisional=bool(row["provisional"]), provisional_delegation_id=UUID(row["provisional_delegation_id"]) if row["provisional_delegation_id"] else None,
+                        source_refs=refs.validate_json(row["source_refs"]),
+                    )
+                    for row in connection.execute(select(technical_decisions).where(technical_decisions.c.package_id == package["id"], technical_decisions.c.package_version == version["version"])).mappings()
+                ]
+                checks = [
+                    AcceptanceCheck(
+                        check_id=UUID(row["check_id"]), statement=row["statement"], domain=Domain(row["domain"]),
+                        related_unit_ids=[UUID(value) for value in json.loads(row["related_unit_ids"])], source_refs=refs.validate_json(row["source_refs"]),
+                    )
+                    for row in connection.execute(select(acceptance_checks).where(acceptance_checks.c.package_id == package["id"], acceptance_checks.c.package_version == version["version"])).mappings()
+                ]
+                payload = SpecPackagePayload(requirements=reqs, technical_decisions=decisions, acceptance_checks=checks)
+                root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], payload, version["state"]))
             case.package = root
-        for row in connection.execute(select(approvals).where(approvals.c.case_id == cid)).mappings():
-            case.approvals.append(ApprovalState(UUID(row["id"]), row["artifact_kind"], UUID(row["artifact_id"]), row["artifact_version"], row["artifact_hash"], ApprovalScope(row["scope"]), UUID(row["actor_id"]), UUID(row["delegation_id"]) if row["delegation_id"] else None, None, bool(row["later_review_required"]), row["approved_at"]))
-        identity_type = TypeAdapter(JiraIdentity | GitHubIdentity)
-        for row in connection.execute(select(external_bindings).where(external_bindings.c.case_id == cid)).mappings():
-            identity = identity_type.validate_json(row["external_identity"]); item = BindingState(UUID(row["id"]), case.id, System(row["system"]), UUID(row["projection_plan_id"]), UUID(row["item_id"]), row["generation_key"], identity, row["current_plan_version"], row["current_observation_sequence"], row["confirmed_at"]); case.bindings[item.id] = item; case.metadata.setdefault("external_bindings", {})[item.item_id] = {"binding_id": item.id, "key": identity.key} if isinstance(identity, JiraIdentity) else {"binding_id": item.id, "identity": identity}
-        for row in connection.execute(select(drift_findings).where(drift_findings.c.case_id == cid)).mappings():
-            case.metadata.setdefault("findings", {})[UUID(row["id"])] = {"category": FindingCategory(row["category"]), "affected": json.loads(row["affected_binding"]), "expected": json.loads(row["expected_value"]), "observed": json.loads(row["observed_value"]), "active": bool(row["active"]), "created_at": row["created_at"], "resolved_at": row["resolved_at"]}
 
-    def save_case_and_audit(self, case: CaseState, *, command_name: str, command_id: UUID, fingerprint: str, actor: Any, occurred_at: datetime, result: Any) -> None:
+        for plan_row in connection.execute(select(projection_plans).where(projection_plans.c.case_id == cid)).mappings():
+            target = PlanTarget(plan_row["target"])
+            root = ArtifactRoot(ArtifactKind.PROJECTION_PLAN, UUID(plan_row["id"]))
+            version_rows = connection.execute(
+                select(projection_plan_versions).where(projection_plan_versions.c.plan_id == plan_row["id"]).order_by(projection_plan_versions.c.version)
+            ).mappings()
+            previous_items: dict[UUID, str] = {}
+            for version in version_rows:
+                items: list[ProjectionItem] = []
+                item_hashes: dict[UUID, str] = {}
+                rows = connection.execute(
+                    select(projection_items).where(projection_items.c.plan_id == plan_row["id"], projection_items.c.plan_version == version["version"])
+                ).mappings()
+                for row in rows:
+                    item_id = UUID(row["item_id"])
+                    sources = [
+                        UUID(value) for value in connection.execute(
+                            select(projection_item_sources.c.source_unit_id).where(
+                                projection_item_sources.c.plan_id == plan_row["id"], projection_item_sources.c.plan_version == version["version"],
+                                projection_item_sources.c.item_id == row["item_id"],
+                            )
+                        ).scalars()
+                    ]
+                    dependencies = [
+                        UUID(value) for value in connection.execute(
+                            select(projection_dependencies.c.depends_on_item_id).where(
+                                projection_dependencies.c.plan_id == plan_row["id"], projection_dependencies.c.plan_version == version["version"],
+                                projection_dependencies.c.item_id == row["item_id"],
+                            )
+                        ).scalars()
+                    ]
+                    kind = JiraKind(row["kind"]) if target == PlanTarget.JIRA else GitHubKind(row["kind"])
+                    items.append(ProjectionItem(
+                        item_id=item_id, kind=kind, domain=Domain(row["domain"]), title=row["title"],
+                        body=StructuredWorkBody.model_validate_json(row["body"]), source_unit_ids=sources,
+                        parent_item_id=UUID(row["parent_item_id"]) if row["parent_item_id"] else None,
+                        dependency_item_ids=dependencies, implementation_required=bool(row["implementation_required"]), repository=row["repository"],
+                        primary_jira_item_id=UUID(row["primary_jira_item_id"]) if row["primary_jira_item_id"] else None,
+                    ))
+                    item_hashes[item_id] = row["item_semantic_hash"]
+                package_binding = ArtifactBinding(
+                    artifact_kind=ArtifactKind.SPEC_PACKAGE, artifact_id=UUID(version["package_id"]),
+                    version=version["package_version"], semantic_hash=version["package_hash"],
+                )
+                jira_binding = None
+                if version["jira_plan_id"]:
+                    jira_binding = ArtifactBinding(
+                        artifact_kind=ArtifactKind.PROJECTION_PLAN, artifact_id=UUID(version["jira_plan_id"]),
+                        version=version["jira_plan_version"], semantic_hash=version["jira_plan_hash"],
+                    )
+                payload = ProjectionPlanPayload(
+                    package_binding=package_binding, target=target, project_key=version["project_key"], jira_plan_binding=jira_binding, items=items,
+                )
+                root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], payload, version["state"]))
+                case.metadata.setdefault("item_hashes", {})[(root.artifact_id, version["version"])] = item_hashes
+                current_items = {item.item_id: item_hashes[item.item_id] for item in items}
+                if previous_items:
+                    actions: dict[UUID, Action] = {}
+                    for item_id, digest in current_items.items():
+                        if item_id not in previous_items: actions[item_id] = Action.CREATE
+                        elif previous_items[item_id] != digest: actions[item_id] = Action.UPDATE
+                    for item_id in previous_items.keys() - current_items.keys():
+                        if any(binding.item_id == item_id for binding in case.bindings.values()): actions[item_id] = Action.RETIRE
+                    case.metadata.setdefault("reconciliation", {})[(root.artifact_id, version["version"])] = actions
+                previous_items = current_items
+            case.plans[target] = root
+
+        policy_row = connection.execute(select(status_policies).where(status_policies.c.case_id == cid)).mappings().one_or_none()
+        if policy_row:
+            root = ArtifactRoot(ArtifactKind.STATUS_POLICY, UUID(policy_row["id"]))
+            for version in connection.execute(select(status_policy_versions).where(status_policy_versions.c.policy_id == policy_row["id"]).order_by(status_policy_versions.c.version)).mappings():
+                payload = StatusPolicyPayload(
+                    mappings=TypeAdapter(list[NativeStatusMapping]).validate_json(version["mappings"]),
+                    rules=TypeAdapter(list[StatusRule]).validate_json(version["rules"]),
+                )
+                root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], payload, version["state"]))
+            case.policy = root
+
+        for row in connection.execute(select(approvals).where(approvals.c.case_id == cid)).mappings():
+            delegation = case.delegations.get(UUID(row["delegation_id"])) if row["delegation_id"] else None
+            case.approvals.append(ApprovalState(
+                UUID(row["id"]), row["artifact_kind"], UUID(row["artifact_id"]), row["artifact_version"], row["artifact_hash"], ApprovalScope(row["scope"]),
+                UUID(row["actor_id"]), delegation.id if delegation else None, delegation.delegator_id if delegation else None,
+                bool(row["later_review_required"]), row["approved_at"],
+            ))
+
+        for row in connection.execute(select(external_bindings).where(external_bindings.c.case_id == cid)).mappings():
+            identity = identity_type.validate_json(row["external_identity"])
+            item = BindingState(
+                UUID(row["id"]), case.id, System(row["system"]), UUID(row["projection_plan_id"]), UUID(row["item_id"]), row["generation_key"],
+                identity, row["current_plan_version"], row["current_observation_sequence"], row["confirmed_at"],
+            )
+            case.bindings[item.id] = item
+            case.metadata.setdefault("external_bindings", {})[item.item_id] = {"binding_id": item.id, "key": identity.key} if isinstance(identity, JiraIdentity) else {"binding_id": item.id, "identity": identity}
+
+        for binding in case.bindings.values():
+            rows = connection.execute(
+                select(remote_snapshots).where(remote_snapshots.c.binding_id == str(binding.id)).order_by(remote_snapshots.c.observation_sequence)
+            ).mappings()
+            for row in rows:
+                plan_root = next(root for root in case.plans.values() if root.artifact_id == binding.plan_id)
+                plan_binding = artifact_binding(ArtifactKind.PROJECTION_PLAN, plan_root, binding.current_plan_version)
+                policy_binding = artifact_binding(ArtifactKind.STATUS_POLICY, case.policy, row["status_policy_version"])
+                jira_binding = case.plans[PlanTarget.JIRA].binding if binding.system == System.GITHUB and PlanTarget.JIRA in case.plans else None
+                observation = RemoteObservation(
+                    observation_kind=ObservationKind(row["observation_kind"]), system=binding.system, external_identity=binding.external_identity,
+                    generation_key=binding.generation_key, package_binding=case.package.binding, plan_binding=plan_binding,
+                    jira_plan_binding=jira_binding, status_policy_binding=policy_binding, remote_revision=row["remote_revision"],
+                    expected_previous_remote_revision=row["expected_previous_remote_revision"], native_status=row["native_status"],
+                    owned_content=json.loads(row["owned_content"]) if row["owned_content"] else None,
+                )
+                binding.snapshots.append(observation)
+
+        for row in connection.execute(select(external_operations).where(external_operations.c.case_id == cid)).mappings():
+            attempt = connection.execute(
+                select(external_operation_attempts).where(external_operation_attempts.c.operation_id == row["id"]).order_by(external_operation_attempts.c.attempt.desc())
+            ).mappings().first()
+            request = json.loads(attempt["request"])
+            plan_root = next(root for root in case.plans.values() if root.artifact_id == UUID(row["plan_id"]))
+            plan_binding = artifact_binding(ArtifactKind.PROJECTION_PLAN, plan_root, row["plan_version"])
+            package_binding = case.package.binding
+            policy_binding = artifact_binding(ArtifactKind.STATUS_POLICY, case.policy, row["status_policy_version"])
+            jira_binding = case.plans[PlanTarget.JIRA].binding if row["system"] == System.GITHUB.value and PlanTarget.JIRA in case.plans else None
+            target_status = None
+            if row["target_normalized_status"]:
+                target_status = JiraStatus(row["target_normalized_status"]) if row["system"] == System.JIRA.value else GitHubStatus(row["target_normalized_status"])
+            intent = OperationIntent(
+                intent_id=UUID(row["intent_id"]), system=System(row["system"]), item_ref=json.loads(row["item_ref"]), action=Action(row["action"]), request=request,
+                package_binding=package_binding, plan_binding=plan_binding, jira_plan_binding=jira_binding, status_policy_binding=policy_binding,
+                request_owned_content_hash=row["request_owned_content_hash"], fingerprint=row["fingerprint"], expected=attempt["expected_remote_revision"],
+                target_normalized_status=target_status, contributing_rule_ids=[UUID(value) for value in json.loads(row["contributing_rule_ids"])],
+            )
+            confirmation = RemoteObservation.model_validate_json(row["confirmed_result"]) if row["confirmed_result"] else None
+            operation = OperationState(
+                UUID(row["id"]), intent, row["idempotency_key"], OperationStatus(row["status"]), row["current_attempt"],
+                row["created_at"], row["updated_at"], attempt["failure_code"], confirmation, row["confirmed_snapshot_sequence"], None,
+            )
+            case.operations[operation.id] = operation
+
+        for row in connection.execute(select(drift_findings).where(drift_findings.c.case_id == cid)).mappings():
+            case.metadata.setdefault("findings", {})[UUID(row["id"])] = {
+                "category": FindingCategory(row["category"]), "affected": json.loads(row["affected_binding"]),
+                "expected": json.loads(row["expected_value"]), "observed": json.loads(row["observed_value"]),
+                "active": bool(row["active"]), "created_at": row["created_at"], "resolved_at": row["resolved_at"],
+            }
+
+        for row in connection.execute(select(traceability_edges).where(traceability_edges.c.case_id == cid)).mappings():
+            edge = TraceEdge(
+                id=UUID(row["id"]), edge_type=row["edge_type"],
+                from_endpoint=TraceEndpoint(kind=row["from_kind"], id=UUID(row["from_id"]), version=row["from_version"]),
+                to_endpoint=TraceEndpoint(kind=row["to_kind"], id=UUID(row["to_id"]), version=row["to_version"]),
+            )
+            case.metadata.setdefault("trace_edges", {})[edge.id] = edge
+
+        result_models = {
+            "create_case": CaseResult, "add_participant": ParticipantResult, "grant_delegation": DelegationResult,
+            "revoke_delegation": DelegationResult, "register_source_artifact": SourceArtifactResult,
+            "record_ambiguity_finding": AmbiguityFindingResult, "resolve_ambiguity_finding": AmbiguityFindingResult,
+            "create_spec_package": SpecPackageResult, "revise_spec_package": SpecPackageResult, "mark_spec_package_ready": SpecPackageResult,
+            "approve_spec_package": ApprovalResult, "create_projection_plan": ProjectionPlanResult,
+            "revise_projection_plan": ProjectionPlanResult, "approve_projection_plan": ApprovalResult,
+            "create_status_policy": StatusPolicyResult, "revise_status_policy": StatusPolicyResult, "approve_status_policy": ApprovalResult,
+            "start_external_operation": OperationResult, "record_operation_result": OperationResult,
+            "reconcile_operation": OperationResult, "submit_remote_snapshot": SnapshotResult,
+        }
+        for row in connection.execute(select(audit_events).where(audit_events.c.case_id == cid).order_by(audit_events.c.case_sequence)).mappings():
+            result = result_models[row["command_name"]].model_validate_json(row["result"])
+            case.command_results[UUID(row["command_id"])] = (row["command_fingerprint"], result)
+            if isinstance(result, OperationResult) and result.operation_id in case.operations:
+                case.operations[result.operation_id].last_result = result
+
+        # Intents are deterministic derivatives; reconstruct them from current approved state.
+        if case.policy and case.policy.current.state == PolicyState.APPROVED.value:
+            from .service import WorkflowService
+            helper = object.__new__(WorkflowService)
+            helper.clock = type("HydrationClock", (), {"now": lambda _: case.created_at})()
+            helper._derive_content_intents(case)
+
+    def save_case_and_audit(self, case: CaseState, *, event_id: UUID, command_name: str, command_id: UUID, fingerprint: str, actor: Any, occurred_at: datetime, result: Any) -> None:
         result_json = result.model_dump(mode="json", exclude_none=False)
-        target = next((value for key, value in result_json.items() if key.endswith("_id") and key not in {"case_id", "command_id"}), case.id)
+        target_kinds = {
+            "create_case": "CASE", "add_participant": "PARTICIPANT", "grant_delegation": "DELEGATION", "revoke_delegation": "DELEGATION",
+            "register_source_artifact": "SOURCE_ARTIFACT", "record_ambiguity_finding": "AMBIGUITY_FINDING", "resolve_ambiguity_finding": "AMBIGUITY_FINDING",
+            "create_spec_package": "SPEC_PACKAGE", "revise_spec_package": "SPEC_PACKAGE", "mark_spec_package_ready": "SPEC_PACKAGE",
+            "create_projection_plan": "PROJECTION_PLAN", "revise_projection_plan": "PROJECTION_PLAN",
+            "create_status_policy": "STATUS_POLICY", "revise_status_policy": "STATUS_POLICY",
+            "approve_spec_package": "APPROVAL", "approve_projection_plan": "APPROVAL", "approve_status_policy": "APPROVAL",
+            "start_external_operation": "EXTERNAL_OPERATION", "record_operation_result": "EXTERNAL_OPERATION", "reconcile_operation": "EXTERNAL_OPERATION",
+            "submit_remote_snapshot": "REMOTE_SNAPSHOT",
+        }
+        if command_name == "create_case":
+            target = result_json["case_id"]
+        elif command_name == "register_source_artifact":
+            target = result_json["identity"]["artifact_id"]
+        elif "binding" in result_json:
+            target = result_json["binding"]["artifact_id"]
+        elif "artifact_binding" in result_json and "approval_id" not in result_json:
+            target = result_json["artifact_binding"]["artifact_id"]
+        else:
+            target = next((value for key, value in result_json.items() if key.endswith("_id") and key not in {"case_id", "command_id", "intent_id"}), str(case.id))
+        binding = result_json.get("binding") or result_json.get("artifact_binding")
+        audit_metadata = {
+            "target_kind": target_kinds[command_name],
+            "target_version": binding.get("version") if binding else None,
+            "target_hash": binding.get("semantic_hash") if binding else None,
+            "operation_attempt": result_json.get("attempt"),
+            "finding_categories": sorted({value["category"].value for value in case.metadata.get("findings", {}).values() if value.get("active")}),
+        }
         with self.engine.begin() as connection:
             existing = connection.execute(select(cases.c.id).where(cases.c.id == str(case.id))).scalar_one_or_none()
             values = {"revision": case.revision, "pm_actor_id": str(case.pm_actor_id), "dev_lead_actor_id": str(case.dev_lead_actor_id), "created_at": case.created_at}
@@ -142,11 +430,14 @@ class SqlAlchemyStore:
                 present = connection.execute(select(case_participants.c.actor_id).where(case_participants.c.case_id == str(case.id), case_participants.c.actor_id == str(participant))).scalar_one_or_none()
                 if present is None: connection.execute(insert(case_participants).values(case_id=str(case.id), actor_id=str(participant), created_at=case.created_at))
             self._save_domain(connection, case)
-            connection.execute(insert(audit_events).values(event_id=str(uuid4()), case_id=str(case.id), case_sequence=case.revision, command_id=str(command_id), command_name=command_name, command_fingerprint=fingerprint, actor=str(actor), occurred_at=occurred_at, target_ids=canonical_json([target]).decode(), before_case_revision=case.revision - 1, after_case_revision=case.revision, metadata="{}", result=canonical_json(result_json).decode()))
+            connection.execute(insert(audit_events).values(event_id=str(event_id), case_id=str(case.id), case_sequence=case.revision, command_id=str(command_id), command_name=command_name, command_fingerprint=fingerprint, actor=str(actor), occurred_at=occurred_at, target_ids=canonical_json([target]).decode(), before_case_revision=case.revision - 1, after_case_revision=case.revision, metadata=canonical_json(audit_metadata).decode(), result=canonical_json(result_json).decode()))
 
     @staticmethod
     def _replace(connection, table: Table, **values: Any) -> None:
-        connection.execute(insert(table).prefix_with("OR REPLACE").values(**values))
+        statement = sqlite_insert(table).values(**values)
+        primary_keys = [column.name for column in table.primary_key.columns]
+        updates = {key: statement.excluded[key] for key in values if key not in primary_keys}
+        connection.execute(statement.on_conflict_do_update(index_elements=primary_keys, set_=updates))
 
     def _save_domain(self, connection, case: CaseState) -> None:
         cid = str(case.id)
@@ -173,8 +464,29 @@ class SqlAlchemyStore:
                 payload = version.payload; jira = payload.jira_plan_binding
                 self._replace(connection, projection_plan_versions, plan_id=str(root.artifact_id), version=version.version, case_id=cid, target=target.value, project_key=payload.project_key, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, package_id=str(payload.package_binding.artifact_id), package_version=payload.package_binding.version, package_hash=payload.package_binding.semantic_hash, jira_plan_id=str(jira.artifact_id) if jira else None, jira_plan_version=jira.version if jira else None, jira_plan_hash=jira.semantic_hash if jira else None, retire_tombstones="[]", state=version.state, created_at=case.created_at)
                 hashes = case.metadata.get("item_hashes", {}).get((root.artifact_id, version.version), {})
-                for plan_item in payload.items:
+                remaining = {item.item_id: item for item in payload.items}
+                ordered_items = []
+                emitted: set[UUID] = set()
+                while remaining:
+                    ready = sorted(
+                        (
+                            item
+                            for item in remaining.values()
+                            if item.parent_item_id is None or item.parent_item_id in emitted
+                        ),
+                        key=lambda item: item.item_id.bytes,
+                    )
+                    if not ready:
+                        # Domain validation rejects hierarchy cycles; this keeps storage
+                        # deterministic if corrupted state reaches the persistence boundary.
+                        ready = sorted(remaining.values(), key=lambda item: item.item_id.bytes)
+                    for plan_item in ready:
+                        ordered_items.append(plan_item)
+                        emitted.add(plan_item.item_id)
+                        remaining.pop(plan_item.item_id)
+                for plan_item in ordered_items:
                     self._replace(connection, projection_items, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), case_id=cid, generation_key=plan_item.body.generation_key, kind=plan_item.kind.value, domain=plan_item.domain.value, title=plan_item.title, body=dump(plan_item.body.model_dump(mode="python")), parent_item_id=str(plan_item.parent_item_id) if plan_item.parent_item_id else None, implementation_required=plan_item.implementation_required, repository=plan_item.repository, primary_jira_item_id=str(plan_item.primary_jira_item_id) if plan_item.primary_jira_item_id else None, item_semantic_hash=hashes.get(plan_item.item_id, "0" * 64))
+                for plan_item in ordered_items:
                     for source in plan_item.source_unit_ids: self._replace(connection, projection_item_sources, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), source_unit_id=str(source), case_id=cid)
                     for dependency in plan_item.dependency_item_ids: self._replace(connection, projection_dependencies, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), depends_on_item_id=str(dependency), case_id=cid)
         if case.policy:
@@ -192,7 +504,38 @@ class SqlAlchemyStore:
             self._replace(connection, external_bindings, id=str(item.id), case_id=cid, system=item.system.value, projection_plan_id=str(item.plan_id), item_id=str(item.item_id), current_plan_version=item.current_plan_version, generation_key=item.generation_key, external_identity_key=identity_key, external_identity=dump(identity), current_observation_sequence=item.current_observation_sequence, confirmed_at=item.confirmed_at)
             for sequence, snapshot in enumerate(item.snapshots, 1):
                 policy = snapshot.status_policy_binding
-                self._replace(connection, remote_snapshots, binding_id=str(item.id), observation_sequence=sequence, observation_kind=snapshot.observation_kind.value, case_id=cid, operation_id=None, status_policy_id=str(policy.artifact_id), status_policy_version=policy.version, status_policy_hash=policy.semantic_hash, remote_revision=snapshot.remote_revision, expected_previous_remote_revision=snapshot.expected_previous_remote_revision, native_status=snapshot.native_status, normalized_status_at_acceptance=None, lifecycle_at_acceptance=None, owned_content=dump(snapshot.owned_content) if snapshot.owned_content else None, owned_content_hash=None, observed_at=item.confirmed_at)
+                normalized = None
+                lifecycle = None
+                owned_hash = None
+                if snapshot.observation_kind == ObservationKind.FOUND:
+                    normalized = next(
+                        (mapping.normalized_status for mapping in case.policy.current.payload.mappings if mapping.system == snapshot.system and mapping.native_status == snapshot.native_status),
+                        JiraStatus.UNKNOWN if snapshot.system == System.JIRA else GitHubStatus.UNKNOWN,
+                    )
+                    labels = snapshot.owned_content.get("labels", [])
+                    if "specops-retired" in labels and ((snapshot.system == System.JIRA and normalized == JiraStatus.CANCELLED) or (snapshot.system == System.GITHUB and normalized == GitHubStatus.CLOSED)):
+                        lifecycle = Lifecycle.RETIRED
+                    elif "specops-retired" not in labels and normalized.value != "UNKNOWN":
+                        lifecycle = Lifecycle.ACTIVE
+                    else:
+                        lifecycle = Lifecycle.UNKNOWN
+                    owned_hash = sha256(snapshot.owned_content)
+                self._replace(connection, remote_snapshots, binding_id=str(item.id), observation_sequence=sequence, observation_kind=snapshot.observation_kind.value, case_id=cid, operation_id=None, status_policy_id=str(policy.artifact_id), status_policy_version=policy.version, status_policy_hash=policy.semantic_hash, remote_revision=snapshot.remote_revision, expected_previous_remote_revision=snapshot.expected_previous_remote_revision, native_status=snapshot.native_status, normalized_status_at_acceptance=normalized.value if normalized else None, lifecycle_at_acceptance=lifecycle.value if lifecycle else None, owned_content=dump(snapshot.owned_content) if snapshot.owned_content else None, owned_content_hash=owned_hash, observed_at=item.confirmed_at)
+        for edge in case.metadata.get("trace_edges", {}).values():
+            self._replace(
+                connection,
+                traceability_edges,
+                id=str(edge.id),
+                case_id=cid,
+                edge_type=edge.edge_type,
+                from_kind=edge.from_endpoint.kind,
+                from_id=str(edge.from_endpoint.id),
+                from_version=edge.from_endpoint.version,
+                to_kind=edge.to_endpoint.kind,
+                to_id=str(edge.to_endpoint.id),
+                to_version=edge.to_endpoint.version,
+                created_at=case.created_at,
+            )
         for finding_id, item in case.metadata.get("findings", {}).items():
             self._replace(connection, drift_findings, id=str(finding_id), case_id=cid, category=item["category"].value, affected_binding=dump(item.get("affected", {})), expected_value=dump(item["expected"]), observed_value=dump(item["observed"]), active=item["active"], created_at=item["created_at"], resolved_at=item.get("resolved_at"))
 

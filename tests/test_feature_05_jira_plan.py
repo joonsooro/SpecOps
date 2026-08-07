@@ -2,11 +2,12 @@ from uuid import uuid4
 
 import pytest
 
-from specops_workflow.enums import ApprovalScope, Domain, JiraKind, PlanState, PlanTarget
+from specops_workflow.enums import ApprovalScope, Domain, JiraKind, PlanState, PlanTarget, SetupStage
 from specops_workflow.errors import DomainError, ErrorCode
 from specops_workflow.models import (
     ApproveProjectionPlanCommand, ApproveSpecPackageCommand, CreateProjectionPlanCommand, CreateSpecPackageCommand,
     MarkSpecPackageReadyCommand, ProjectionItem, ProjectionPlanPayload, StructuredWorkBody,
+    QueryOne,
 )
 
 from test_feature_04_package import fixture
@@ -42,14 +43,13 @@ def test_jira_hierarchy_coverage_and_approval_scopes():
     assert created.state == PlanState.READY
     business = service.approve_projection_plan(ApproveProjectionPlanCommand(command_id=uuid4(), case_id=case_id, acting_actor_id=pm, expected_case_revision=created.receipt.revision, expected_artifact_id=plan_id, expected_artifact_version=1, expected_artifact_hash=created.binding.semantic_hash, scope=ApprovalScope.BUSINESS))
     service.approve_projection_plan(ApproveProjectionPlanCommand(command_id=uuid4(), case_id=case_id, acting_actor_id=dev, expected_case_revision=business.receipt.revision, expected_artifact_id=plan_id, expected_artifact_version=1, expected_artifact_hash=created.binding.semantic_hash, scope=ApprovalScope.TECHNICAL))
-    assert service.get_case_state(case_id).plans[PlanTarget.JIRA].current.state == PlanState.APPROVED
+    assert service.get_workflow_view(QueryOne(case_id=case_id, acting_actor_id=pm)).setup_stage == SetupStage.STATUS_REVIEW
 
 
 def test_dependency_cycle_rejected_without_revision():
     service, case_id, _, _, revision, package_payload, binding = approved_case()
-    before = service.get_case_state(case_id).revision
+    before = service.get_workflow_view(QueryOne(case_id=case_id, acting_actor_id="SYSTEM")).revision
     with pytest.raises(DomainError) as caught:
         service.create_projection_plan(CreateProjectionPlanCommand(command_id=uuid4(), case_id=case_id, acting_actor_id="SYSTEM", expected_case_revision=revision, plan_id=uuid4(), content_schema_version=1, hash_schema_version=1, payload=jira_payload(case_id, package_payload, binding, cycle=True)))
     assert caught.value.code == ErrorCode.INVALID_PROJECTION_PLAN
-    assert service.get_case_state(case_id).revision == before
-
+    assert service.get_workflow_view(QueryOne(case_id=case_id, acting_actor_id="SYSTEM")).revision == before

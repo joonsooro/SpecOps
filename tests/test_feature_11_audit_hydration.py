@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError
 
 from specops_workflow.enums import SourceArtifactType
-from specops_workflow.models import CreateCaseCommand, RegisterSourceArtifactCommand, SourceArtifactIdentity
+from specops_workflow.models import AuditQuery, CreateCaseCommand, RegisterSourceArtifactCommand, SourceArtifactIdentity
 from specops_workflow.persistence import engine_for, migrate
 from specops_workflow.ports import FrozenClock
 from specops_workflow.service import WorkflowService
@@ -33,6 +33,8 @@ def test_audit_rows_are_append_only(tmp_path):
 def test_reload_hydrates_source_through_pydantic_contract(tmp_path):
     url, clock, case_id, source_id = persisted(tmp_path)
     reopened = WorkflowService(clock=clock, database_url=url)
-    source = reopened.get_case_state(case_id).sources[(source_id, 1)]
-    assert source.case_id == case_id and source.registered_at == clock.now()
-
+    events = reopened.list_audit_events(AuditQuery(case_id=case_id, acting_actor_id="SYSTEM"))
+    source = next(item.result["identity"] for item in events.items if item.command_name == "register_source_artifact")
+    assert source["artifact_id"] == str(source_id)
+    assert source["case_id"] == str(case_id)
+    assert source["registered_at"] == clock.now().isoformat().replace("+00:00", "Z")

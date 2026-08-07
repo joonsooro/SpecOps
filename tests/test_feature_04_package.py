@@ -8,8 +8,9 @@ from specops_workflow.errors import DomainError, ErrorCode
 from specops_workflow.models import (
     AcceptanceCheck, ApproveSpecPackageCommand, CreateCaseCommand, CreateSpecPackageCommand, JsonPointer,
     MarkSpecPackageReadyCommand, RegisterSourceArtifactCommand, Requirement, SourceArtifactIdentity, SourceRef,
-    SpecPackagePayload, TechnicalDecision,
+    SpecPackagePayload, TechnicalDecision, QueryOne,
 )
+from specops_workflow.enums import SetupStage
 from specops_workflow.ports import FrozenClock
 from specops_workflow.service import WorkflowService
 
@@ -42,9 +43,9 @@ def test_package_only_ready_after_source_validation_and_both_scopes_approve():
     ready = service.mark_spec_package_ready(MarkSpecPackageReadyCommand(command_id=uuid4(), case_id=case_id, acting_actor_id="SYSTEM", expected_case_revision=created.receipt.revision, expected_artifact_id=package_id, expected_artifact_version=1, expected_artifact_hash=created.binding.semantic_hash))
     assert ready.state == PackageState.READY
     business = service.approve_spec_package(ApproveSpecPackageCommand(command_id=uuid4(), case_id=case_id, acting_actor_id=pm, expected_case_revision=ready.receipt.revision, expected_artifact_id=package_id, expected_artifact_version=1, expected_artifact_hash=created.binding.semantic_hash, scope=ApprovalScope.BUSINESS))
-    assert service.get_case_state(case_id).package.current.state == PackageState.READY
+    assert service.get_workflow_view(QueryOne(case_id=case_id, acting_actor_id=pm)).setup_stage == SetupStage.PACKAGE_REVIEW
     service.approve_spec_package(ApproveSpecPackageCommand(command_id=uuid4(), case_id=case_id, acting_actor_id=dev, expected_case_revision=business.receipt.revision, expected_artifact_id=package_id, expected_artifact_version=1, expected_artifact_hash=created.binding.semantic_hash, scope=ApprovalScope.TECHNICAL))
-    assert service.get_case_state(case_id).package.current.state == PackageState.APPROVED
+    assert service.get_workflow_view(QueryOne(case_id=case_id, acting_actor_id=pm)).setup_stage == SetupStage.JIRA_REVIEW
 
 
 def test_wrong_scope_and_stale_binding_are_exact_failures():
@@ -54,4 +55,3 @@ def test_wrong_scope_and_stale_binding_are_exact_failures():
     with pytest.raises(DomainError) as caught:
         service.mark_spec_package_ready(MarkSpecPackageReadyCommand(command_id=uuid4(), case_id=case_id, acting_actor_id=pm, expected_case_revision=created.receipt.revision, expected_artifact_id=package_id, expected_artifact_version=1, expected_artifact_hash="f" * 64))
     assert caught.value.code == ErrorCode.STALE_ARTIFACT_BINDING
-

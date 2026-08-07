@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import functools
+import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -9,7 +12,7 @@ from uuid import UUID, uuid5
 from pydantic import BaseModel
 
 from .artifacts import ArtifactRoot, ArtifactVersion
-from .canonical import artifact_hash, canonical_data, canonical_json, sha256
+from .canonical import canonical_data, canonical_json, default_registry, sha256
 from .enums import *  # noqa: F403
 from .errors import DomainError, ErrorCode
 from .models import *  # noqa: F403
@@ -21,12 +24,19 @@ RESOLUTION_NAMESPACE = UUID("4a5cbf7e-bcff-5a85-b670-c9a38145704d")
 DRIFT_NAMESPACE = UUID("08f33a1b-f1af-56d7-8a0d-8ab2a87787f8")
 INTENT_NAMESPACE = UUID("b91c74fb-902f-57cb-8dc3-aa89dd91702c")
 TRACE_NAMESPACE = UUID("fd829f7d-1009-5ec8-83a2-7ae5f4a28609")
+LOGGER = logging.getLogger("specops_workflow")
+LOGGER.addHandler(logging.NullHandler())
 ALLOWED_COMMANDS = {
     "create_case", "add_participant", "grant_delegation", "revoke_delegation", "register_source_artifact",
     "record_ambiguity_finding", "resolve_ambiguity_finding", "create_spec_package", "revise_spec_package",
     "mark_spec_package_ready", "approve_spec_package", "create_projection_plan", "revise_projection_plan",
     "approve_projection_plan", "create_status_policy", "revise_status_policy", "approve_status_policy",
     "start_external_operation", "record_operation_result", "reconcile_operation", "submit_remote_snapshot",
+}
+DELEGATABLE_COMMANDS = {
+    "register_source_artifact", "record_ambiguity_finding", "resolve_ambiguity_finding",
+    "create_spec_package", "revise_spec_package", "mark_spec_package_ready", "approve_spec_package",
+    "create_projection_plan", "revise_projection_plan", "approve_projection_plan", "approve_status_policy",
 }
 
 
@@ -36,12 +46,18 @@ class WorkflowService:
     def __init__(self, *, clock: Clock | None = None, ids: UuidGenerator | None = None, database_url: str | None = None) -> None:
         self.clock = clock or SystemClock()
         self.ids = ids or RandomUuidGenerator()
+        self.registry = default_registry()
         self._store = None
+        database_url = database_url or os.environ.get("SPECOPS_DATABASE_URL")
         if database_url is not None:
             from .persistence import SqlAlchemyStore
             self._store = SqlAlchemyStore(database_url)
         self._cases: dict[UUID, CaseState] = self._store.load_cases() if self._store else {}
-        self._command_case: dict[UUID, UUID] = {}
+        self._command_case: dict[UUID, UUID] = {
+            command_id: case.id
+            for case in self._cases.values()
+            for command_id in case.command_results
+        }
 
     def _now(self) -> datetime:
         return self.clock.now().astimezone(timezone.utc)
@@ -64,22 +80,30 @@ class WorkflowService:
         prior = case.command_results.get(command.command_id)
         if prior:
             if prior[0] != fingerprint: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return case, prior[1], fingerprint
+            return case, ReplayResult(result=prior[1].model_dump(mode="json", exclude_none=False)), fingerprint
         if command.expected_case_revision != case.revision: raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
-        return case, None, fingerprint
+        return copy.deepcopy(case), None, fingerprint
 
     def _finish(self, case: CaseState, name: str, command: BaseModel, fingerprint: str, result_type: type[BaseModel], **values: Any) -> BaseModel:
         case.revision += 1
         receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=self._now())
         result = result_type(receipt=receipt, **values)
         case.command_results[command.command_id] = (fingerprint, result)
-        self._command_case[command.command_id] = case.id
         self._persist_result(case, name, command, fingerprint, result)
         return result
 
     def _persist_result(self, case: CaseState, name: str, command: BaseModel, fingerprint: str, result: BaseModel) -> None:
+        # Persist the complete deterministic current trace after every mutation.
+        # Historical version-scoped rows remain append-only in the relational store.
+        edges = self._trace_edges(case)
+        if len(edges) > 200_000 or len(case.metadata.get("findings", {})) > 200_000:
+            code = ErrorCode.INVALID_PROJECTION_PLAN if name in {"create_projection_plan", "revise_projection_plan"} else ErrorCode.INVALID_TRANSITION
+            raise DomainError(code)
+        case.metadata["trace_edges"] = {edge.id: edge for edge in edges}
         if self._store:
-            self._store.save_case_and_audit(case, command_name=name, command_id=command.command_id, fingerprint=fingerprint, actor=command.acting_actor_id, occurred_at=result.receipt.occurred_at, result=result)
+            self._store.save_case_and_audit(case, event_id=self.ids.new(), command_name=name, command_id=command.command_id, fingerprint=fingerprint, actor=command.acting_actor_id, occurred_at=result.receipt.occurred_at, result=result)
+        self._cases[case.id] = case
+        self._command_case[command.command_id] = case.id
 
     def _authority_scope(self, case: CaseState, actor: UUID) -> ApprovalScope | None:
         if actor == case.pm_actor_id: return ApprovalScope.BUSINESS
@@ -92,11 +116,12 @@ class WorkflowService:
             raise DomainError(ErrorCode.SYSTEM_ACTION_FORBIDDEN)
         direct = self._authority_scope(case, actor)
         if direct is not None and (scope is None or scope == direct): return None
-        candidates = [item for item in case.delegations.values() if item.delegate_id == actor and command_name in item.command_names]
+        candidates = [item for item in case.delegations.values() if item.delegate_id == actor]
         now = self._now()
         active = [item for item in candidates if item.revoked_at is None and item.valid_from <= now <= item.valid_until]
         if candidates and not active: raise DomainError(ErrorCode.DELEGATION_NOT_ACTIVE)
         for item in active:
+            if command_name not in item.command_names: continue
             if scope is not None and item.domain.value != scope.value: continue
             if item.artifact_id is not None and item.artifact_id != artifact_id: continue
             return item
@@ -109,13 +134,12 @@ class WorkflowService:
             if owner != command.case_id: raise DomainError(ErrorCode.CROSS_CASE_REFERENCE)
             prior = self._cases[owner].command_results[command.command_id]
             if prior[0] != self._fingerprint("create_case", command): raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return prior[1]  # type: ignore[return-value]
+            return ReplayResult(result=prior[1].model_dump(mode="json", exclude_none=False))  # type: ignore[return-value]
         if command.acting_actor_id != command.pm_actor_id: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
         if command.pm_actor_id == command.dev_lead_actor_id: raise DomainError(ErrorCode.AUTHORITY_SLOT_OCCUPIED)
         if command.case_id in self._cases: raise DomainError(ErrorCode.AUTHORITY_SLOT_OCCUPIED)
         case = CaseState(command.case_id, command.pm_actor_id, command.dev_lead_actor_id, self._now())
         case.participants.update({command.pm_actor_id, command.dev_lead_actor_id})
-        self._cases[case.id] = case
         return self._finish(case, "create_case", command, self._fingerprint("create_case", command), CaseResult, case_id=case.id, pm_actor_id=case.pm_actor_id, dev_lead_actor_id=case.dev_lead_actor_id)  # type: ignore[return-value]
 
     def add_participant(self, command: AddParticipantCommand) -> ParticipantResult:
@@ -131,7 +155,7 @@ class WorkflowService:
         expected = case.pm_actor_id if command.domain == Domain.BUSINESS else case.dev_lead_actor_id
         if command.acting_actor_id != expected: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
         if command.delegate_id not in case.participants: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
-        if command.valid_from > command.valid_until or any(name not in ALLOWED_COMMANDS for name in command.command_names): raise DomainError(ErrorCode.INVALID_TRANSITION)
+        if command.valid_from > command.valid_until or any(name not in DELEGATABLE_COMMANDS for name in command.command_names): raise DomainError(ErrorCode.INVALID_TRANSITION)
         if (command.artifact_kind is None) != (command.artifact_id is None): raise DomainError(ErrorCode.INVALID_TRANSITION)
         case.delegations[command.delegation_id] = DelegationState(command.delegation_id, expected, command.delegate_id, command.domain, frozenset(command.command_names), command.artifact_kind.value if command.artifact_kind else None, command.artifact_id, command.valid_from, command.valid_until, command.later_review_required, self._now())
         return self._finish(case, "grant_delegation", command, fp, DelegationResult, case_id=case.id, delegation_id=command.delegation_id, revoked_at=None)  # type: ignore[return-value]
@@ -232,7 +256,7 @@ class WorkflowService:
             value = item.model_dump(mode="python", exclude_none=False); value["related_unit_ids"] = sorted(item.related_unit_ids, key=lambda value: value.bytes); value["source_refs"] = refs(item.source_refs); checks.append(value)
         return {"requirements": requirements, "technical_decisions": decisions, "acceptance_checks": checks}
 
-    def _validate_package_shape(self, case: CaseState, payload: SpecPackagePayload, *, ready: bool) -> None:
+    def _validate_package_shape(self, case: CaseState, payload: SpecPackagePayload, *, ready: bool, package_id: UUID | None = None) -> None:
         units = [item.unit_id for item in payload.requirements] + [item.unit_id for item in payload.technical_decisions]
         all_ids = units + [item.check_id for item in payload.acceptance_checks]
         if len(all_ids) != len(set(all_ids)): raise DomainError(ErrorCode.INVALID_TRANSITION)
@@ -245,7 +269,16 @@ class WorkflowService:
         for decision in payload.technical_decisions:
             if decision.provisional:
                 delegation = case.delegations.get(decision.provisional_delegation_id)
-                if delegation is None or delegation.domain != Domain.TECHNICAL or not delegation.later_review_required:
+                now = self._now()
+                if (
+                    delegation is None
+                    or delegation.domain != Domain.TECHNICAL
+                    or not delegation.later_review_required
+                    or delegation.revoked_at is not None
+                    or not delegation.valid_from <= now <= delegation.valid_until
+                    or (delegation.artifact_id is not None and delegation.artifact_id != package_id)
+                    or (delegation.artifact_kind is not None and delegation.artifact_kind != ArtifactKind.SPEC_PACKAGE.value)
+                ):
                     raise DomainError(ErrorCode.INVALID_TRANSITION)
         if ready and any(item.status == FindingStatus.OPEN and item.severity == Severity.BLOCKING.value for item in case.ambiguities.values()):
             raise DomainError(ErrorCode.BLOCKING_FINDING)
@@ -255,8 +288,8 @@ class WorkflowService:
         if replay: return replay  # type: ignore[return-value]
         self._authorize(case, command.acting_actor_id, "create_spec_package", artifact_id=command.package_id)
         if case.package is not None: raise DomainError(ErrorCode.INVALID_TRANSITION)
-        self._validate_package_shape(case, command.payload, ready=False)
-        digest = artifact_hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
+        self._validate_package_shape(case, command.payload, ready=False, package_id=command.package_id)
+        digest = self.registry.hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
         root = ArtifactRoot(ArtifactKind.SPEC_PACKAGE, command.package_id)
         root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PackageState.DRAFT.value))
         case.package = root
@@ -268,11 +301,15 @@ class WorkflowService:
         if case.package is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         self._authorize(case, command.acting_actor_id, "revise_spec_package", artifact_id=case.package.artifact_id)
         case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
-        self._validate_package_shape(case, command.payload, ready=False)
-        digest = artifact_hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
+        if any(item.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN} for item in case.operations.values()):
+            raise DomainError(ErrorCode.INVALID_TRANSITION)
+        prior_package_binding = case.package.binding
+        self._validate_package_shape(case, command.payload, ready=False, package_id=case.package.artifact_id)
+        digest = self.registry.hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
         case.package.revise(ArtifactVersion(case.package.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PackageState.DRAFT.value))
         for plan in case.plans.values():
             current = plan.current; plan.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.STALE.value)
+            self._finding(case, FindingCategory.STALE_BINDING, [prior_package_binding.model_dump(mode="json"), case.package.binding.model_dump(mode="json")], case.package.binding.model_dump(mode="json"), prior_package_binding.model_dump(mode="json"))
         return self._finish(case, "revise_spec_package", command, fp, SpecPackageResult, binding=case.package.binding, state=PackageState.DRAFT)  # type: ignore[return-value]
 
     def mark_spec_package_ready(self, command: MarkSpecPackageReadyCommand) -> SpecPackageResult:
@@ -283,7 +320,7 @@ class WorkflowService:
         case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
         current = case.package.current
         if current.state != PackageState.DRAFT.value: raise DomainError(ErrorCode.INVALID_TRANSITION)
-        self._validate_package_shape(case, current.payload, ready=True)
+        self._validate_package_shape(case, current.payload, ready=True, package_id=case.package.artifact_id)
         case.package.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PackageState.READY.value)
         return self._finish(case, "mark_spec_package_ready", command, fp, SpecPackageResult, binding=case.package.binding, state=PackageState.READY)  # type: ignore[return-value]
 
@@ -406,7 +443,7 @@ class WorkflowService:
         self._authorize(case, command.acting_actor_id, "create_projection_plan", artifact_id=command.plan_id)
         if command.payload.target in case.plans: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
         hashes = self._validate_plan(case, command.payload)
-        digest = artifact_hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
+        digest = self.registry.hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
         root = ArtifactRoot(ArtifactKind.PROJECTION_PLAN, command.plan_id)
         root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PlanState.READY.value))
         case.plans[command.payload.target] = root
@@ -420,8 +457,12 @@ class WorkflowService:
         if root is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         self._authorize(case, command.acting_actor_id, "revise_projection_plan", artifact_id=root.artifact_id)
         root.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
+        if any(item.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN} and item.intent.plan_binding.artifact_id == root.artifact_id for item in case.operations.values()):
+            raise DomainError(ErrorCode.INVALID_TRANSITION)
+        prior_plan_binding = root.binding
+        prior_package_binding = root.current.payload.package_binding
         new_hashes = self._validate_plan(case, command.payload)
-        digest = artifact_hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
+        digest = self.registry.hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
         prior_items = {item.item_id: item for item in root.current.payload.items}; new_items = {item.item_id: item for item in command.payload.items}
         prior_hashes = case.metadata["item_hashes"][(root.artifact_id, root.current.version)]
         reconciliation = {}
@@ -433,8 +474,16 @@ class WorkflowService:
         root.revise(ArtifactVersion(root.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PlanState.READY.value))
         case.metadata.setdefault("item_hashes", {})[(root.artifact_id, root.current.version)] = new_hashes
         case.metadata.setdefault("reconciliation", {})[(root.artifact_id, root.current.version)] = reconciliation
+        case.metadata["intents"] = {
+            intent_id: intent
+            for intent_id, intent in case.metadata.get("intents", {}).items()
+            if intent.plan_binding.artifact_id != root.artifact_id
+        }
+        if prior_package_binding != case.package.binding:
+            self._resolve_finding(case, FindingCategory.STALE_BINDING, [prior_package_binding.model_dump(mode="json"), case.package.binding.model_dump(mode="json")])
         if command.payload.target == PlanTarget.JIRA and PlanTarget.GITHUB in case.plans:
             gh = case.plans[PlanTarget.GITHUB]; current = gh.current; gh.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.STALE.value)
+            self._finding(case, FindingCategory.STALE_BINDING, [prior_plan_binding.model_dump(mode="json"), root.binding.model_dump(mode="json")], root.binding.model_dump(mode="json"), prior_plan_binding.model_dump(mode="json"))
         return self._finish(case, "revise_projection_plan", command, fp, ProjectionPlanResult, binding=root.binding, target=command.payload.target, state=PlanState.READY, derived_intent_ids=[])  # type: ignore[return-value]
 
     def approve_projection_plan(self, command: ApproveProjectionPlanCommand) -> ApprovalResult:
@@ -454,10 +503,36 @@ class WorkflowService:
         scopes = {item.scope for item in case.approvals if item.artifact_id == root.artifact_id and item.artifact_version == root.current.version and item.artifact_hash == root.current.semantic_hash}
         if required.issubset(scopes):
             current = root.current; root.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.APPROVED.value)
+            if case.policy is not None and case.policy.current.state == PolicyState.APPROVED.value:
+                self._derive_content_intents(case)
         return self._finish(case, "approve_projection_plan", command, fp, ApprovalResult, approval_id=approval.id, scope=approval.scope, artifact_binding=root.binding)  # type: ignore[return-value]
 
     def _operation_result(self, operation: OperationState, receipt: Receipt) -> OperationResult:
         return OperationResult(operation_id=operation.id, intent_id=operation.intent.intent_id, system=operation.intent.system, action=operation.intent.action, status=operation.status, attempt=operation.attempt, failure_code=operation.failure_code, confirmation=operation.confirmation, confirmed_snapshot_sequence=operation.confirmed_snapshot_sequence, receipt=receipt)
+
+    @staticmethod
+    def _set_plan_state(case: CaseState, plan_id: UUID, state: PlanState) -> None:
+        root = next((value for value in case.plans.values() if value.artifact_id == plan_id), None)
+        if root is None or root.current.state == PlanState.STALE.value:
+            return
+        current = root.current
+        root.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, state.value)
+
+    def _refresh_plan_state(self, case: CaseState, plan_id: UUID) -> None:
+        intents = [
+            intent for intent in case.metadata.get("intents", {}).values()
+            if intent.plan_binding.artifact_id == plan_id and intent.action != Action.TRANSITION_STATUS
+        ]
+        if not intents:
+            return
+        succeeded = {
+            operation.intent.intent_id for operation in case.operations.values()
+            if operation.status == OperationStatus.SUCCEEDED
+        }
+        if all(intent.intent_id in succeeded for intent in intents):
+            self._set_plan_state(case, plan_id, PlanState.APPLIED)
+        elif any(operation.intent.plan_binding.artifact_id == plan_id for operation in case.operations.values()):
+            self._set_plan_state(case, plan_id, PlanState.APPLYING)
 
     def start_external_operation(self, command: StartExternalOperationCommand) -> OperationResult:
         case, replay, fp = self._begin("start_external_operation", command)
@@ -470,6 +545,12 @@ class WorkflowService:
         operation = case.operations.get(command.operation_id)
         if idempotent is not None and idempotent.id != command.operation_id: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if by_intent is not None and by_intent.id != command.operation_id: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if operation is None:
+            active = self._active_findings(case)
+            if any(value["category"] == FindingCategory.UNMAPPED_REMOTE_STATUS for value in active.values()):
+                raise DomainError(ErrorCode.UNMAPPED_REMOTE_STATUS)
+            if any(value["category"] != FindingCategory.STATUS_SYNC_REQUIRED for value in active.values()):
+                raise DomainError(ErrorCode.BLOCKING_FINDING)
         now = self._now()
         if operation is None:
             operation = OperationState(command.operation_id, intent, command.idempotency_key, OperationStatus.PENDING, 1, now, now)
@@ -479,10 +560,12 @@ class WorkflowService:
             if operation.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN}: raise DomainError(ErrorCode.OPERATION_RETRY_BLOCKED)
             if operation.status == OperationStatus.SUCCEEDED and operation.last_result is not None: return operation.last_result
             operation.status = OperationStatus.PENDING; operation.attempt += 1; operation.failure_code = None; operation.updated_at = now
+        if intent.action != Action.TRANSITION_STATUS:
+            self._set_plan_state(case, intent.plan_binding.artifact_id, PlanState.APPLYING)
         case.revision += 1
         receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
         result = self._operation_result(operation, receipt); operation.last_result = result
-        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        case.command_results[command.command_id] = (fp, result)
         self._persist_result(case, "start_external_operation", command, fp, result)
         return result
 
@@ -498,10 +581,26 @@ class WorkflowService:
         if observation.system != intent.system or observation.generation_key != intent.request.get("generation_key") or observation.package_binding != intent.package_binding or observation.plan_binding != intent.plan_binding or observation.jira_plan_binding != intent.jira_plan_binding or observation.status_policy_binding != intent.status_policy_binding:
             raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
         if sha256(observation.owned_content) != intent.request_owned_content_hash: raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
+        recomputed = sha256({"schema": "operation-request-v1", "case_id": case.id, "system": intent.system, "action": intent.action, "generation_key": observation.generation_key, "item_ref": intent.item_ref, "package_binding": intent.package_binding, "plan_binding": intent.plan_binding, "status_policy_binding": intent.status_policy_binding, "request_owned_content_hash": intent.request_owned_content_hash, "external_identity": intent.existing, "expected_remote_revision": intent.expected, "target_normalized_status": intent.target_normalized_status, "contributing_rule_ids": intent.contributing_rule_ids})
+        if recomputed != intent.fingerprint:
+            raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
+        normalized = self._mapping_for(case, observation.system, observation.native_status)
+        lifecycle = self._lifecycle(observation.system, normalized, observation.owned_content)
+        if intent.action in {Action.CREATE, Action.UPDATE} and lifecycle != Lifecycle.ACTIVE:
+            raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
+        if intent.action == Action.RETIRE and lifecycle != Lifecycle.RETIRED:
+            raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
+        if intent.action == Action.TRANSITION_STATUS and normalized != intent.target_normalized_status:
+            raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
         identity_key = self._identity_key(intent.system, observation.external_identity)
         item_id = UUID(str(intent.item_ref["item_id"]))
         existing = next((item for item in case.bindings.values() if item.system == intent.system and item.plan_id == intent.plan_binding.artifact_id and item.item_id == item_id), None)
-        if intent.action == Action.CREATE and existing is not None: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+        if (
+            intent.action == Action.CREATE
+            and existing is not None
+            and operation.status != OperationStatus.SUCCEEDED
+        ):
+            raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
         if intent.action != Action.CREATE and existing is None: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
         if existing is not None:
             if self._identity_key(intent.system, existing.external_identity) != identity_key: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
@@ -542,10 +641,18 @@ class WorkflowService:
                 operation.status = OperationStatus.UNKNOWN
             else:
                 operation.status = OperationStatus.SUCCEEDED; operation.confirmation = command.outcome.read_back; operation.confirmed_snapshot_sequence = binding.current_observation_sequence
+        components = [operation.id, operation.attempt]
+        if operation.status == OperationStatus.UNKNOWN:
+            self._finding(case, FindingCategory.UNKNOWN_EXTERNAL_RESULT, components, "matching confirmed read-back", "UNKNOWN")
+        else:
+            self._resolve_finding(case, FindingCategory.UNKNOWN_EXTERNAL_RESULT, components)
         operation.updated_at = now
+        if operation.status == OperationStatus.SUCCEEDED:
+            self._derive_content_intents(case)
+        self._refresh_plan_state(case, operation.intent.plan_binding.artifact_id)
         case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
         result = self._operation_result(operation, receipt); operation.last_result = result
-        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        case.command_results[command.command_id] = (fp, result)
         self._persist_result(case, "record_operation_result", command, fp, result)
         return result
 
@@ -558,14 +665,30 @@ class WorkflowService:
         if operation.attempt != command.attempt or operation.status in {OperationStatus.PENDING, OperationStatus.FAILED}: raise DomainError(ErrorCode.INVALID_TRANSITION)
         if command.observation.observation_kind == ObservationKind.NOT_FOUND:
             if operation.status != OperationStatus.UNKNOWN: raise DomainError(ErrorCode.INVALID_TRANSITION)
+            observation = command.observation
+            intent = operation.intent
+            if observation.system != intent.system or observation.generation_key != intent.request.get("generation_key") or observation.package_binding != intent.package_binding or observation.plan_binding != intent.plan_binding or observation.jira_plan_binding != intent.jira_plan_binding or observation.status_policy_binding != intent.status_policy_binding:
+                raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+            identity_key = self._identity_key(observation.system, observation.external_identity)
+            binding = next((item for item in case.bindings.values() if item.system == observation.system and item.generation_key == observation.generation_key and self._identity_key(item.system, item.external_identity) == identity_key), None)
+            if binding is None: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+            latest = next((snapshot for snapshot in reversed(binding.snapshots) if snapshot.remote_revision is not None), None)
+            expected = latest.remote_revision if latest else None
+            if observation.expected_previous_remote_revision != expected: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
+            binding.snapshots.append(observation); binding.current_observation_sequence += 1
+            self._finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id], "FOUND", "NOT_FOUND")
             operation.status = OperationStatus.FAILED; operation.failure_code = "REMOTE_NOT_FOUND"
         else:
             binding = self._store_found(case, operation, command.observation)
             operation.status = OperationStatus.SUCCEEDED; operation.failure_code = None; operation.confirmation = command.observation; operation.confirmed_snapshot_sequence = binding.current_observation_sequence
+        self._resolve_finding(case, FindingCategory.UNKNOWN_EXTERNAL_RESULT, [operation.id, operation.attempt])
         now = self._now(); operation.updated_at = now
+        if operation.status == OperationStatus.SUCCEEDED:
+            self._derive_content_intents(case)
+        self._refresh_plan_state(case, operation.intent.plan_binding.artifact_id)
         case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
         result = self._operation_result(operation, receipt); operation.last_result = result
-        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        case.command_results[command.command_id] = (fp, result)
         self._persist_result(case, "reconcile_operation", command, fp, result)
         return result
 
@@ -598,7 +721,7 @@ class WorkflowService:
         if command.acting_actor_id not in {case.pm_actor_id, case.dev_lead_actor_id}: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
         if case.policy is not None: raise DomainError(ErrorCode.INVALID_TRANSITION)
         self._validate_policy(case, command.payload)
-        digest = artifact_hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
+        digest = self.registry.hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
         root = ArtifactRoot(ArtifactKind.STATUS_POLICY, command.policy_id); root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PolicyState.READY.value)); case.policy = root
         return self._finish(case, "create_status_policy", command, fp, StatusPolicyResult, binding=root.binding, state=PolicyState.READY)  # type: ignore[return-value]
 
@@ -609,7 +732,7 @@ class WorkflowService:
         if case.policy is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         if any(item.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN} for item in case.operations.values()): raise DomainError(ErrorCode.INVALID_TRANSITION)
         case.policy.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash); self._validate_policy(case, command.payload)
-        digest = artifact_hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
+        digest = self.registry.hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
         case.policy.revise(ArtifactVersion(case.policy.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PolicyState.READY.value))
         case.metadata["intents"] = {}
         return self._finish(case, "revise_status_policy", command, fp, StatusPolicyResult, binding=case.policy.binding, state=PolicyState.READY)  # type: ignore[return-value]
@@ -630,27 +753,166 @@ class WorkflowService:
 
     def _derive_content_intents(self, case: CaseState) -> None:
         if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value or case.package is None: return
+        previous_intents = case.metadata.get("intents", {})
         intents: dict[UUID, OperationIntent] = {}
         for target, root in case.plans.items():
             if root.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}: continue
-            for item in root.current.payload.items:
-                binding_meta = case.metadata.get("external_bindings", {}).get(item.item_id)
-                action = Action.CREATE if binding_meta is None else case.metadata.get("reconciliation", {}).get((root.artifact_id, root.current.version), {}).get(item.item_id)
-                if action is None: continue
+            current_items = {item.item_id: item for item in root.current.payload.items}
+            prior_items = {item.item_id: item for item in root.versions[-2].payload.items} if len(root.versions) > 1 else {}
+            reconciliation = case.metadata.get("reconciliation", {}).get((root.artifact_id, root.current.version), {})
+            candidate_ids = set(current_items) | {item_id for item_id, action in reconciliation.items() if action == Action.RETIRE}
+            for item_id in sorted(candidate_ids, key=lambda value: value.bytes):
+                item = current_items.get(item_id) or prior_items.get(item_id)
+                if item is None:
+                    continue
+                binding = next((value for value in case.bindings.values() if value.plan_id == root.artifact_id and value.item_id == item_id), None)
+                action = Action.CREATE if root.current.version == 1 and binding is None else reconciliation.get(item_id)
+                if action is None:
+                    previous = next(
+                        (value for value in previous_intents.values() if UUID(str(value.item_ref["item_id"])) == item_id and value.system == System(target.value) and value.action != Action.TRANSITION_STATUS),
+                        None,
+                    )
+                    if previous is not None:
+                        intents[previous.intent_id] = previous
+                    continue
+                if action in {Action.UPDATE, Action.RETIRE} and binding is None:
+                    continue
                 system = System(target.value); generation = self._generation_key(case.id, target, item.item_id)
                 labels = ["specops", "specops-retired"] if action == Action.RETIRE else ["specops"]
+                dependency_keys: dict[UUID, str] = {}
+                unresolved = False
+                for dependency_id in item.dependency_item_ids:
+                    lookup_id = dependency_id
+                    if system == System.GITHUB:
+                        dependency_item = current_items.get(dependency_id)
+                        lookup_id = dependency_item.primary_jira_item_id if dependency_item else None
+                    metadata = case.metadata.get("external_bindings", {}).get(lookup_id) if lookup_id else None
+                    key = metadata.get("key") if isinstance(metadata, dict) else None
+                    if key is None:
+                        unresolved = True
+                        break
+                    dependency_keys[dependency_id] = key
+                if unresolved:
+                    continue
+                parent_key = None
+                if system == System.JIRA and item.parent_item_id is not None:
+                    metadata = case.metadata.get("external_bindings", {}).get(item.parent_item_id)
+                    parent_key = metadata.get("key") if isinstance(metadata, dict) else None
+                    if parent_key is None:
+                        continue
+                existing = binding.external_identity if binding else None
+                latest = next((snapshot for snapshot in reversed(binding.snapshots) if snapshot.remote_revision is not None), None) if binding else None
+                expected_revision = latest.remote_revision if latest else None
+                if (
+                    action == Action.RETIRE
+                    and latest is not None
+                    and self._lifecycle(
+                        system,
+                        self._mapping_for(case, system, latest.native_status),
+                        latest.owned_content,
+                    )
+                    == Lifecycle.RETIRED
+                ):
+                    continue
                 if system == System.JIRA:
-                    request = {"project_key": root.current.payload.project_key, "issue_type": item.kind.value, "summary": item.title, "rendered_description": render_structured_body(item.body, {}, sizing=True), "parent_key": None, "dependency_keys": [], "labels": labels, "generation_key": generation, "package_binding": case.package.binding.model_dump(mode="json"), "plan_binding": root.binding.model_dump(mode="json")}
+                    jira_key = existing.key if isinstance(existing, JiraIdentity) else None
+                    request = {"project_key": root.current.payload.project_key, "issue_type": item.kind.value, "summary": item.title, "rendered_description": render_structured_body(item.body, dependency_keys, jira_key=jira_key), "parent_key": parent_key, "dependency_keys": [dependency_keys[value] for value in sorted(dependency_keys, key=lambda value: value.bytes)], "labels": labels, "generation_key": generation, "package_binding": case.package.binding.model_dump(mode="json"), "plan_binding": root.binding.model_dump(mode="json")}
                     jira_binding = None
                 else:
                     jira_root = case.plans[PlanTarget.JIRA]
-                    request = {"repository": item.repository, "title": item.title, "rendered_body": render_structured_body(item.body, {}, jira_key=item.body.jira_key, sizing=True), "labels": labels, "generation_key": generation, "jira_key": item.body.jira_key, "package_binding": case.package.binding.model_dump(mode="json"), "jira_plan_binding": jira_root.binding.model_dump(mode="json"), "plan_binding": root.binding.model_dump(mode="json")}
+                    request = {"repository": item.repository, "title": item.title, "rendered_body": render_structured_body(item.body, dependency_keys, jira_key=item.body.jira_key), "labels": labels, "generation_key": generation, "jira_key": item.body.jira_key, "package_binding": case.package.binding.model_dump(mode="json"), "jira_plan_binding": jira_root.binding.model_dump(mode="json"), "plan_binding": root.binding.model_dump(mode="json")}
                     jira_binding = jira_root.binding
                 owned_hash = sha256(request)
-                item_ref = {"kind": "CURRENT", "item_id": item.item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash}
-                fingerprint = sha256({"schema": "operation-request-v1", "case_id": case.id, "system": system, "action": action, "generation_key": generation, "item_ref": item_ref, "package_binding": case.package.binding, "plan_binding": root.binding, "status_policy_binding": case.policy.binding, "request_owned_content_hash": owned_hash, "external_identity": None, "expected_remote_revision": None, "target_normalized_status": None, "contributing_rule_ids": []})
+                if action == Action.RETIRE:
+                    prior = root.versions[-2]
+                    item_ref = {"kind": "TOMBSTONE", "item_id": item.item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash, "prior_plan_id": root.artifact_id, "prior_plan_version": prior.version, "prior_plan_hash": prior.semantic_hash, "stable_binding_id": binding.id}
+                else:
+                    item_ref = {"kind": "CURRENT", "item_id": item.item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash}
+                fingerprint = sha256({"schema": "operation-request-v1", "case_id": case.id, "system": system, "action": action, "generation_key": generation, "item_ref": item_ref, "package_binding": case.package.binding, "plan_binding": root.binding, "status_policy_binding": case.policy.binding, "request_owned_content_hash": owned_hash, "external_identity": existing, "expected_remote_revision": expected_revision, "target_normalized_status": None, "contributing_rule_ids": []})
                 intent_id = uuid5(INTENT_NAMESPACE, fingerprint)
-                intents[intent_id] = OperationIntent(intent_id=intent_id, system=system, item_ref=item_ref, action=action, request=request, package_binding=case.package.binding, plan_binding=root.binding, jira_plan_binding=jira_binding, status_policy_binding=case.policy.binding, request_owned_content_hash=owned_hash, fingerprint=fingerprint)
+                intents[intent_id] = OperationIntent(intent_id=intent_id, system=system, item_ref=item_ref, action=action, request=request, package_binding=case.package.binding, plan_binding=root.binding, jira_plan_binding=jira_binding, status_policy_binding=case.policy.binding, request_owned_content_hash=owned_hash, fingerprint=fingerprint, existing=existing, expected=expected_revision)
+        case.metadata["intents"] = intents
+        self._derive_status_intents(case)
+
+    def _derive_status_intents(self, case: CaseState) -> None:
+        """Derive deterministic status-sync findings and TRANSITION_STATUS intents."""
+        if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value or case.package is None:
+            return
+        intents = dict(case.metadata.get("intents", {}))
+        policy_binding = case.policy.binding
+        for target, root in case.plans.items():
+            if root.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}:
+                continue
+            system = System(target.value)
+            items = {item.item_id: item for item in root.current.payload.items}
+            targets_by_item: dict[UUID, list[tuple[JiraStatus | GitHubStatus, UUID]]] = {}
+            for rule in case.policy.current.payload.rules:
+                if rule.target_system != system:
+                    continue
+                if rule.selector == Selector.ALL_PROJECTED_ITEMS:
+                    selected = set(items)
+                elif rule.selector == Selector.IMPLEMENTATION_ITEMS:
+                    selected = {item.item_id for item in items.values() if item.implementation_required}
+                else:
+                    selected = set(rule.item_ids)
+                for item_id in selected & set(items):
+                    binding = next((value for value in case.bindings.values() if value.plan_id == root.artifact_id and value.item_id == item_id), None)
+                    latest = binding.snapshots[-1] if binding and binding.snapshots else None
+                    if latest is not None and latest.observation_kind != ObservationKind.FOUND:
+                        latest = None
+                    if binding is None or latest is None:
+                        continue
+                    matches = True
+                    for condition in rule.all_of:
+                        if condition.kind == ConditionKind.PACKAGE_CURRENT_APPROVED:
+                            matches = matches and case.package.current.state == PackageState.APPROVED.value
+                        elif condition.kind == ConditionKind.NO_BLOCKING_FINDINGS:
+                            matches = matches and not any(value.get("active") for value in case.metadata.get("findings", {}).values() if value.get("category") not in {FindingCategory.STATUS_SYNC_REQUIRED})
+                        elif condition.kind == ConditionKind.JIRA_STATE_IN:
+                            if system == System.JIRA:
+                                normalized = self._mapping_for(case, system, latest.native_status)
+                            else:
+                                primary = items[item_id].primary_jira_item_id
+                                jira_binding = next((value for value in case.bindings.values() if value.system == System.JIRA and value.item_id == primary), None)
+                                jira_latest = next((snapshot for snapshot in reversed(jira_binding.snapshots) if snapshot.observation_kind == ObservationKind.FOUND), None) if jira_binding else None
+                                normalized = self._mapping_for(case, System.JIRA, jira_latest.native_status) if jira_latest else None
+                            matches = matches and normalized in condition.jira_states
+                        elif condition.kind == ConditionKind.GITHUB_STATE_IN:
+                            if system == System.GITHUB:
+                                normalized = self._mapping_for(case, system, latest.native_status)
+                            else:
+                                github_item = next((value for value in case.plans.get(PlanTarget.GITHUB, ArtifactRoot(ArtifactKind.PROJECTION_PLAN, UUID(int=0))).current.payload.items if value.primary_jira_item_id == item_id), None) if PlanTarget.GITHUB in case.plans else None
+                                github_binding = next((value for value in case.bindings.values() if github_item and value.system == System.GITHUB and value.item_id == github_item.item_id), None)
+                                github_latest = next((snapshot for snapshot in reversed(github_binding.snapshots) if snapshot.observation_kind == ObservationKind.FOUND), None) if github_binding else None
+                                normalized = self._mapping_for(case, System.GITHUB, github_latest.native_status) if github_latest else None
+                            matches = matches and normalized in condition.github_states
+                    if matches:
+                        targets_by_item.setdefault(item_id, []).append((rule.target_normalized_status, rule.rule_id))
+
+            for item_id, targets in targets_by_item.items():
+                binding = next(value for value in case.bindings.values() if value.plan_id == root.artifact_id and value.item_id == item_id)
+                latest = next(snapshot for snapshot in reversed(binding.snapshots) if snapshot.observation_kind == ObservationKind.FOUND)
+                normalized = self._mapping_for(case, system, latest.native_status)
+                distinct = {target for target, _ in targets}
+                rule_ids = sorted({rule_id for _, rule_id in targets}, key=lambda value: value.bytes)
+                if len(distinct) > 1:
+                    components = [policy_binding.model_dump(mode="json"), StatusConflictSubtype.MULTIPLE_TARGETS.value, system.value, item_id, rule_ids]
+                    self._finding(case, FindingCategory.STATUS_CONFLICT, components, "one target", sorted(value.value for value in distinct))
+                    continue
+                target_status = next(iter(distinct))
+                components = [policy_binding.model_dump(mode="json"), system.value, item_id, binding.id, target_status.value]
+                if normalized == target_status:
+                    self._resolve_finding(case, FindingCategory.STATUS_SYNC_REQUIRED, components)
+                    continue
+                self._finding(case, FindingCategory.STATUS_SYNC_REQUIRED, components, target_status.value, normalized.value if normalized else None)
+                plan_binding = root.binding
+                request = latest.owned_content
+                request_hash = sha256(request)
+                item_ref = {"kind": "CURRENT", "item_id": item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash}
+                jira_binding = case.plans[PlanTarget.JIRA].binding if system == System.GITHUB and PlanTarget.JIRA in case.plans else None
+                fingerprint = sha256({"schema": "operation-request-v1", "case_id": case.id, "system": system, "action": Action.TRANSITION_STATUS, "generation_key": binding.generation_key, "item_ref": item_ref, "package_binding": case.package.binding, "plan_binding": plan_binding, "status_policy_binding": policy_binding, "request_owned_content_hash": request_hash, "external_identity": binding.external_identity, "expected_remote_revision": latest.remote_revision, "target_normalized_status": target_status, "contributing_rule_ids": rule_ids})
+                intent_id = uuid5(INTENT_NAMESPACE, fingerprint)
+                intents[intent_id] = OperationIntent(intent_id=intent_id, system=system, item_ref=item_ref, action=Action.TRANSITION_STATUS, request=request, package_binding=case.package.binding, plan_binding=plan_binding, jira_plan_binding=jira_binding, status_policy_binding=policy_binding, request_owned_content_hash=request_hash, fingerprint=fingerprint, existing=binding.external_identity, expected=latest.remote_revision, target_normalized_status=target_status, contributing_rule_ids=rule_ids)
         case.metadata["intents"] = intents
 
     def _mapping_for(self, case: CaseState, system: System, native_status: str) -> JiraStatus | GitHubStatus | None:
@@ -684,11 +946,24 @@ class WorkflowService:
         if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value: raise DomainError(ErrorCode.STATUS_POLICY_NOT_APPROVED)
         observation = command.observation
         if observation.status_policy_binding != case.policy.binding: raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+        if case.package is None or observation.package_binding != case.package.binding:
+            raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+        plan = case.plans.get(PlanTarget(observation.system.value))
+        if plan is None or observation.plan_binding != plan.binding:
+            raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+        if observation.system == System.GITHUB:
+            jira = case.plans.get(PlanTarget.JIRA)
+            if jira is None or observation.jira_plan_binding != jira.binding:
+                raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+        elif observation.jira_plan_binding is not None:
+            raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
         identity_key = self._identity_key(observation.system, observation.external_identity)
         binding = next((item for item in case.bindings.values() if item.system == observation.system and self._identity_key(item.system, item.external_identity) == identity_key and item.generation_key == observation.generation_key), None)
         if binding is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         latest = next((item for item in reversed(binding.snapshots) if item.remote_revision is not None), None); expected = latest.remote_revision if latest else None
         if observation.expected_previous_remote_revision != expected: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
+        if observation.remote_revision is not None and any(item.remote_revision == observation.remote_revision for item in binding.snapshots):
+            raise DomainError(ErrorCode.INVALID_TRANSITION)
         binding.snapshots.append(observation); binding.current_observation_sequence += 1
         active: list[UUID] = []
         if observation.observation_kind == ObservationKind.NOT_FOUND:
@@ -696,15 +971,23 @@ class WorkflowService:
         else:
             self._resolve_finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id])
             normalized = self._mapping_for(case, observation.system, observation.native_status)
-            if normalized is None: active.append(self._finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, [case.policy.binding.model_dump(mode="json"), binding.id, observation.native_status], "mapped status", observation.native_status))
+            unmapped_components = [case.policy.binding.model_dump(mode="json"), binding.id, observation.native_status]
+            if normalized is None: active.append(self._finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, unmapped_components, "mapped status", observation.native_status))
+            else: self._resolve_finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, unmapped_components)
             lifecycle = self._lifecycle(observation.system, normalized, observation.owned_content)
-            if lifecycle == Lifecycle.UNKNOWN: active.append(self._finding(case, FindingCategory.STATUS_CONFLICT, [binding.id, "INVALID_LIFECYCLE"], "valid lifecycle", "UNKNOWN"))
+            lifecycle_components = [case.policy.binding.model_dump(mode="json"), StatusConflictSubtype.INVALID_LIFECYCLE.value, observation.system.value, binding.item_id, []]
+            if lifecycle == Lifecycle.UNKNOWN: active.append(self._finding(case, FindingCategory.STATUS_CONFLICT, lifecycle_components, "valid lifecycle", "UNKNOWN"))
+            else: self._resolve_finding(case, FindingCategory.STATUS_CONFLICT, lifecycle_components)
             desired = next((intent for intent in case.metadata.get("intents", {}).values() if UUID(str(intent.item_ref["item_id"])) == binding.item_id), None)
             if desired is not None and sha256(observation.owned_content) != desired.request_owned_content_hash:
                 active.append(self._finding(case, FindingCategory.CONTENT_DRIFT, [observation.plan_binding.model_dump(mode="json"), binding.item_id, binding.id], desired.request_owned_content_hash, sha256(observation.owned_content)))
+            elif desired is not None:
+                self._resolve_finding(case, FindingCategory.CONTENT_DRIFT, [observation.plan_binding.model_dump(mode="json"), binding.item_id, binding.id])
+        self._derive_content_intents(case)
+        active = sorted(self._active_findings(case), key=lambda item: item.bytes)
         case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=self._now())
-        result = SnapshotResult(observation_kind="FOUND_ACCEPTED" if observation.observation_kind == ObservationKind.FOUND else "NOT_FOUND_ACCEPTED", observation=observation, binding_id=binding.id, observation_sequence=binding.current_observation_sequence, active_finding_ids=sorted(active, key=lambda item: item.bytes), receipt=receipt)
-        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        result = SnapshotResult(observation_kind="FOUND_ACCEPTED" if observation.observation_kind == ObservationKind.FOUND else "NOT_FOUND_ACCEPTED", observation=observation, binding_id=binding.id, observation_sequence=binding.current_observation_sequence, active_finding_ids=active, receipt=receipt)
+        case.command_results[command.command_id] = (fp, result)
         self._persist_result(case, "submit_remote_snapshot", command, fp, result)
         return result
 
@@ -778,7 +1061,51 @@ class WorkflowService:
     def get_delivery_view(self, query: QueryOne) -> DeliveryView:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id); items: list[DeliveryItem] = []
         for target, root in case.plans.items():
-            for plan_item in root.current.payload.items:
+            visible_items = list(root.current.payload.items)
+            if len(root.versions) > 1:
+                reconciliation = case.metadata.get("reconciliation", {}).get(
+                    (root.artifact_id, root.current.version), {}
+                )
+                current_ids = {item.item_id for item in visible_items}
+                for prior_item in root.versions[-2].payload.items:
+                    if (
+                        prior_item.item_id in current_ids
+                        or reconciliation.get(prior_item.item_id) != Action.RETIRE
+                    ):
+                        continue
+                    prior_binding = next(
+                        (
+                            value
+                            for value in case.bindings.values()
+                            if value.plan_id == root.artifact_id
+                            and value.item_id == prior_item.item_id
+                        ),
+                        None,
+                    )
+                    prior_latest = (
+                        next(
+                            (
+                                snapshot
+                                for snapshot in reversed(prior_binding.snapshots)
+                                if snapshot.observation_kind == ObservationKind.FOUND
+                            ),
+                            None,
+                        )
+                        if prior_binding
+                        else None
+                    )
+                    prior_normalized = (
+                        self._mapping_for(case, System(target.value), prior_latest.native_status)
+                        if prior_latest
+                        else None
+                    )
+                    if self._lifecycle(
+                        System(target.value),
+                        prior_normalized,
+                        prior_latest.owned_content if prior_latest else None,
+                    ) != Lifecycle.RETIRED:
+                        visible_items.append(prior_item)
+            for plan_item in visible_items:
                 binding = next((value for value in case.bindings.values() if value.plan_id == root.artifact_id and value.item_id == plan_item.item_id), None)
                 latest = binding.snapshots[-1] if binding and binding.snapshots else None
                 normalized = self._mapping_for(case, System(target.value), latest.native_status) if latest and latest.native_status else None
@@ -815,6 +1142,36 @@ class WorkflowService:
         page = values[:query.limit]
         return AuditPage(items=page, next_cursor=page[-1].case_sequence if len(values) > query.limit else None)
 
-    def get_case_state(self, case_id: UUID) -> CaseState:
-        """Internal test/repository bridge; never returns through a public read method."""
-        return self._case(case_id)
+def _logged_mutation(name: str, method):
+    """Apply the closed mutation logging contract without changing public DTOs."""
+    @functools.wraps(method)
+    def wrapped(self: WorkflowService, command):
+        operation_id = getattr(command, "operation_id", None)
+        base = {
+            "case_id": command.case_id,
+            "command_id": command.command_id,
+            "operation_id": operation_id,
+        }
+        LOGGER.info("command.started", extra={**base, "event_code": "command.started", "outcome": "STARTED", "error_code": None})
+        try:
+            result = method(self, command)
+        except DomainError as error:
+            LOGGER.warning("command.rejected", extra={**base, "event_code": "command.rejected", "outcome": "REJECTED", "error_code": error.code.value})
+            raise
+        except Exception:
+            LOGGER.error("transaction.rollback", extra={**base, "event_code": "transaction.rollback", "outcome": "ROLLED_BACK", "error_code": "INTERNAL_ERROR"})
+            raise
+        operation_event = {
+            "start_external_operation": "operation.started",
+            "record_operation_result": "operation.completed",
+            "reconcile_operation": "operation.reconciled",
+        }.get(name)
+        if operation_event:
+            LOGGER.info(operation_event, extra={**base, "event_code": operation_event, "outcome": "SUCCEEDED", "error_code": None})
+        LOGGER.info("command.completed", extra={**base, "event_code": "command.completed", "outcome": "SUCCEEDED", "error_code": None})
+        return result
+    return wrapped
+
+
+for _command_name in ALLOWED_COMMANDS:
+    setattr(WorkflowService, _command_name, _logged_mutation(_command_name, getattr(WorkflowService, _command_name)))

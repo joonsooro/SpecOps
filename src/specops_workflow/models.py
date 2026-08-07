@@ -189,6 +189,12 @@ class GitHubIdentity(StrictModel):
     node_id: ShortText
     html_url: ShortText
 
+    @model_validator(mode="after")
+    def canonical_url(self) -> GitHubIdentity:
+        if self.repository.lower() != self.repository or self.html_url != f"https://github.com/{self.repository}/issues/{self.issue_number}":
+            raise ValueError("GitHub identity must use the canonical repository issue URL")
+        return self
+
 
 ExternalIdentity = JiraIdentity | GitHubIdentity
 
@@ -206,6 +212,14 @@ class RemoteObservation(StrictModel):
     expected_previous_remote_revision: ShortText | None = None
     native_status: ShortText | None = None
     owned_content: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def closed_shape(self) -> RemoteObservation:
+        if self.observation_kind == ObservationKind.FOUND:
+            if self.remote_revision is None or self.native_status is None or self.owned_content is None: raise ValueError("FOUND requires revision, status, and owned content")
+        elif self.remote_revision is not None or self.native_status is not None or self.owned_content is not None:
+            raise ValueError("NOT_FOUND stores no remote revision, status, or owned content")
+        return self
 
 
 class CommandBase(StrictModel):

@@ -15,7 +15,7 @@ from .errors import DomainError, ErrorCode
 from .models import *  # noqa: F403
 from .ports import Clock, RandomUuidGenerator, SystemClock, UuidGenerator
 from .renderer import SENTINEL_JIRA_KEY, render_structured_body
-from .state import AmbiguityState, ApprovalState, CaseState, DelegationState
+from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState, OperationState
 
 RESOLUTION_NAMESPACE = UUID("4a5cbf7e-bcff-5a85-b670-c9a38145704d")
 ALLOWED_COMMANDS = {
@@ -443,6 +443,116 @@ class WorkflowService:
         if required.issubset(scopes):
             current = root.current; root.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.APPROVED.value)
         return self._finish(case, "approve_projection_plan", command, fp, ApprovalResult, approval_id=approval.id, scope=approval.scope, artifact_binding=root.binding)  # type: ignore[return-value]
+
+    def _operation_result(self, operation: OperationState, receipt: Receipt) -> OperationResult:
+        return OperationResult(operation_id=operation.id, intent_id=operation.intent.intent_id, system=operation.intent.system, action=operation.intent.action, status=operation.status, attempt=operation.attempt, failure_code=operation.failure_code, confirmation=operation.confirmation, confirmed_snapshot_sequence=operation.confirmed_snapshot_sequence, receipt=receipt)
+
+    def start_external_operation(self, command: StartExternalOperationCommand) -> OperationResult:
+        case, replay, fp = self._begin("start_external_operation", command)
+        if replay: return replay  # type: ignore[return-value]
+        self._authorize(case, command.acting_actor_id, "start_external_operation")
+        intent: OperationIntent | None = case.metadata.get("intents", {}).get(command.intent_id)
+        if intent is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        idempotent = next((item for item in case.operations.values() if item.idempotency_key == command.idempotency_key), None)
+        by_intent = next((item for item in case.operations.values() if item.intent.intent_id == command.intent_id), None)
+        operation = case.operations.get(command.operation_id)
+        if idempotent is not None and idempotent.id != command.operation_id: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if by_intent is not None and by_intent.id != command.operation_id: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        now = self._now()
+        if operation is None:
+            operation = OperationState(command.operation_id, intent, command.idempotency_key, OperationStatus.PENDING, 1, now, now)
+            case.operations[operation.id] = operation
+        else:
+            if operation.intent.intent_id != command.intent_id or operation.idempotency_key != command.idempotency_key or operation.intent.fingerprint != intent.fingerprint: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if operation.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN}: raise DomainError(ErrorCode.OPERATION_RETRY_BLOCKED)
+            if operation.status == OperationStatus.SUCCEEDED and operation.last_result is not None: return operation.last_result
+            operation.status = OperationStatus.PENDING; operation.attempt += 1; operation.failure_code = None; operation.updated_at = now
+        case.revision += 1
+        receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
+        result = self._operation_result(operation, receipt); operation.last_result = result
+        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        return result
+
+    @staticmethod
+    def _identity_key(system: System, identity: ExternalIdentity) -> str:
+        if system == System.JIRA and isinstance(identity, JiraIdentity): return identity.key
+        if system == System.GITHUB and isinstance(identity, GitHubIdentity): return identity.node_id
+        raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+
+    def _matching_observation(self, case: CaseState, operation: OperationState, observation: RemoteObservation) -> BindingState:
+        intent = operation.intent
+        if observation.observation_kind != ObservationKind.FOUND: raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
+        if observation.system != intent.system or observation.generation_key != intent.request.get("generation_key") or observation.package_binding != intent.package_binding or observation.plan_binding != intent.plan_binding or observation.jira_plan_binding != intent.jira_plan_binding or observation.status_policy_binding != intent.status_policy_binding:
+            raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+        if sha256(observation.owned_content) != intent.request_owned_content_hash: raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
+        identity_key = self._identity_key(intent.system, observation.external_identity)
+        item_id = UUID(str(intent.item_ref["item_id"]))
+        existing = next((item for item in case.bindings.values() if item.system == intent.system and item.plan_id == intent.plan_binding.artifact_id and item.item_id == item_id), None)
+        if intent.action == Action.CREATE and existing is not None: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+        if intent.action != Action.CREATE and existing is None: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+        if existing is not None:
+            if self._identity_key(intent.system, existing.external_identity) != identity_key: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+            latest = next((snap for snap in reversed(existing.snapshots) if snap.remote_revision is not None), None)
+            expected = latest.remote_revision if latest else None
+            if observation.expected_previous_remote_revision != expected: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
+            if any(snap.remote_revision == observation.remote_revision for snap in existing.snapshots): raise DomainError(ErrorCode.INVALID_TRANSITION)
+            return existing
+        if observation.expected_previous_remote_revision is not None: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
+        if any(self._identity_key(item.system, item.external_identity) == identity_key for item in case.bindings.values() if item.system == intent.system): raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        binding = BindingState(self.ids.new(), case.id, intent.system, intent.plan_binding.artifact_id, item_id, observation.generation_key, observation.external_identity, intent.plan_binding.version, 0, self._now())
+        case.bindings[binding.id] = binding
+        return binding
+
+    def _store_found(self, case: CaseState, operation: OperationState, observation: RemoteObservation) -> BindingState:
+        binding = self._matching_observation(case, operation, observation)
+        binding.snapshots.append(observation); binding.current_observation_sequence += 1; binding.current_plan_version = observation.plan_binding.version
+        entry = {"binding_id": binding.id, "key": observation.external_identity.key} if isinstance(observation.external_identity, JiraIdentity) else {"binding_id": binding.id, "identity": observation.external_identity}
+        case.metadata.setdefault("external_bindings", {})[binding.item_id] = entry
+        return binding
+
+    def record_operation_result(self, command: RecordOperationResultCommand) -> OperationResult:
+        case, replay, fp = self._begin("record_operation_result", command)
+        if replay: return replay  # type: ignore[return-value]
+        self._authorize(case, command.acting_actor_id, "record_operation_result")
+        operation = case.operations.get(command.operation_id)
+        if operation is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        if operation.status != OperationStatus.PENDING or operation.attempt != command.attempt: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        now = self._now()
+        if isinstance(command.outcome, ExplicitFailure):
+            operation.status = OperationStatus.FAILED; operation.failure_code = command.outcome.failure_code
+        elif command.outcome.read_back is None:
+            operation.status = OperationStatus.UNKNOWN
+        else:
+            try:
+                binding = self._store_found(case, operation, command.outcome.read_back)
+            except DomainError:
+                operation.status = OperationStatus.UNKNOWN
+            else:
+                operation.status = OperationStatus.SUCCEEDED; operation.confirmation = command.outcome.read_back; operation.confirmed_snapshot_sequence = binding.current_observation_sequence
+        operation.updated_at = now
+        case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
+        result = self._operation_result(operation, receipt); operation.last_result = result
+        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        return result
+
+    def reconcile_operation(self, command: ReconcileOperationCommand) -> OperationResult:
+        case, replay, fp = self._begin("reconcile_operation", command)
+        if replay: return replay  # type: ignore[return-value]
+        self._authorize(case, command.acting_actor_id, "reconcile_operation")
+        operation = case.operations.get(command.operation_id)
+        if operation is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        if operation.attempt != command.attempt or operation.status in {OperationStatus.PENDING, OperationStatus.FAILED}: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        if command.observation.observation_kind == ObservationKind.NOT_FOUND:
+            if operation.status != OperationStatus.UNKNOWN: raise DomainError(ErrorCode.INVALID_TRANSITION)
+            operation.status = OperationStatus.FAILED; operation.failure_code = "REMOTE_NOT_FOUND"
+        else:
+            binding = self._store_found(case, operation, command.observation)
+            operation.status = OperationStatus.SUCCEEDED; operation.failure_code = None; operation.confirmation = command.observation; operation.confirmed_snapshot_sequence = binding.current_observation_sequence
+        now = self._now(); operation.updated_at = now
+        case.revision += 1; receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=now)
+        result = self._operation_result(operation, receipt); operation.last_result = result
+        case.command_results[command.command_id] = (fp, result); self._command_case[command.command_id] = case.id
+        return result
 
     def get_case_state(self, case_id: UUID) -> CaseState:
         """Internal test/repository bridge; never returns through a public read method."""

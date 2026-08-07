@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specops-workflow"
+version = "0.1.0"
+description = "Deterministic workflow policy and state foundation"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "pydantic>=2,<3",
+  "SQLAlchemy>=2,<3",
+  "alembic>=1,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+

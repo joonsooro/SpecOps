@@ -3,6 +3,7 @@
 from .errors import DomainError, ErrorCode
 from .models import *  # noqa: F403 - the models module owns the public DTO inventory
 from .ports import Clock, FrozenClock, SequenceIdGenerator, SystemClock, UuidGenerator
+from .service import WorkflowService
 
 __all__ = [
     "Clock",
@@ -12,5 +13,5 @@ __all__ = [
     "SequenceIdGenerator",
     "SystemClock",
     "UuidGenerator",
+    "WorkflowService",
 ]
-

@@ -266,6 +266,7 @@ class SubmitRemoteSnapshotCommand(CommandBase): observation: RemoteObservation
 
 
 class Receipt(StrictModel): case_id: UUID; revision: BoundedInt; command_id: UUID; occurred_at: datetime
+class CaseResult(StrictModel): case_id: UUID; pm_actor_id: UUID; dev_lead_actor_id: UUID; receipt: Receipt
 class ParticipantResult(StrictModel): case_id: UUID; actor_id: UUID; receipt: Receipt
 class DelegationResult(StrictModel): case_id: UUID; delegation_id: UUID; revoked_at: datetime | None; receipt: Receipt
 class SourceArtifactResult(StrictModel): identity: SourceArtifactIdentity; receipt: Receipt

@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from collections import deque
+from uuid import UUID
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+from .contracts import CallState, ConversationPhase
+from .orchestration import WorkshopCoordinator
+from .ports import LiveVoiceProvider, LiveVoiceSession, VoiceContext, VoiceEventType
+from .sessions import WorkshopStore
+
+
+INPUT_AUDIO_LIMIT = 320_000
+OUTPUT_AUDIO_LIMIT = 480_000
+PCM16_16K_FRAME_BYTES = 640
+IDLE_TIMEOUT_SECONDS = 30 * 60
+
+
+class BoundedAudioBuffer:
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self._chunks: deque[bytes] = deque()
+        self.byte_length = 0
+
+    def push(self, chunk: bytes) -> None:
+        if not chunk:
+            return
+        if len(chunk) > self.max_bytes:
+            chunk = chunk[-self.max_bytes:]
+        self._chunks.append(bytes(chunk))
+        self.byte_length += len(chunk)
+        while self.byte_length > self.max_bytes and self._chunks:
+            removed = self._chunks.popleft()
+            self.byte_length -= len(removed)
+
+    def pop(self) -> bytes | None:
+        if not self._chunks:
+            return None
+        value = self._chunks.popleft()
+        self.byte_length -= len(value)
+        return value
+
+    def clear(self) -> None:
+        self._chunks.clear()
+        self.byte_length = 0
+
+
+class LiveTransport:
+    def __init__(
+        self,
+        provider: LiveVoiceProvider,
+        coordinator: WorkshopCoordinator,
+        store: WorkshopStore,
+        *,
+        session_id: UUID,
+        idle_timeout_seconds: float = IDLE_TIMEOUT_SECONDS,
+    ) -> None:
+        self.provider = provider
+        self.coordinator = coordinator
+        self.store = store
+        self.session_id = session_id
+        if idle_timeout_seconds <= 0:
+            raise ValueError("idle timeout must be positive")
+        self.idle_timeout_seconds = idle_timeout_seconds
+        self._last_input_at = 0.0
+
+    async def handle(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        recovered = self.coordinator.recover(self.session_id)
+        history = tuple(snapshot.normalized_text for snapshot in recovered.final_transcripts)
+        context = VoiceContext(
+            system_instruction=(
+                "You are the SpecOps Workshop facilitator. Respect the PM business authority, "
+                "the Dev Lead technical delegation, and only discuss evidence-backed package formulation."
+            ),
+            textual_history=history,
+        )
+        session = await self._connect_with_retry(websocket, context)
+        if session is None:
+            await self._text_only(websocket)
+            return
+        self.store.update_phase(self.session_id, call_state=CallState.LISTENING, now=self.coordinator.clock.now())
+        await websocket.send_json({"type": "CALL_STATE", "state": CallState.LISTENING.value})
+        self._last_input_at = asyncio.get_running_loop().time()
+        client_task = asyncio.create_task(self._client_to_provider(websocket, session))
+        provider_task = asyncio.create_task(self._provider_to_client(websocket, session))
+        idle_task = asyncio.create_task(self._expire_idle(websocket))
+        try:
+            done, pending = await asyncio.wait((client_task, provider_task, idle_task), return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+        except WebSocketDisconnect:
+            self.store.update_phase(self.session_id, call_state=CallState.DISCONNECTED, now=self.coordinator.clock.now())
+        finally:
+            await session.close()
+
+    async def _connect_with_retry(self, websocket: WebSocket, context: VoiceContext) -> LiveVoiceSession | None:
+        self.store.update_phase(self.session_id, call_state=CallState.CONNECTING, now=self.coordinator.clock.now())
+        await websocket.send_json({"type": "CALL_STATE", "state": CallState.CONNECTING.value})
+        for delay in (0.0, 0.25, 0.75):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await self.provider.connect(context)
+            except Exception:
+                continue
+        self.store.update_phase(self.session_id, call_state=CallState.DISCONNECTED, now=self.coordinator.clock.now())
+        await websocket.send_json({
+            "type": "CALL_STATE", "state": CallState.DISCONNECTED.value,
+            "guidance": "Voice is unavailable. Continue with text; your final turns remain recoverable.",
+        })
+        return None
+
+    async def _client_to_provider(self, websocket: WebSocket, session: LiveVoiceSession) -> None:
+        audio = BoundedAudioBuffer(INPUT_AUDIO_LIMIT)
+        while True:
+            message = await websocket.receive()
+            self._last_input_at = asyncio.get_running_loop().time()
+            if message.get("bytes") is not None:
+                frame = message["bytes"]
+                if len(frame) != PCM16_16K_FRAME_BYTES:
+                    await websocket.send_json({"type": "ERROR", "code": "INVALID_AUDIO_FRAME"})
+                    continue
+                audio.push(frame)
+                current = audio.pop()
+                if current is not None:
+                    await session.send_audio(current)
+                continue
+            if message.get("text") is None:
+                self.store.update_phase(
+                    self.session_id, call_state=CallState.DISCONNECTED, now=self.coordinator.clock.now()
+                )
+                return
+            value = json.loads(message["text"])
+            kind = value.get("type")
+            if kind == "TEXT":
+                result = self.coordinator.commit_final_turn(
+                    self.session_id, turn_sequence=int(value["turn_sequence"]), text=str(value["text"]),
+                    provider_request_id=str(value["provider_request_id"]),
+                    correction_of_version=value.get("correction_of_version"),
+                )
+                await websocket.send_json({"type": "FINAL_COMMITTED", "revision": result.receipt.revision})
+                await session.send_text(str(value["text"]))
+            elif kind == "INTERRUPT":
+                audio.clear()
+                await websocket.send_json({"type": "INTERRUPTED", "playback_cleared": True})
+                await session.interrupt()
+            elif kind == "END":
+                self.store.update_phase(
+                    self.session_id, call_state=CallState.ENDED, conversation_phase=ConversationPhase.COMPLETE,
+                    now=self.coordinator.clock.now(),
+                )
+                await websocket.send_json({"type": "CALL_STATE", "state": CallState.ENDED.value})
+                return
+            else:
+                await websocket.send_json({"type": "ERROR", "code": "INVALID_CONTROL"})
+
+    async def _expire_idle(self, websocket: WebSocket) -> None:
+        while True:
+            remaining = self.idle_timeout_seconds - (asyncio.get_running_loop().time() - self._last_input_at)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+                continue
+            session = self.store.get_session(self.session_id)
+            self.store.update_phase(
+                self.session_id, call_state=CallState.DISCONNECTED, now=self.coordinator.clock.now()
+            )
+            await websocket.send_json({
+                "type": "CALL_STATE", "state": CallState.DISCONNECTED.value,
+                "phase": session.conversation_phase.value,
+                "guidance": "Voice expired after 30 minutes without input. Reconnect or continue with text.",
+            })
+            return
+
+    async def _provider_to_client(self, websocket: WebSocket, session: LiveVoiceSession) -> None:
+        output = BoundedAudioBuffer(OUTPUT_AUDIO_LIMIT)
+        next_sequence = len(self.store.latest_snapshots(self.session_id)) + 1
+        async for event in session.events():
+            if event.type == VoiceEventType.AUDIO and event.audio is not None:
+                output.push(event.audio)
+                chunk = output.pop()
+                if chunk is not None:
+                    await websocket.send_bytes(chunk)
+            elif event.type == VoiceEventType.INPUT_PARTIAL:
+                await websocket.send_json({"type": "TRANSCRIPT_PARTIAL", "text": event.text})
+            elif event.type == VoiceEventType.INPUT_FINAL and event.text:
+                result = self.coordinator.commit_final_turn(
+                    self.session_id, turn_sequence=next_sequence, text=event.text,
+                    provider_request_id=event.provider_request_id or f"provider-turn-{next_sequence}",
+                )
+                await websocket.send_json({
+                    "type": "TRANSCRIPT_FINAL", "text": event.text,
+                    "turn_sequence": next_sequence, "revision": result.receipt.revision,
+                })
+                next_sequence += 1
+            elif event.type == VoiceEventType.OUTPUT_TRANSCRIPT:
+                await websocket.send_json({"type": "AGENT_TRANSCRIPT", "text": event.text})
+            elif event.type == VoiceEventType.INTERRUPTED:
+                output.clear()
+                await websocket.send_json({"type": "INTERRUPTED", "playback_cleared": True})
+
+    async def _text_only(self, websocket: WebSocket) -> None:
+        while True:
+            try:
+                value = json.loads(await websocket.receive_text())
+            except WebSocketDisconnect:
+                return
+            if value.get("type") == "TEXT":
+                result = self.coordinator.commit_final_turn(
+                    self.session_id, turn_sequence=int(value["turn_sequence"]), text=str(value["text"]),
+                    provider_request_id=str(value["provider_request_id"]),
+                    correction_of_version=value.get("correction_of_version"),
+                )
+                await websocket.send_json({"type": "FINAL_COMMITTED", "revision": result.receipt.revision})
+            elif value.get("type") == "END":
+                self.store.update_phase(
+                    self.session_id, call_state=CallState.ENDED, conversation_phase=ConversationPhase.COMPLETE,
+                    now=self.coordinator.clock.now(),
+                )
+                await websocket.send_json({"type": "CALL_STATE", "state": CallState.ENDED.value})
+                return
+            else:
+                await websocket.send_json({"type": "ERROR", "code": "INVALID_CONTROL"})

@@ -17,6 +17,7 @@ dependencies = [
 test = ["pytest>=8,<10"]
 workshop = [
   "fastapi>=0.116,<1",
+  "google-genai>=1,<2",
   "uvicorn>=0.35,<1",
 ]
 workshop-test = [

@@ -281,6 +281,27 @@ class WorkshopStore:
                 call_state=CallState.DISCONNECTED.value, updated_at=_instant(now),
             ))
 
+    def update_phase(
+        self,
+        session_id: UUID,
+        *,
+        call_state: CallState | None = None,
+        conversation_phase: ConversationPhase | None = None,
+        workshop_state: WorkshopState | None = None,
+        now: datetime,
+    ) -> WorkshopSession:
+        current = self.get_session(session_id)
+        values: dict[str, object] = {"updated_at": _instant(now), "last_activity_at": _instant(now)}
+        if call_state is not None:
+            values["call_state"] = call_state.value
+        if conversation_phase is not None:
+            values["conversation_phase"] = conversation_phase.value
+        if workshop_state is not None:
+            values["workshop_state"] = workshop_state.value
+        with self.engine.begin() as connection:
+            connection.execute(update(sessions).where(sessions.c.session_id == str(session_id)).values(**values))
+        return self.get_session(session_id)
+
     def latest_snapshots(self, session_id: UUID) -> tuple[TranscriptSnapshot, ...]:
         with self.engine.connect() as connection:
             rows = list(connection.execute(select(transcript_snapshots).where(

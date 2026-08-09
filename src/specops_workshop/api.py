@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -13,7 +13,10 @@ from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
 from .config import Settings
 from .contracts import FinalTurnInput, RecoveryView
 from .delegation import load_delegation_fixture
+from .live_transport import LiveTransport
 from .orchestration import WorkshopCoordinator
+from .ports import LiveVoiceProvider
+from .providers import GeminiLiveProvider
 from .sessions import WorkshopStore
 from .sources import SourceCatalog
 
@@ -28,6 +31,8 @@ def create_app(
     settings: Settings | None = None,
     clock=None,
     source_catalog: SourceCatalog | None = None,
+    live_provider: LiveVoiceProvider | None = None,
+    idle_timeout_seconds: float = 30 * 60,
 ) -> FastAPI:
     runtime_clock = clock or SystemClock()
     runtime_settings = settings or Settings.load(
@@ -45,6 +50,14 @@ def create_app(
     workshop_store = WorkshopStore(runtime_settings.workshop_database_url)
     coordinator = WorkshopCoordinator(workshop_store, workflow, clock=runtime_clock)
     coordinator.start_session(DEMO_SESSION_ID, case_id=bootstrap.case_id, pm_actor_id=bootstrap.pm_actor_id)
+    voice_provider = live_provider or GeminiLiveProvider(
+        api_key=runtime_settings.gemini_api_key,
+        model=runtime_settings.gemini_model,
+    )
+    live_transport = LiveTransport(
+        voice_provider, coordinator, workshop_store,
+        session_id=DEMO_SESSION_ID, idle_timeout_seconds=idle_timeout_seconds,
+    )
     app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
     app.state.settings = runtime_settings
     app.state.workflow = workflow
@@ -53,6 +66,8 @@ def create_app(
     app.state.workshop_store = workshop_store
     app.state.coordinator = coordinator
     app.state.session_id = DEMO_SESSION_ID
+    app.state.live_provider = voice_provider
+    app.state.live_transport = live_transport
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:
@@ -71,6 +86,10 @@ def create_app(
             provider_request_id=value.provider_request_id,
             correction_of_version=value.correction_of_version,
         )
+
+    @app.websocket("/ws/live")
+    async def live_socket(websocket: WebSocket) -> None:
+        await app.state.live_transport.handle(websocket)
 
     frontend_dist = BACKEND_ROOT / "frontend" / "dist"
     if frontend_dist.is_dir():

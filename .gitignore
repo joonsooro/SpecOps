@@ -4,6 +4,10 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .venv/
+node_modules/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
 *.db
 *.sqlite*
 dist/

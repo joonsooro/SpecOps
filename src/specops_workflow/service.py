@@ -18,12 +18,13 @@ from .errors import DomainError, ErrorCode
 from .models import *  # noqa: F403
 from .ports import Clock, RandomUuidGenerator, SystemClock, UuidGenerator
 from .renderer import SENTINEL_JIRA_KEY, render_structured_body
-from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState, OperationState
+from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState, OperationState, PackageItemState
 
 RESOLUTION_NAMESPACE = UUID("4a5cbf7e-bcff-5a85-b670-c9a38145704d")
 DRIFT_NAMESPACE = UUID("08f33a1b-f1af-56d7-8a0d-8ab2a87787f8")
 INTENT_NAMESPACE = UUID("b91c74fb-902f-57cb-8dc3-aa89dd91702c")
 TRACE_NAMESPACE = UUID("fd829f7d-1009-5ec8-83a2-7ae5f4a28609")
+REVIEW_NAMESPACE = UUID("b92d151a-1af5-5e84-982d-7d18dd77bd1b")
 LOGGER = logging.getLogger("specops_workflow")
 LOGGER.addHandler(logging.NullHandler())
 ALLOWED_COMMANDS = {
@@ -31,11 +32,13 @@ ALLOWED_COMMANDS = {
     "record_ambiguity_finding", "resolve_ambiguity_finding", "create_spec_package", "revise_spec_package",
     "mark_spec_package_ready", "approve_spec_package", "create_projection_plan", "revise_projection_plan",
     "approve_projection_plan", "create_status_policy", "revise_status_policy", "approve_status_policy",
+    "mark_spec_package_item_ready", "approve_spec_package_item", "create_review_request", "resolve_review_request",
     "start_external_operation", "record_operation_result", "reconcile_operation", "submit_remote_snapshot",
 }
 DELEGATABLE_COMMANDS = {
     "register_source_artifact", "record_ambiguity_finding", "resolve_ambiguity_finding",
     "create_spec_package", "revise_spec_package", "mark_spec_package_ready", "approve_spec_package",
+    "mark_spec_package_item_ready", "approve_spec_package_item", "create_review_request", "resolve_review_request",
     "create_projection_plan", "revise_projection_plan", "approve_projection_plan", "approve_status_policy",
 }
 
@@ -71,7 +74,7 @@ class WorkflowService:
         except KeyError: raise DomainError(ErrorCode.RECORD_NOT_FOUND) from None
 
     def _begin(self, name: str, command: CommandBase) -> tuple[CaseState, BaseModel | None, str]:
-        if command.acting_actor_id == "SYSTEM" and name in {"approve_spec_package", "approve_projection_plan", "approve_status_policy", "resolve_ambiguity_finding", "grant_delegation", "revoke_delegation", "add_participant"}:
+        if command.acting_actor_id == "SYSTEM" and name in {"approve_spec_package", "approve_spec_package_item", "approve_projection_plan", "approve_status_policy", "resolve_ambiguity_finding", "resolve_review_request", "grant_delegation", "revoke_delegation", "add_participant"}:
             raise DomainError(ErrorCode.SYSTEM_ACTION_FORBIDDEN)
         owner = self._command_case.get(command.command_id)
         if owner is not None and owner != command.case_id: raise DomainError(ErrorCode.CROSS_CASE_REFERENCE)
@@ -80,7 +83,8 @@ class WorkflowService:
         prior = case.command_results.get(command.command_id)
         if prior:
             if prior[0] != fingerprint: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return case, ReplayResult(stored_result=prior[1]), fingerprint
+            replay_type = ExtendedReplayResult if isinstance(prior[1], (ItemGovernanceResult, ReviewRequestResult)) else ReplayResult
+            return case, replay_type(stored_result=prior[1]), fingerprint
         if command.expected_case_revision != case.revision: raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
         return copy.deepcopy(case), None, fingerprint
 
@@ -133,6 +137,10 @@ class WorkflowService:
             "revise_spec_package": ArtifactKind.SPEC_PACKAGE.value,
             "mark_spec_package_ready": ArtifactKind.SPEC_PACKAGE.value,
             "approve_spec_package": ArtifactKind.SPEC_PACKAGE.value,
+            "mark_spec_package_item_ready": ArtifactKind.SPEC_PACKAGE.value,
+            "approve_spec_package_item": ArtifactKind.SPEC_PACKAGE.value,
+            "create_review_request": ArtifactKind.SPEC_PACKAGE.value,
+            "resolve_review_request": ArtifactKind.SPEC_PACKAGE.value,
             "create_projection_plan": ArtifactKind.PROJECTION_PLAN.value,
             "revise_projection_plan": ArtifactKind.PROJECTION_PLAN.value,
             "approve_projection_plan": ArtifactKind.PROJECTION_PLAN.value,
@@ -214,12 +222,16 @@ class WorkflowService:
         allowed = {"JSON_POINTER": {"application/json"}, "LINE_RANGE": {"text/markdown", "text/plain"}, "WORKBOOK_RANGE": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}}
         if identity.media_type not in allowed[kind]: raise DomainError(ErrorCode.INVALID_SOURCE_REFERENCE)
 
-    def record_ambiguity_finding(self, command: RecordAmbiguityFindingCommand) -> AmbiguityFindingResult:
+    def record_ambiguity_finding(self, command: RecordAmbiguityFindingCommand | RecordItemAmbiguityFindingCommand) -> AmbiguityFindingResult:
         case, replay, fp = self._begin("record_ambiguity_finding", command)
         if replay: return replay  # type: ignore[return-value]
         self._authorize(case, command.acting_actor_id, "record_ambiguity_finding")
         for ref in command.evidence_refs: self._validate_source_ref(case, ref)
-        state = AmbiguityState(command.finding_id, command.category.value, command.domain, command.severity.value, command.evidence_refs, command.clarification_question, self._now())
+        item_id = getattr(command, "item_id", None)
+        item_binding = self._current_item_state(case, item_id).binding if item_id is not None else None
+        if case.package is not None and isinstance(case.package.current.payload, SpecPackagePayloadV2) and item_binding is None:
+            raise DomainError(ErrorCode.INVALID_TRANSITION)
+        state = AmbiguityState(command.finding_id, command.category.value, command.domain, command.severity.value, command.evidence_refs, command.clarification_question, self._now(), item_binding=item_binding)
         case.ambiguities[state.id] = state
         return self._finish(case, "record_ambiguity_finding", command, fp, AmbiguityFindingResult, finding_id=state.id, status=state.status, resolutions=[], resolved_at=None)  # type: ignore[return-value]
 
@@ -269,7 +281,7 @@ class WorkflowService:
         detail = getattr(location, "pointer", None) or (getattr(location, "start", None), getattr(location, "end", None)) or (getattr(location, "sheet", None), getattr(location, "a1", None))
         return (ref.artifact_id.bytes, ref.version, location.kind, str(detail))
 
-    def _normalized_package_payload(self, payload: SpecPackagePayload) -> dict[str, Any]:
+    def _normalized_package_payload(self, payload: SpecPackagePayload | SpecPackagePayloadV2) -> dict[str, Any]:
         def refs(values: list[SourceRef]) -> list[dict[str, Any]]:
             return [item.model_dump(mode="python", exclude_none=False) for item in sorted(values, key=self._source_sort)]
         requirements = []
@@ -281,9 +293,21 @@ class WorkflowService:
         checks = []
         for item in sorted(payload.acceptance_checks, key=lambda row: row.check_id.bytes):
             value = item.model_dump(mode="python", exclude_none=False); value["related_unit_ids"] = sorted(item.related_unit_ids, key=lambda value: value.bytes); value["source_refs"] = refs(item.source_refs); checks.append(value)
-        return {"requirements": requirements, "technical_decisions": decisions, "acceptance_checks": checks}
+        normalized: dict[str, Any] = {"requirements": requirements, "technical_decisions": decisions, "acceptance_checks": checks}
+        if isinstance(payload, SpecPackagePayloadV2):
+            normalized["items"] = [
+                {
+                    **item.model_dump(mode="python", exclude_none=False),
+                    "requirement_ids": sorted(item.requirement_ids, key=lambda value: value.bytes),
+                    "technical_decision_ids": sorted(item.technical_decision_ids, key=lambda value: value.bytes),
+                    "acceptance_check_ids": sorted(item.acceptance_check_ids, key=lambda value: value.bytes),
+                    "dependency_item_ids": sorted(item.dependency_item_ids, key=lambda value: value.bytes),
+                }
+                for item in sorted(payload.items, key=lambda row: row.item_id.bytes)
+            ]
+        return normalized
 
-    def _validate_package_shape(self, case: CaseState, payload: SpecPackagePayload, *, ready: bool, package_id: UUID | None = None) -> None:
+    def _validate_package_shape(self, case: CaseState, payload: SpecPackagePayload | SpecPackagePayloadV2, *, ready: bool, package_id: UUID | None = None) -> None:
         units = [item.unit_id for item in payload.requirements] + [item.unit_id for item in payload.technical_decisions]
         all_ids = units + [item.check_id for item in payload.acceptance_checks]
         if len(all_ids) != len(set(all_ids)): raise DomainError(ErrorCode.INVALID_TRANSITION)
@@ -310,19 +334,105 @@ class WorkflowService:
         if ready and any(item.status == FindingStatus.OPEN and item.severity == Severity.BLOCKING.value for item in case.ambiguities.values()):
             raise DomainError(ErrorCode.BLOCKING_FINDING)
 
-    def create_spec_package(self, command: CreateSpecPackageCommand) -> SpecPackageResult:
+    def _package_item_hash(self, payload: SpecPackagePayloadV2, item: SpecPackageItem) -> str:
+        normalized = self._normalized_package_payload(payload)
+        requirements = {value["unit_id"]: value for value in normalized["requirements"]}
+        decisions = {value["unit_id"]: value for value in normalized["technical_decisions"]}
+        checks = {value["check_id"]: value for value in normalized["acceptance_checks"]}
+        return sha256({
+            "schema": "spec-package-item-v1",
+            "title": item.title,
+            "requirements": [requirements[value] for value in sorted(item.requirement_ids, key=lambda row: row.bytes)],
+            "technical_decisions": [decisions[value] for value in sorted(item.technical_decision_ids, key=lambda row: row.bytes)],
+            "acceptance_checks": [checks[value] for value in sorted(item.acceptance_check_ids, key=lambda row: row.bytes)],
+            "dependency_item_ids": sorted(item.dependency_item_ids, key=lambda value: value.bytes),
+        })
+
+    @staticmethod
+    def _package_item_domain(payload: SpecPackagePayloadV2, item: SpecPackageItem) -> Domain:
+        requirements = {value.unit_id: value for value in payload.requirements}
+        decisions = {value.unit_id: value for value in payload.technical_decisions}
+        checks = {value.check_id: value for value in payload.acceptance_checks}
+        domains = {requirements[value].domain for value in item.requirement_ids}
+        domains.update(decisions[value].domain for value in item.technical_decision_ids)
+        domains.update(checks[value].domain for value in item.acceptance_check_ids)
+        if domains == {Domain.BUSINESS}: return Domain.BUSINESS
+        if domains == {Domain.TECHNICAL}: return Domain.TECHNICAL
+        return Domain.CROSS_DOMAIN
+
+    def _rebuild_package_items(self, case: CaseState) -> None:
+        previous_states = {
+            (state.binding.item_id, state.binding.item_version, state.binding.item_hash): state
+            for history in case.package_items.values()
+            for state in history
+        }
+        histories: dict[UUID, list[PackageItemState]] = {}
+        memberships: dict[int, list[UUID]] = {}
+        latest: dict[UUID, PackageItemState] = {}
+        if case.package is None:
+            case.package_items = histories; case.package_version_items = memberships; return
+        for version in case.package.versions:
+            payload = version.payload
+            if not isinstance(payload, SpecPackagePayloadV2):
+                memberships[version.version] = []
+                continue
+            current_ids: list[UUID] = []
+            for item in sorted(payload.items, key=lambda value: value.item_id.bytes):
+                digest = self._package_item_hash(payload, item)
+                prior = latest.get(item.item_id)
+                item_version = prior.binding.item_version if prior and prior.binding.item_hash == digest else (prior.binding.item_version + 1 if prior else 1)
+                binding = ItemBinding(package_id=case.package.artifact_id, item_id=item.item_id, item_version=item_version, item_hash=digest)
+                state = previous_states.get((item.item_id, item_version, digest))
+                if state is None:
+                    state = PackageItemState(
+                        definition=copy.deepcopy(item), binding=binding, domain=self._package_item_domain(payload, item), complete=True,
+                    )
+                history = histories.setdefault(item.item_id, [])
+                if not history or history[-1].binding != state.binding:
+                    history.append(state)
+                latest[item.item_id] = state
+                current_ids.append(item.item_id)
+            memberships[version.version] = current_ids
+            latest = {item_id: latest[item_id] for item_id in current_ids}
+        case.package_items = histories
+        case.package_version_items = memberships
+
+    def _current_item_state(self, case: CaseState, item_id: UUID | None) -> PackageItemState:
+        if case.package is None or item_id is None:
+            raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        current_ids = case.package_version_items.get(case.package.current.version, [])
+        if item_id not in current_ids:
+            raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        history = case.package_items.get(item_id, [])
+        if not history:
+            raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        return history[-1]
+
+    def _assert_item_command(self, case: CaseState, command: ItemCommand) -> PackageItemState:
+        if case.package is None:
+            raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
+        state = self._current_item_state(case, command.item_binding.item_id)
+        if state.binding != command.item_binding:
+            raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+        return state
+
+    def create_spec_package(self, command: CreateSpecPackageCommand | CreateSpecPackageV2Command) -> SpecPackageResult:
         case, replay, fp = self._begin("create_spec_package", command)
         if replay: return replay  # type: ignore[return-value]
         self._authorize(case, command.acting_actor_id, "create_spec_package", artifact_id=command.package_id)
         if case.package is not None: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        if isinstance(command.payload, SpecPackagePayloadV2) != (command.content_schema_version == 2 and command.hash_schema_version == 3):
+            raise DomainError(ErrorCode.INVALID_TRANSITION)
         self._validate_package_shape(case, command.payload, ready=False, package_id=command.package_id)
         digest = self.registry.hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
         root = ArtifactRoot(ArtifactKind.SPEC_PACKAGE, command.package_id)
         root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PackageState.DRAFT.value))
         case.package = root
+        self._rebuild_package_items(case)
         return self._finish(case, "create_spec_package", command, fp, SpecPackageResult, binding=root.binding, state=PackageState.DRAFT)  # type: ignore[return-value]
 
-    def revise_spec_package(self, command: ReviseSpecPackageCommand) -> SpecPackageResult:
+    def revise_spec_package(self, command: ReviseSpecPackageCommand | ReviseSpecPackageV2Command) -> SpecPackageResult:
         case, replay, fp = self._begin("revise_spec_package", command)
         if replay: return replay  # type: ignore[return-value]
         if case.package is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
@@ -331,10 +441,21 @@ class WorkflowService:
         if any(item.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN} for item in case.operations.values()):
             raise DomainError(ErrorCode.INVALID_TRANSITION)
         prior_package_binding = case.package.binding
+        prior_item_bindings = {item_id: self._current_item_state(case, item_id).binding for item_id in case.package_version_items.get(case.package.current.version, [])}
+        if isinstance(command.payload, SpecPackagePayloadV2) != (command.content_schema_version == 2 and command.hash_schema_version == 3):
+            raise DomainError(ErrorCode.INVALID_TRANSITION)
         self._validate_package_shape(case, command.payload, ready=False, package_id=case.package.artifact_id)
         digest = self.registry.hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
         case.package.revise(ArtifactVersion(case.package.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PackageState.DRAFT.value))
+        self._rebuild_package_items(case)
+        current_item_bindings = {item_id: self._current_item_state(case, item_id).binding for item_id in case.package_version_items.get(case.package.current.version, [])}
+        changed_items = {
+            item_id for item_id in set(prior_item_bindings) | set(current_item_bindings)
+            if prior_item_bindings.get(item_id) != current_item_bindings.get(item_id)
+        }
         for plan in case.plans.values():
+            if isinstance(plan.current.payload, ProjectionPlanPayloadV2) and not any(binding.item_id in changed_items for binding in plan.current.payload.source_item_bindings):
+                continue
             current = plan.current; plan.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.STALE.value)
             self._finding(case, FindingCategory.STALE_BINDING, [prior_package_binding.model_dump(mode="json"), case.package.binding.model_dump(mode="json")], BindingValue(value=prior_package_binding), BindingValue(value=case.package.binding), BindingValue(value=prior_package_binding))
         return self._finish(case, "revise_spec_package", command, fp, SpecPackageResult, binding=case.package.binding, state=PackageState.DRAFT)  # type: ignore[return-value]
@@ -346,6 +467,7 @@ class WorkflowService:
         self._authorize(case, command.acting_actor_id, "mark_spec_package_ready", artifact_id=case.package.artifact_id)
         case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
         current = case.package.current
+        if isinstance(current.payload, SpecPackagePayloadV2): raise DomainError(ErrorCode.INVALID_TRANSITION)
         if current.state != PackageState.DRAFT.value: raise DomainError(ErrorCode.INVALID_TRANSITION)
         self._validate_package_shape(case, current.payload, ready=True, package_id=case.package.artifact_id)
         case.package.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PackageState.READY.value)
@@ -357,6 +479,7 @@ class WorkflowService:
         if case.package is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
         current = case.package.current
+        if isinstance(current.payload, SpecPackagePayloadV2): raise DomainError(ErrorCode.INVALID_TRANSITION)
         if any(item.artifact_id == case.package.artifact_id and item.artifact_version == current.version and item.artifact_hash == current.semantic_hash and item.scope == command.scope and item.actor_id == command.acting_actor_id for item in case.approvals):
             raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
         if any(item.status == FindingStatus.OPEN and item.severity == Severity.BLOCKING.value for item in case.ambiguities.values()):
@@ -369,6 +492,186 @@ class WorkflowService:
         if {ApprovalScope.BUSINESS, ApprovalScope.TECHNICAL}.issubset(scopes):
             case.package.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PackageState.APPROVED.value)
         return self._finish(case, "approve_spec_package", command, fp, ApprovalResult, approval_id=approval.id, scope=approval.scope, artifact_binding=case.package.binding)  # type: ignore[return-value]
+
+    def _item_content(self, case: CaseState, state: PackageItemState) -> list[Requirement | TechnicalDecision | AcceptanceCheck]:
+        payload = case.package.current.payload
+        if not isinstance(payload, SpecPackagePayloadV2):
+            return []
+        definition = state.definition
+        return [
+            *[value for value in payload.requirements if value.unit_id in definition.requirement_ids],
+            *[value for value in payload.technical_decisions if value.unit_id in definition.technical_decision_ids],
+            *[value for value in payload.acceptance_checks if value.check_id in definition.acceptance_check_ids],
+        ]
+
+    def _item_required_scopes(self, state: PackageItemState) -> set[ApprovalScope]:
+        return self._required_scopes(state.domain)
+
+    def _item_approvals(self, case: CaseState, state: PackageItemState) -> list[ApprovalState]:
+        return [
+            value for value in case.approvals
+            if value.artifact_kind == ArtifactKind.SPEC_PACKAGE.value
+            and value.artifact_id == state.binding.item_id
+            and value.artifact_version == state.binding.item_version
+            and value.artifact_hash == state.binding.item_hash
+        ]
+
+    def _item_read_model(self, case: CaseState, state: PackageItemState) -> SpecPackageItemView:
+        approvals = self._item_approvals(case, state)
+        scopes = {value.scope for value in approvals}
+        blocking_findings = [
+            value for value in case.ambiguities.values()
+            if value.item_binding == state.binding and value.status == FindingStatus.OPEN and value.severity == Severity.BLOCKING.value
+        ]
+        open_reviews = [value for value in case.review_requests.values() if value.item_binding == state.binding and value.status == ReviewRequestStatus.OPEN]
+        decision_required = any(value.kind == ReviewRequestKind.DECISION_REQUIRED for value in open_reviews)
+        later_review = any(value.kind == ReviewRequestKind.LATER_REVIEW for value in open_reviews)
+        if decision_required:
+            readiness = ItemReadiness.BLOCKED
+        elif blocking_findings:
+            readiness = ItemReadiness.NEEDS_CLARIFICATION
+        elif state.complete and state.marked_ready and self._item_required_scopes(state).issubset(scopes):
+            readiness = ItemReadiness.READY
+        elif state.complete and state.marked_ready:
+            readiness = ItemReadiness.NEEDS_CLARIFICATION
+        else:
+            readiness = ItemReadiness.FORMULATING
+        return SpecPackageItemView(
+            binding=state.binding,
+            title=state.definition.title,
+            domain=state.domain,
+            readiness=readiness,
+            review_obligation=ReviewObligation.DECISION_REQUIRED if decision_required else ReviewObligation.LATER_REVIEW if later_review else ReviewObligation.NONE,
+            complete=state.complete,
+            approval_scopes=sorted(scopes, key=lambda value: list(ApprovalScope).index(value)),
+            open_finding_ids=sorted((value.id for value in blocking_findings), key=lambda value: value.bytes),
+            open_review_request_ids=sorted((value.review_request_id for value in open_reviews), key=lambda value: value.bytes),
+        )
+
+    def _item_result(self, case: CaseState, state: PackageItemState, receipt: Receipt) -> ItemGovernanceResult:
+        view = self._item_read_model(case, state)
+        return ItemGovernanceResult(item_binding=state.binding, readiness=view.readiness, review_obligation=view.review_obligation, receipt=receipt)
+
+    def mark_spec_package_item_ready(self, command: MarkSpecPackageItemReadyCommand) -> ItemGovernanceResult:
+        case, replay, fp = self._begin("mark_spec_package_item_ready", command)
+        if replay: return replay  # type: ignore[return-value]
+        state = self._assert_item_command(case, command)
+        self._authorize(case, command.acting_actor_id, "mark_spec_package_item_ready", artifact_id=state.binding.package_id)
+        for value in self._item_content(case, state):
+            for ref in value.source_refs: self._validate_source_ref(case, ref)
+        if any(value.item_binding == state.binding and value.status == FindingStatus.OPEN and value.severity == Severity.BLOCKING.value for value in case.ambiguities.values()):
+            raise DomainError(ErrorCode.BLOCKING_FINDING)
+        if state.marked_ready: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        state.marked_ready = True
+        case.revision += 1
+        receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=self._now())
+        result = self._item_result(case, state, receipt)
+        case.command_results[command.command_id] = (fp, result)
+        self._persist_result(case, "mark_spec_package_item_ready", command, fp, result)
+        return result
+
+    def _later_review_request(self, case: CaseState, state: PackageItemState, approval: ApprovalState) -> None:
+        review_id = uuid5(REVIEW_NAMESPACE, f"{state.binding.package_id}:{state.binding.item_id}:{state.binding.item_version}:{state.binding.item_hash}:LATER_REVIEW")
+        if review_id in case.review_requests: return
+        evidence_refs = sorted((ref for value in self._item_content(case, state) for ref in value.source_refs), key=self._source_sort)
+        case.review_requests[review_id] = ReviewRequest(
+            review_request_id=review_id, item_binding=state.binding, kind=ReviewRequestKind.LATER_REVIEW,
+            question="Dev Lead, do you approve this delegated technical item?", evidence_refs=evidence_refs,
+            attempted_resolution="Approved under active scoped technical delegation.", reviewer_actor_ids=[case.dev_lead_actor_id],
+            status=ReviewRequestStatus.OPEN, created_at=approval.approved_at,
+        )
+
+    def _resolve_later_review_after_direct_approval(self, case: CaseState, state: PackageItemState, actor: UUID) -> None:
+        for review_id, request in list(case.review_requests.items()):
+            if request.item_binding != state.binding or request.kind != ReviewRequestKind.LATER_REVIEW or request.status != ReviewRequestStatus.OPEN:
+                continue
+            values = request.model_dump(mode="python", exclude_none=False)
+            values.update(status=ReviewRequestStatus.RESOLVED, resolution_text="Direct Dev Lead approval recorded.", resolution_source_refs=request.evidence_refs, resolved_by_actor_ids=[actor], resolved_at=self._now())
+            case.review_requests[review_id] = ReviewRequest.model_validate(values)
+
+    def approve_spec_package_item(self, command: ApproveSpecPackageItemCommand) -> ItemGovernanceResult:
+        case, replay, fp = self._begin("approve_spec_package_item", command)
+        if replay: return replay  # type: ignore[return-value]
+        state = self._assert_item_command(case, command)
+        if command.scope not in self._item_required_scopes(state): raise DomainError(ErrorCode.APPROVAL_BINDING_MISMATCH)
+        if not state.marked_ready: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        if any(value.item_binding == state.binding and value.status == FindingStatus.OPEN and value.severity == Severity.BLOCKING.value for value in case.ambiguities.values()):
+            raise DomainError(ErrorCode.BLOCKING_FINDING)
+        if any(value.scope == command.scope and value.actor_id == command.acting_actor_id for value in self._item_approvals(case, state)):
+            raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
+        delegation = self._authorize(case, command.acting_actor_id, "approve_spec_package_item", scope=command.scope, artifact_id=state.binding.package_id)
+        approval = ApprovalState(
+            self.ids.new(), ArtifactKind.SPEC_PACKAGE.value, state.binding.item_id, state.binding.item_version, state.binding.item_hash,
+            command.scope, command.acting_actor_id, delegation.id if delegation else None, delegation.delegator_id if delegation else None,
+            delegation.later_review_required if delegation else False, self._now(),
+        )
+        case.approvals.append(approval)
+        if approval.later_review_required:
+            self._later_review_request(case, state, approval)
+        elif command.scope == ApprovalScope.TECHNICAL and command.acting_actor_id == case.dev_lead_actor_id:
+            self._resolve_later_review_after_direct_approval(case, state, command.acting_actor_id)
+        case.revision += 1
+        receipt = Receipt(case_id=case.id, revision=case.revision, command_id=command.command_id, occurred_at=self._now())
+        result = self._item_result(case, state, receipt)
+        case.command_results[command.command_id] = (fp, result)
+        self._persist_result(case, "approve_spec_package_item", command, fp, result)
+        return result
+
+    def create_review_request(self, command: CreateReviewRequestCommand) -> ReviewRequestResult:
+        case, replay, fp = self._begin("create_review_request", command)
+        if replay: return replay  # type: ignore[return-value]
+        state = self._assert_item_command(case, command)
+        self._authorize(case, command.acting_actor_id, "create_review_request", artifact_id=state.binding.package_id)
+        if command.review_request_id in case.review_requests: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        for ref in command.evidence_refs: self._validate_source_ref(case, ref)
+        expected_reviewers = {case.pm_actor_id} if state.domain == Domain.BUSINESS else {case.dev_lead_actor_id} if state.domain == Domain.TECHNICAL else {case.pm_actor_id, case.dev_lead_actor_id}
+        if set(command.reviewer_actor_ids) != expected_reviewers: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        request = ReviewRequest(
+            review_request_id=command.review_request_id, item_binding=state.binding, kind=command.kind, question=command.question,
+            evidence_refs=command.evidence_refs, attempted_resolution=command.attempted_resolution,
+            reviewer_actor_ids=sorted(command.reviewer_actor_ids, key=lambda value: value.bytes), status=ReviewRequestStatus.OPEN, created_at=self._now(),
+        )
+        case.review_requests[request.review_request_id] = request
+        return self._finish(case, "create_review_request", command, fp, ReviewRequestResult, review_request=request)  # type: ignore[return-value]
+
+    def resolve_review_request(self, command: ResolveReviewRequestCommand) -> ReviewRequestResult:
+        case, replay, fp = self._begin("resolve_review_request", command)
+        if replay: return replay  # type: ignore[return-value]
+        state = self._assert_item_command(case, command)
+        request = case.review_requests.get(command.review_request_id)
+        if request is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        if request.status != ReviewRequestStatus.OPEN: raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
+        if command.acting_actor_id not in request.reviewer_actor_ids: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
+        if request.kind == ReviewRequestKind.LATER_REVIEW: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        if state.binding.item_id != request.item_binding.item_id or state.binding.item_version <= request.item_binding.item_version:
+            raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+        view = self._item_read_model(case, state)
+        if view.readiness != ItemReadiness.READY: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        for ref in command.resolution_source_refs: self._validate_source_ref(case, ref)
+        resolving_actors = sorted({value.actor_id for value in self._item_approvals(case, state) if value.scope in self._item_required_scopes(state)}, key=lambda value: value.bytes)
+        if set(resolving_actors) != set(request.reviewer_actor_ids): raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
+        values = request.model_dump(mode="python", exclude_none=False)
+        values.update(status=ReviewRequestStatus.RESOLVED, resolution_text=command.resolution_text, resolution_source_refs=command.resolution_source_refs, resolved_by_actor_ids=resolving_actors, resolved_at=self._now())
+        resolved = ReviewRequest.model_validate(values)
+        case.review_requests[request.review_request_id] = resolved
+        return self._finish(case, "resolve_review_request", command, fp, ReviewRequestResult, review_request=resolved)  # type: ignore[return-value]
+
+    def get_spec_package_governance(self, query: QueryOne) -> SpecPackageGovernanceView:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        if case.package is None or not isinstance(case.package.current.payload, SpecPackagePayloadV2): raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        items = [self._item_read_model(case, self._current_item_state(case, item_id)) for item_id in case.package_version_items[case.package.current.version]]
+        ready_count = sum(value.readiness == ItemReadiness.READY for value in items)
+        if ready_count == len(items): rollup = PackageReadiness.READY
+        elif ready_count and any(value.readiness in {ItemReadiness.BLOCKED, ItemReadiness.NEEDS_CLARIFICATION} for value in items): rollup = PackageReadiness.PARTIALLY_READY
+        elif not ready_count and any(value.readiness == ItemReadiness.BLOCKED for value in items): rollup = PackageReadiness.BLOCKED
+        else: rollup = PackageReadiness.FORMULATING
+        return SpecPackageGovernanceView(case_id=case.id, package_binding=case.package.binding, package_readiness=rollup, items=items)
+
+    def list_review_requests(self, query: UUIDListQuery) -> ReviewRequestPage:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        values = [value for value in case.review_requests.values() if query.after_cursor is None or value.review_request_id.bytes > query.after_cursor.bytes]
+        values.sort(key=lambda value: value.review_request_id.bytes); page = values[:query.limit]
+        return ReviewRequestPage(items=page, next_cursor=page[-1].review_request_id if len(values) > query.limit else None)
 
     @staticmethod
     def _generation_key(case_id: UUID, target: PlanTarget, item_id: UUID) -> str:
@@ -386,10 +689,30 @@ class WorkflowService:
         value["body"]["source_unit_ids"] = sorted(value["body"]["source_unit_ids"], key=lambda unit: unit.bytes)
         value["body"]["dependency_item_ids"] = sorted(value["body"]["dependency_item_ids"], key=lambda unit: unit.bytes)
         value["body"]["acceptance_checks"] = sorted(value["body"]["acceptance_checks"], key=lambda row: row["check_id"].bytes)
+        if "source_item_bindings" in value:
+            value["source_item_bindings"] = sorted(value["source_item_bindings"], key=lambda row: row["item_id"].bytes)
         return sha256({"schema": "projection-item-v1", "target": target.value, "project_key": project_key, "item": value})
 
-    def _validate_plan(self, case: CaseState, payload: ProjectionPlanPayload) -> dict[UUID, str]:
-        if case.package is None or case.package.current.state != PackageState.APPROVED.value: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+    def _validate_plan(self, case: CaseState, payload: ProjectionPlanPayload | ProjectionPlanPayloadV2) -> dict[UUID, str]:
+        if case.package is None: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+        is_v2 = isinstance(payload, ProjectionPlanPayloadV2)
+        if is_v2:
+            if not isinstance(case.package.current.payload, SpecPackagePayloadV2): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+            current_bindings = {item_id: self._current_item_state(case, item_id) for item_id in case.package_version_items[case.package.current.version]}
+            if any(current_bindings.get(binding.item_id) is None or current_bindings[binding.item_id].binding != binding for binding in payload.source_item_bindings):
+                raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
+            if any(self._item_read_model(case, current_bindings[binding.item_id]).readiness != ItemReadiness.READY for binding in payload.source_item_bindings):
+                raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+            allowed_units = {
+                unit_id for binding in payload.source_item_bindings
+                for unit_id in (
+                    *current_bindings[binding.item_id].definition.requirement_ids,
+                    *current_bindings[binding.item_id].definition.technical_decision_ids,
+                )
+            }
+        else:
+            if case.package.current.state != PackageState.APPROVED.value: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+            allowed_units = None
         if payload.package_binding != case.package.binding: raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
         if payload.target == PlanTarget.JIRA:
             if payload.project_key is None or re.fullmatch(r"[A-Z][A-Z0-9]{1,9}", payload.project_key) is None or payload.jira_plan_binding is not None: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
@@ -407,6 +730,17 @@ class WorkflowService:
             if item.body.generation_key != expected_key or expected_key in generations: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
             generations.add(expected_key)
             if not item.source_unit_ids or set(item.source_unit_ids) != set(item.body.source_unit_ids) or not set(item.source_unit_ids).issubset(units): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+            if is_v2:
+                if not isinstance(item, ProjectionItemV2) or not set(item.source_unit_ids).issubset(allowed_units): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+                if any(binding not in payload.source_item_bindings for binding in item.source_item_bindings): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+                item_units = {
+                    unit_id for binding in item.source_item_bindings
+                    for unit_id in (
+                        *current_bindings[binding.item_id].definition.requirement_ids,
+                        *current_bindings[binding.item_id].definition.technical_decision_ids,
+                    )
+                }
+                if not set(item.source_unit_ids).issubset(item_units): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
             if set(item.dependency_item_ids) != set(item.body.dependency_item_ids) or item.item_id in item.dependency_item_ids or not set(item.dependency_item_ids).issubset(items): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
             if item.body.package_id != case.package.artifact_id or item.body.package_version != case.package.current.version or item.body.package_hash != case.package.current.semantic_hash: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
             if not {check.check_id for check in item.body.acceptance_checks}.issubset(checks): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
@@ -449,7 +783,7 @@ class WorkflowService:
             hashes[item.item_id] = self._item_hash(payload.target, payload.project_key, item)
         if payload.target == PlanTarget.JIRA:
             mapped = {unit for item in payload.items for unit in item.source_unit_ids}
-            required = {item.unit_id for item in units.values() if item.delivery_required}
+            required = {item.unit_id for item in units.values() if item.delivery_required and (allowed_units is None or item.unit_id in allowed_units)}
             if not required.issubset(mapped): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
             for item in payload.items:
                 ancestor = item.parent_item_id
@@ -472,7 +806,7 @@ class WorkflowService:
         for item_id in items: visit(item_id)
         return hashes
 
-    def _normalized_plan_payload(self, payload: ProjectionPlanPayload) -> dict[str, Any]:
+    def _normalized_plan_payload(self, payload: ProjectionPlanPayload | ProjectionPlanPayloadV2) -> dict[str, Any]:
         value = payload.model_dump(mode="python", exclude_none=False)
         value["items"] = sorted(value["items"], key=lambda row: UUID(str(row["item_id"])).bytes)
         for item in value["items"]:
@@ -481,13 +815,18 @@ class WorkflowService:
             item["body"]["source_unit_ids"] = sorted(item["body"]["source_unit_ids"], key=lambda unit: UUID(str(unit)).bytes)
             item["body"]["dependency_item_ids"] = sorted(item["body"]["dependency_item_ids"], key=lambda unit: UUID(str(unit)).bytes)
             item["body"]["acceptance_checks"] = sorted(item["body"]["acceptance_checks"], key=lambda row: UUID(str(row["check_id"])).bytes)
+            if "source_item_bindings" in item:
+                item["source_item_bindings"] = sorted(item["source_item_bindings"], key=lambda row: UUID(str(row["item_id"])).bytes)
+        if "source_item_bindings" in value:
+            value["source_item_bindings"] = sorted(value["source_item_bindings"], key=lambda row: UUID(str(row["item_id"])).bytes)
         return value
 
-    def create_projection_plan(self, command: CreateProjectionPlanCommand) -> ProjectionPlanResult:
+    def create_projection_plan(self, command: CreateProjectionPlanCommand | CreateProjectionPlanV2Command) -> ProjectionPlanResult:
         case, replay, fp = self._begin("create_projection_plan", command)
         if replay: return replay  # type: ignore[return-value]
         self._authorize(case, command.acting_actor_id, "create_projection_plan", artifact_id=command.plan_id)
         if command.payload.target in case.plans: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+        if isinstance(command.payload, ProjectionPlanPayloadV2) != (command.content_schema_version == 2 and command.hash_schema_version == 3): raise DomainError(ErrorCode.INVALID_TRANSITION)
         hashes = self._validate_plan(case, command.payload)
         digest = self.registry.hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
         root = ArtifactRoot(ArtifactKind.PROJECTION_PLAN, command.plan_id)
@@ -496,7 +835,7 @@ class WorkflowService:
         case.metadata.setdefault("item_hashes", {})[(command.plan_id, 1)] = hashes
         return self._finish(case, "create_projection_plan", command, fp, ProjectionPlanResult, binding=root.binding, target=command.payload.target, state=PlanState.READY, derived_intent_ids=[])  # type: ignore[return-value]
 
-    def revise_projection_plan(self, command: ReviseProjectionPlanCommand) -> ProjectionPlanResult:
+    def revise_projection_plan(self, command: ReviseProjectionPlanCommand | ReviseProjectionPlanV2Command) -> ProjectionPlanResult:
         case, replay, fp = self._begin("revise_projection_plan", command)
         if replay: return replay  # type: ignore[return-value]
         root = case.plans.get(command.payload.target)
@@ -507,6 +846,7 @@ class WorkflowService:
             raise DomainError(ErrorCode.INVALID_TRANSITION)
         prior_plan_binding = root.binding
         prior_package_binding = root.current.payload.package_binding
+        if isinstance(command.payload, ProjectionPlanPayloadV2) != (command.content_schema_version == 2 and command.hash_schema_version == 3): raise DomainError(ErrorCode.INVALID_TRANSITION)
         new_hashes = self._validate_plan(case, command.payload)
         digest = self.registry.hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
         prior_items = {item.item_id: item for item in root.current.payload.items}; new_items = {item.item_id: item for item in command.payload.items}
@@ -1173,7 +1513,18 @@ class WorkflowService:
                 if not direct: pending.append(approval.id)
         for finding in case.ambiguities.values():
             pending.extend(record.resolution_id for record in finding.resolutions if record.later_review_required and record.reviewed_at is None)
+        pending.extend(
+            request.review_request_id for request in case.review_requests.values()
+            if request.kind == ReviewRequestKind.LATER_REVIEW and request.status == ReviewRequestStatus.OPEN
+        )
         return sorted(pending, key=lambda item: item.bytes)
+
+    @staticmethod
+    def _review_blockers(case: CaseState) -> list[UUID]:
+        return sorted(
+            (request.review_request_id for request in case.review_requests.values() if request.kind == ReviewRequestKind.DECISION_REQUIRED and request.status == ReviewRequestStatus.OPEN),
+            key=lambda value: value.bytes,
+        )
 
     def _setup_stage(self, case: CaseState) -> SetupStage:
         if case.package is None: return SetupStage.INTAKE
@@ -1282,7 +1633,7 @@ class WorkflowService:
 
     def get_workflow_view(self, query: QueryOne) -> WorkflowView:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
-        stage = self._setup_stage(case); blockers = sorted(self._blocker_findings(case), key=lambda item: item.bytes); pending = self._pending_later_review(case)
+        stage = self._setup_stage(case); blockers = sorted({*self._blocker_findings(case), *self._review_blockers(case)}, key=lambda item: item.bytes); pending = self._pending_later_review(case)
         trace_complete = self._trace_complete(case, self._trace_edges(case))
         return WorkflowView(case_id=case.id, revision=case.revision, current_package=case.package.binding if case.package else None, current_jira_plan=case.plans[PlanTarget.JIRA].binding if PlanTarget.JIRA in case.plans else None, current_github_plan=case.plans[PlanTarget.GITHUB].binding if PlanTarget.GITHUB in case.plans else None, current_status_policy=case.policy.binding if case.policy else None, setup_stage=stage, foundation_ready=stage == SetupStage.LINKED and trace_complete and not blockers and not pending, workflow_health=WorkflowHealth.BLOCKED if blockers else WorkflowHealth.HEALTHY, blocker_ids=blockers, pending_later_review_ids=pending)
 
@@ -1345,7 +1696,7 @@ class WorkflowService:
                 items.append(DeliveryItem(system=System(target.value), plan_id=root.artifact_id, plan_version=root.current.version, item_id=plan_item.item_id, external_identity=binding.external_identity if binding else None, normalized_status=normalized, lifecycle_state=lifecycle, remote_revision=latest.remote_revision if latest else None, pending_intent_ids=sorted(pending, key=lambda item: item.bytes)))
         items.sort(key=lambda item: (0 if item.system == System.JIRA else 1, item.item_id.bytes))
         if any(item.normalized_status.value == "UNKNOWN" or item.lifecycle_state == Lifecycle.UNKNOWN for item in items): state = DeliveryState.UNKNOWN
-        elif self._blocker_findings(case) or any(item.system == System.JIRA and item.normalized_status in {JiraStatus.BLOCKED, JiraStatus.CANCELLED} for item in items): state = DeliveryState.BLOCKED
+        elif self._blocker_findings(case) or self._review_blockers(case) or any(item.system == System.JIRA and item.normalized_status in {JiraStatus.BLOCKED, JiraStatus.CANCELLED} for item in items): state = DeliveryState.BLOCKED
         else:
             jira_impl = {item.item_id for item in case.plans.get(PlanTarget.JIRA).current.payload.items if item.implementation_required} if PlanTarget.JIRA in case.plans else set()
             github_by_jira = {
@@ -1374,7 +1725,7 @@ class WorkflowService:
 
     def list_pending_operation_intents(self, query: UUIDListQuery) -> IntentPage:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
-        if self._blocker_findings(case):
+        if self._blocker_findings(case) or self._review_blockers(case):
             return IntentPage(items=[], next_cursor=None)
         values = [item for item in case.metadata.get("intents", {}).values() if (query.after_cursor is None or item.intent_id.bytes > query.after_cursor.bytes) and not any(op.intent.intent_id == item.intent_id and op.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN, OperationStatus.SUCCEEDED} for op in case.operations.values())]
         values.sort(key=lambda item: item.intent_id.bytes); page = values[:query.limit]; return IntentPage(items=page, next_cursor=page[-1].intent_id if len(values) > query.limit else None)

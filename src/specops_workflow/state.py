@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from .artifacts import ArtifactRoot
 from .enums import ApprovalScope, Domain, FindingStatus, PlanTarget
-from .models import ResolutionRecord, SourceArtifactIdentity, SourceRef
+from .models import ItemBinding, ResolutionRecord, ReviewRequest, SourceArtifactIdentity, SourceRef, SpecPackageItem
 from .models import OperationIntent, OperationResult, RemoteObservation
 from .enums import Action, OperationStatus, System
 
@@ -25,7 +25,16 @@ class DelegationState:
 class AmbiguityState:
     id: UUID; category: str; domain: Domain; severity: str; evidence_refs: list[SourceRef]; clarification_question: str
     created_at: datetime; status: FindingStatus = FindingStatus.OPEN; resolutions: list[ResolutionRecord] = field(default_factory=list)
-    resolved_at: datetime | None = None
+    resolved_at: datetime | None = None; item_binding: ItemBinding | None = None
+
+
+@dataclass
+class PackageItemState:
+    definition: SpecPackageItem
+    binding: ItemBinding
+    domain: Domain
+    complete: bool
+    marked_ready: bool = False
 
 
 @dataclass
@@ -56,6 +65,9 @@ class CaseState:
     sources: dict[tuple[UUID, int], SourceArtifactIdentity] = field(default_factory=dict)
     ambiguities: dict[UUID, AmbiguityState] = field(default_factory=dict)
     package: ArtifactRoot | None = None
+    package_items: dict[UUID, list[PackageItemState]] = field(default_factory=dict)
+    package_version_items: dict[int, list[UUID]] = field(default_factory=dict)
+    review_requests: dict[UUID, ReviewRequest] = field(default_factory=dict)
     plans: dict[PlanTarget, ArtifactRoot] = field(default_factory=dict)
     policy: ArtifactRoot | None = None
     approvals: list[ApprovalState] = field(default_factory=list)

@@ -155,6 +155,31 @@ class AcceptanceCheck(StrictModel):
     source_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=100)]
 
 
+class SpecPackageItem(StrictModel):
+    item_id: UUID
+    title: ShortText
+    requirement_ids: Annotated[list[UUID], Field(min_length=1, max_length=500)]
+    technical_decision_ids: Annotated[list[UUID], Field(max_length=500)] = []
+    acceptance_check_ids: Annotated[list[UUID], Field(min_length=1, max_length=500)]
+    dependency_item_ids: Annotated[list[UUID], Field(max_length=99)] = []
+
+    @model_validator(mode="after")
+    def unique_item_references(self) -> SpecPackageItem:
+        collections = (self.requirement_ids, self.technical_decision_ids, self.acceptance_check_ids, self.dependency_item_ids)
+        if any(len(values) != len(set(values)) for values in collections):
+            raise ValueError("SpecPackageItem references must be unique")
+        if self.item_id in self.dependency_item_ids:
+            raise ValueError("SpecPackageItem cannot depend on itself")
+        return self
+
+
+class ItemBinding(StrictModel):
+    package_id: UUID
+    item_id: UUID
+    item_version: BoundedInt
+    item_hash: Hash
+
+
 class SpecPackagePayload(StrictModel):
     requirements: Annotated[list[Requirement], Field(min_length=1, max_length=500)]
     technical_decisions: Annotated[list[TechnicalDecision], Field(min_length=1, max_length=500)]
@@ -171,6 +196,49 @@ class SpecPackagePayload(StrictModel):
         for check in self.acceptance_checks:
             if len(check.related_unit_ids) != len(set(check.related_unit_ids)) or not set(check.related_unit_ids).issubset(unit_ids):
                 raise ValueError("acceptance check references must be unique existing units")
+        return self
+
+
+class SpecPackagePayloadV2(SpecPackagePayload):
+    items: Annotated[list[SpecPackageItem], Field(min_length=1, max_length=100)]
+
+    @model_validator(mode="after")
+    def closed_item_ownership(self) -> SpecPackagePayloadV2:
+        item_ids = [item.item_id for item in self.items]
+        if len(item_ids) != len(set(item_ids)):
+            raise ValueError("SpecPackageItem IDs must be unique")
+        requirements = {item.unit_id for item in self.requirements}
+        decisions = {item.unit_id for item in self.technical_decisions}
+        checks = {item.check_id: item for item in self.acceptance_checks}
+        owned_requirements = [value for item in self.items for value in item.requirement_ids]
+        owned_decisions = [value for item in self.items for value in item.technical_decision_ids]
+        owned_checks = [value for item in self.items for value in item.acceptance_check_ids]
+        if set(owned_requirements) != requirements or len(owned_requirements) != len(requirements):
+            raise ValueError("every requirement must belong to exactly one SpecPackageItem")
+        if set(owned_decisions) != decisions or len(owned_decisions) != len(decisions):
+            raise ValueError("every technical decision must belong to exactly one SpecPackageItem")
+        if set(owned_checks) != set(checks) or len(owned_checks) != len(checks):
+            raise ValueError("every acceptance check must belong to exactly one SpecPackageItem")
+        known_items = set(item_ids)
+        for item in self.items:
+            if not set(item.dependency_item_ids).issubset(known_items):
+                raise ValueError("SpecPackageItem dependencies must remain in the package")
+            owned_units = set(item.requirement_ids) | set(item.technical_decision_ids)
+            if any(not set(checks[check_id].related_unit_ids).issubset(owned_units) for check_id in item.acceptance_check_ids):
+                raise ValueError("acceptance checks may reference only units owned by their SpecPackageItem")
+        dependencies = {item.item_id: set(item.dependency_item_ids) for item in self.items}
+        visiting: set[UUID] = set()
+        visited: set[UUID] = set()
+        def visit(item_id: UUID) -> None:
+            if item_id in visiting:
+                raise ValueError("SpecPackageItem dependency graph must be acyclic")
+            if item_id in visited:
+                return
+            visiting.add(item_id)
+            for dependency in dependencies[item_id]: visit(dependency)
+            visiting.remove(item_id)
+            visited.add(item_id)
+        for item_id in item_ids: visit(item_id)
         return self
 
 
@@ -233,6 +301,27 @@ class ProjectionPlanPayload(StrictModel):
                 raise ValueError("Jira plan requires only a canonical project key")
         elif self.project_key is not None or self.jira_plan_binding is None:
             raise ValueError("GitHub plan requires only a Jira-plan binding")
+        return self
+
+
+class ProjectionItemV2(ProjectionItem):
+    source_item_bindings: Annotated[list[ItemBinding], Field(min_length=1, max_length=100)]
+
+
+class ProjectionPlanPayloadV2(ProjectionPlanPayload):
+    items: Annotated[list[ProjectionItemV2], Field(min_length=1, max_length=500)]
+    source_item_bindings: Annotated[list[ItemBinding], Field(min_length=1, max_length=100)]
+
+    @model_validator(mode="after")
+    def closed_item_bindings(self) -> ProjectionPlanPayloadV2:
+        binding_ids = [item.item_id for item in self.source_item_bindings]
+        if len(binding_ids) != len(set(binding_ids)):
+            raise ValueError("source ItemBindings must be unique")
+        allowed = {binding.item_id: binding for binding in self.source_item_bindings}
+        for item in self.items:
+            item_ids = [binding.item_id for binding in item.source_item_bindings]
+            if len(item_ids) != len(set(item_ids)) or any(allowed.get(binding.item_id) != binding for binding in item.source_item_bindings):
+                raise ValueError("ProjectionItem ItemBindings must be unique members of the plan binding set")
         return self
 
 
@@ -392,20 +481,39 @@ class RegisterSourceArtifactCommand(CommandBase):
 class RecordAmbiguityFindingCommand(CommandBase):
     finding_id: UUID; category: AmbiguityCategory; domain: Domain; severity: Severity
     evidence_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=100)]; clarification_question: Statement
+class RecordItemAmbiguityFindingCommand(RecordAmbiguityFindingCommand): item_id: UUID
 class ResolveAmbiguityFindingCommand(CommandBase):
     finding_id: UUID; resolution_text: Statement; resolution_source_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=100)]
 class ArtifactCommand(CommandBase):
     expected_artifact_id: UUID; expected_artifact_version: BoundedInt; expected_artifact_hash: Hash
 class CreateSpecPackageCommand(CommandBase):
     package_id: UUID; content_schema_version: BoundedInt; hash_schema_version: BoundedInt; payload: SpecPackagePayload
+class CreateSpecPackageV2Command(CommandBase):
+    package_id: UUID; content_schema_version: Literal[2]; hash_schema_version: Literal[3]; payload: SpecPackagePayloadV2
 class ReviseSpecPackageCommand(ArtifactCommand):
     content_schema_version: BoundedInt; hash_schema_version: BoundedInt; payload: SpecPackagePayload
+class ReviseSpecPackageV2Command(ArtifactCommand):
+    content_schema_version: Literal[2]; hash_schema_version: Literal[3]; payload: SpecPackagePayloadV2
 class MarkSpecPackageReadyCommand(ArtifactCommand): pass
 class ApproveSpecPackageCommand(ArtifactCommand): scope: ApprovalScope
+class ItemCommand(ArtifactCommand): item_binding: ItemBinding
+class MarkSpecPackageItemReadyCommand(ItemCommand): pass
+class ApproveSpecPackageItemCommand(ItemCommand): scope: ApprovalScope
+class CreateReviewRequestCommand(ItemCommand):
+    review_request_id: UUID; kind: ReviewRequestKind; question: Statement
+    evidence_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=100)]
+    attempted_resolution: Statement; reviewer_actor_ids: Annotated[list[UUID], Field(min_length=1, max_length=2)]
+class ResolveReviewRequestCommand(ItemCommand):
+    review_request_id: UUID; resolution_text: Statement
+    resolution_source_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=100)]
 class CreateProjectionPlanCommand(CommandBase):
     plan_id: UUID; content_schema_version: BoundedInt; hash_schema_version: BoundedInt; payload: ProjectionPlanPayload
+class CreateProjectionPlanV2Command(CommandBase):
+    plan_id: UUID; content_schema_version: Literal[2]; hash_schema_version: Literal[3]; payload: ProjectionPlanPayloadV2
 class ReviseProjectionPlanCommand(ArtifactCommand):
     content_schema_version: BoundedInt; hash_schema_version: BoundedInt; payload: ProjectionPlanPayload
+class ReviseProjectionPlanV2Command(ArtifactCommand):
+    content_schema_version: Literal[2]; hash_schema_version: Literal[3]; payload: ProjectionPlanPayloadV2
 class ApproveProjectionPlanCommand(ArtifactCommand): scope: ApprovalScope
 class CreateStatusPolicyCommand(CommandBase):
     policy_id: UUID; content_schema_version: BoundedInt; hash_schema_version: BoundedInt; payload: StatusPolicyPayload
@@ -436,6 +544,28 @@ class ResolutionRecord(StrictModel):
 class AmbiguityFindingResult(MutatedResult):
     finding_id: UUID; status: FindingStatus; resolutions: list[ResolutionRecord]; resolved_at: datetime | None; receipt: Receipt
 class SpecPackageResult(MutatedResult): binding: ArtifactBinding; state: PackageState; receipt: Receipt
+class ReviewRequest(StrictModel):
+    review_request_id: UUID; item_binding: ItemBinding; kind: ReviewRequestKind; question: Statement
+    evidence_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=100)]
+    attempted_resolution: Statement; reviewer_actor_ids: Annotated[list[UUID], Field(min_length=1, max_length=2)]
+    status: ReviewRequestStatus; resolution_text: Statement | None = None
+    resolution_source_refs: Annotated[list[SourceRef], Field(max_length=100)] = []
+    resolved_by_actor_ids: Annotated[list[UUID], Field(max_length=2)] = []
+    created_at: datetime; resolved_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def closed_review_shape(self) -> ReviewRequest:
+        if len(self.reviewer_actor_ids) != len(set(self.reviewer_actor_ids)) or len(self.resolved_by_actor_ids) != len(set(self.resolved_by_actor_ids)):
+            raise ValueError("review actors must be unique")
+        if self.status == ReviewRequestStatus.OPEN:
+            if self.resolution_text is not None or self.resolution_source_refs or self.resolved_by_actor_ids or self.resolved_at is not None:
+                raise ValueError("open review requests cannot contain resolution fields")
+        elif self.resolution_text is None or not self.resolution_source_refs or not self.resolved_by_actor_ids or self.resolved_at is None:
+            raise ValueError("resolved review requests require complete resolution fields")
+        return self
+class ItemGovernanceResult(MutatedResult):
+    item_binding: ItemBinding; readiness: ItemReadiness; review_obligation: ReviewObligation; receipt: Receipt
+class ReviewRequestResult(MutatedResult): review_request: ReviewRequest; receipt: Receipt
 class ProjectionPlanResult(MutatedResult): binding: ArtifactBinding; target: PlanTarget; state: PlanState; derived_intent_ids: list[UUID] = []; receipt: Receipt
 class StatusPolicyResult(MutatedResult): binding: ArtifactBinding; state: PolicyState; receipt: Receipt
 class ApprovalResult(MutatedResult): approval_id: UUID; scope: ApprovalScope; artifact_binding: ArtifactBinding; receipt: Receipt
@@ -454,6 +584,12 @@ class ReplayResult(StrictModel):
     mutated: Literal[False] = False
     stored_result: StoredMutationResult
     receipt: None = None
+ExtendedStoredMutationResult = StoredMutationResult | ItemGovernanceResult | ReviewRequestResult
+class ExtendedReplayResult(StrictModel):
+    kind: Literal["REPLAY"] = "REPLAY"
+    mutated: Literal[False] = False
+    stored_result: ExtendedStoredMutationResult
+    receipt: None = None
 
 
 class QueryOne(StrictModel): case_id: UUID; acting_actor_id: Actor
@@ -466,6 +602,14 @@ class WorkflowView(StrictModel):
     case_id: UUID; revision: Revision; current_package: ArtifactBinding | None = None; current_jira_plan: ArtifactBinding | None = None
     current_github_plan: ArtifactBinding | None = None; current_status_policy: ArtifactBinding | None = None; setup_stage: SetupStage
     foundation_ready: bool; workflow_health: WorkflowHealth; blocker_ids: list[UUID] = []; pending_later_review_ids: list[UUID] = []
+class SpecPackageItemView(StrictModel):
+    binding: ItemBinding; title: ShortText; domain: Domain; readiness: ItemReadiness
+    review_obligation: ReviewObligation; complete: bool; approval_scopes: list[ApprovalScope]
+    open_finding_ids: list[UUID] = []; open_review_request_ids: list[UUID] = []
+class SpecPackageGovernanceView(StrictModel):
+    case_id: UUID; package_binding: ArtifactBinding; package_readiness: PackageReadiness
+    items: Annotated[list[SpecPackageItemView], Field(min_length=1, max_length=100)]
+class ReviewRequestPage(StrictModel): items: list[ReviewRequest]; next_cursor: UUID | None = None
 class DeliveryItem(StrictModel):
     system: System; plan_id: UUID; plan_version: BoundedInt; item_id: UUID; external_identity: ExternalIdentity | None = None
     normalized_status: JiraStatus | GitHubStatus; lifecycle_state: Lifecycle; remote_revision: ShortText | None = None; pending_intent_ids: list[UUID] = []

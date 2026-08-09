@@ -85,10 +85,12 @@ class SchemaRegistry:
 
 
 def default_registry() -> SchemaRegistry:
-    from .models import ProjectionPlanPayload, SpecPackagePayload, StatusPolicyPayload
+    from .models import ProjectionPlanPayload, ProjectionPlanPayloadV2, SpecPackagePayload, SpecPackagePayloadV2, StatusPolicyPayload
     registry = SchemaRegistry()
     registry.register(HashRecipe(ArtifactKind.SPEC_PACKAGE, 1, 1, SpecPackagePayload.model_validate))
     registry.register(HashRecipe(ArtifactKind.PROJECTION_PLAN, 1, 1, ProjectionPlanPayload.model_validate))
+    registry.register(HashRecipe(ArtifactKind.SPEC_PACKAGE, 2, 3, SpecPackagePayloadV2.model_validate))
+    registry.register(HashRecipe(ArtifactKind.PROJECTION_PLAN, 2, 3, ProjectionPlanPayloadV2.model_validate))
     registry.register(HashRecipe(ArtifactKind.STATUS_POLICY, 1, 1, StatusPolicyPayload.model_validate))
     registry.register(HashRecipe(ArtifactKind.STATUS_POLICY, 1, 2, StatusPolicyPayload.model_validate))
     return registry

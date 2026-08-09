@@ -47,15 +47,15 @@ cases = owned("cases", Column("id", UUIDText, primary_key=True), Column("revisio
 case_participants = owned("case_participants", Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True), Column("actor_id", UUIDText, primary_key=True), Column("created_at", UTCText(), nullable=False))
 delegations = owned("delegations", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("delegator_id", UUIDText, nullable=False), Column("delegate_id", UUIDText, nullable=False), Column("domain", EnumText, nullable=False), Column("command_names", JSONText, nullable=False), Column("artifact_kind", EnumText), Column("artifact_id", UUIDText), Column("valid_from", UTCText(), nullable=False), Column("valid_until", UTCText(), nullable=False), Column("later_review_required", Integer, nullable=False), Column("revoked_at", UTCText()), Column("created_at", UTCText(), nullable=False), UniqueConstraint("id", "case_id"), CheckConstraint("valid_from <= valid_until"))
 source_artifacts = owned("source_artifacts", Column("artifact_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("type", EnumText, nullable=False), Column("media_type", Text, nullable=False), Column("canonical_locator", Text, nullable=False), Column("content_hash", HashText, nullable=False), Column("registered_at", UTCText(), nullable=False), UniqueConstraint("artifact_id", "version", "case_id"))
-ambiguity_findings = owned("ambiguity_findings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("category", EnumText, nullable=False), Column("domain", EnumText, nullable=False), Column("severity", EnumText, nullable=False), Column("evidence_refs", JSONText, nullable=False), Column("clarification_question", Text, nullable=False), Column("status", EnumText, nullable=False), Column("resolutions", JSONText, nullable=False), Column("created_at", UTCText(), nullable=False), Column("resolved_at", UTCText()), UniqueConstraint("id", "case_id"))
+ambiguity_findings = owned("ambiguity_findings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("category", EnumText, nullable=False), Column("domain", EnumText, nullable=False), Column("severity", EnumText, nullable=False), Column("evidence_refs", JSONText, nullable=False), Column("clarification_question", Text, nullable=False), Column("status", EnumText, nullable=False), Column("resolutions", JSONText, nullable=False), Column("item_binding", JSONText), Column("created_at", UTCText(), nullable=False), Column("resolved_at", UTCText()), UniqueConstraint("id", "case_id"))
 spec_packages = owned("spec_packages", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False, unique=True), Column("current_version", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("id", "case_id"))
-spec_package_versions = owned("spec_package_versions", Column("package_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("state", EnumText, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("package_id", "version", "case_id"))
+spec_package_versions = owned("spec_package_versions", Column("package_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("state", EnumText, nullable=False), Column("items", JSONText), Column("item_governance", JSONText), Column("created_at", UTCText(), nullable=False), UniqueConstraint("package_id", "version", "case_id"))
 spec_requirements = owned("spec_requirements", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("delivery_required", Integer, nullable=False), Column("source_refs", JSONText, nullable=False))
 technical_decisions = owned("technical_decisions", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("delivery_required", Integer, nullable=False), Column("provisional", Integer, nullable=False), Column("provisional_delegation_id", UUIDText), Column("source_refs", JSONText, nullable=False))
 acceptance_checks = owned("acceptance_checks", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("check_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("related_unit_ids", JSONText, nullable=False), Column("source_refs", JSONText, nullable=False))
 projection_plans = owned("projection_plans", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("target", EnumText, nullable=False), Column("current_version", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("case_id", "target"), UniqueConstraint("id", "case_id"))
-projection_plan_versions = owned("projection_plan_versions", Column("plan_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("target", EnumText, nullable=False), Column("project_key", Text), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("package_id", UUIDText, nullable=False), Column("package_version", Integer, nullable=False), Column("package_hash", HashText, nullable=False), Column("jira_plan_id", UUIDText), Column("jira_plan_version", Integer), Column("jira_plan_hash", HashText), Column("retire_tombstones", JSONText, nullable=False), Column("state", EnumText, nullable=False), Column("created_at", UTCText(), nullable=False))
-projection_items = owned("projection_items", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("generation_key", Text, nullable=False), Column("kind", EnumText, nullable=False), Column("domain", EnumText, nullable=False), Column("title", Text, nullable=False), Column("body", JSONText, nullable=False), Column("parent_item_id", UUIDText), Column("implementation_required", Integer, nullable=False), Column("repository", Text), Column("primary_jira_item_id", UUIDText), Column("item_semantic_hash", HashText, nullable=False), UniqueConstraint("plan_id", "plan_version", "generation_key"))
+projection_plan_versions = owned("projection_plan_versions", Column("plan_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("target", EnumText, nullable=False), Column("project_key", Text), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("package_id", UUIDText, nullable=False), Column("package_version", Integer, nullable=False), Column("package_hash", HashText, nullable=False), Column("jira_plan_id", UUIDText), Column("jira_plan_version", Integer), Column("jira_plan_hash", HashText), Column("source_item_bindings", JSONText), Column("retire_tombstones", JSONText, nullable=False), Column("state", EnumText, nullable=False), Column("created_at", UTCText(), nullable=False))
+projection_items = owned("projection_items", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("generation_key", Text, nullable=False), Column("kind", EnumText, nullable=False), Column("domain", EnumText, nullable=False), Column("title", Text, nullable=False), Column("body", JSONText, nullable=False), Column("parent_item_id", UUIDText), Column("implementation_required", Integer, nullable=False), Column("repository", Text), Column("primary_jira_item_id", UUIDText), Column("source_item_bindings", JSONText), Column("item_semantic_hash", HashText, nullable=False), UniqueConstraint("plan_id", "plan_version", "generation_key"))
 projection_item_sources = owned("projection_item_sources", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("source_unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False))
 projection_dependencies = owned("projection_dependencies", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("depends_on_item_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), CheckConstraint("item_id <> depends_on_item_id"))
 status_policies = owned("status_policies", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False, unique=True), Column("current_version", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("id", "case_id"))
@@ -244,6 +244,7 @@ class SqlAlchemyStore:
             item = AmbiguityState(
                 UUID(row["id"]), row["category"], Domain(row["domain"]), row["severity"], refs.validate_json(row["evidence_refs"]),
                 row["clarification_question"], row["created_at"], FindingStatus(row["status"]), resolutions.validate_json(row["resolutions"]), row["resolved_at"],
+                ItemBinding.model_validate_json(row["item_binding"]) if row["item_binding"] else None,
             )
             case.ambiguities[item.id] = item
 
@@ -274,11 +275,16 @@ class SqlAlchemyStore:
                     )
                     for row in connection.execute(select(acceptance_checks).where(acceptance_checks.c.package_id == package["id"], acceptance_checks.c.package_version == version["version"])).mappings()
                 ]
+                package_value: dict[str, Any] = {"requirements": reqs, "technical_decisions": decisions, "acceptance_checks": checks}
+                if version["content_schema_version"] == 2:
+                    if not version["items"]:
+                        raise ValueError("persisted v2 package is missing SpecPackageItems")
+                    package_value["items"] = TypeAdapter(list[SpecPackageItem]).validate_json(version["items"])
                 payload = self.registry.validate(
                     ArtifactKind.SPEC_PACKAGE,
                     version["content_schema_version"],
                     version["hash_schema_version"],
-                    {"requirements": reqs, "technical_decisions": decisions, "acceptance_checks": checks},
+                    package_value,
                 )
                 from .service import WorkflowService
                 helper = object.__new__(WorkflowService)
@@ -292,6 +298,28 @@ class SqlAlchemyStore:
                     raise ValueError("persisted spec-package semantic hash mismatch")
                 root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], payload, version["state"]))
             case.package = root
+            from .service import WorkflowService
+            item_helper = object.__new__(WorkflowService)
+            item_helper._rebuild_package_items(case)
+            current_row = connection.execute(
+                select(spec_package_versions.c.item_governance).where(
+                    spec_package_versions.c.package_id == package["id"],
+                    spec_package_versions.c.version == package["current_version"],
+                )
+            ).scalar_one_or_none()
+            if current_row:
+                governance = json.loads(current_row)
+                marked = TypeAdapter(list[ItemBinding]).validate_json(
+                    json.dumps(governance.get("marked_ready_item_bindings", []))
+                )
+                marked_keys = {(value.item_id, value.item_version, value.item_hash) for value in marked}
+                for history in case.package_items.values():
+                    for state in history:
+                        state.marked_ready = (state.binding.item_id, state.binding.item_version, state.binding.item_hash) in marked_keys
+                reviews = TypeAdapter(list[ReviewRequest]).validate_json(
+                    json.dumps(governance.get("review_requests", []))
+                )
+                case.review_requests = {value.review_request_id: value for value in reviews}
 
         for plan_row in connection.execute(select(projection_plans).where(projection_plans.c.case_id == cid)).mappings():
             target = PlanTarget(plan_row["target"])
@@ -325,13 +353,18 @@ class SqlAlchemyStore:
                         ).scalars()
                     ]
                     kind = JiraKind(row["kind"]) if target == PlanTarget.JIRA else GitHubKind(row["kind"])
-                    items.append(ProjectionItem(
+                    item_type = ProjectionItemV2 if version["content_schema_version"] == 2 else ProjectionItem
+                    item_values = dict(
                         item_id=item_id, kind=kind, domain=Domain(row["domain"]), title=row["title"],
                         body=StructuredWorkBody.model_validate_json(row["body"]), source_unit_ids=sources,
                         parent_item_id=UUID(row["parent_item_id"]) if row["parent_item_id"] else None,
                         dependency_item_ids=dependencies, implementation_required=bool(row["implementation_required"]), repository=row["repository"],
                         primary_jira_item_id=UUID(row["primary_jira_item_id"]) if row["primary_jira_item_id"] else None,
-                    ))
+                    )
+                    if item_type is ProjectionItemV2:
+                        if not row["source_item_bindings"]: raise ValueError("persisted v2 projection item is missing ItemBindings")
+                        item_values["source_item_bindings"] = TypeAdapter(list[ItemBinding]).validate_json(row["source_item_bindings"])
+                    items.append(item_type(**item_values))
                     item_hashes[item_id] = row["item_semantic_hash"]
                 package_binding = ArtifactBinding(
                     artifact_kind=ArtifactKind.SPEC_PACKAGE, artifact_id=UUID(version["package_id"]),
@@ -343,11 +376,15 @@ class SqlAlchemyStore:
                         artifact_kind=ArtifactKind.PROJECTION_PLAN, artifact_id=UUID(version["jira_plan_id"]),
                         version=version["jira_plan_version"], semantic_hash=version["jira_plan_hash"],
                     )
+                plan_value: dict[str, Any] = {"package_binding": package_binding, "target": target, "project_key": version["project_key"], "jira_plan_binding": jira_binding, "items": items}
+                if version["content_schema_version"] == 2:
+                    if not version["source_item_bindings"]: raise ValueError("persisted v2 projection plan is missing ItemBindings")
+                    plan_value["source_item_bindings"] = TypeAdapter(list[ItemBinding]).validate_json(version["source_item_bindings"])
                 payload = self.registry.validate(
                     ArtifactKind.PROJECTION_PLAN,
                     version["content_schema_version"],
                     version["hash_schema_version"],
-                    {"package_binding": package_binding, "target": target, "project_key": version["project_key"], "jira_plan_binding": jira_binding, "items": items},
+                    plan_value,
                 )
                 from .service import WorkflowService
                 computed_hash = self.registry.hash(
@@ -489,6 +526,8 @@ class SqlAlchemyStore:
             "revoke_delegation": DelegationResult, "register_source_artifact": SourceArtifactResult,
             "record_ambiguity_finding": AmbiguityFindingResult, "resolve_ambiguity_finding": AmbiguityFindingResult,
             "create_spec_package": SpecPackageResult, "revise_spec_package": SpecPackageResult, "mark_spec_package_ready": SpecPackageResult,
+            "mark_spec_package_item_ready": ItemGovernanceResult, "approve_spec_package_item": ItemGovernanceResult,
+            "create_review_request": ReviewRequestResult, "resolve_review_request": ReviewRequestResult,
             "approve_spec_package": ApprovalResult, "create_projection_plan": ProjectionPlanResult,
             "revise_projection_plan": ProjectionPlanResult, "approve_projection_plan": ApprovalResult,
             "create_status_policy": StatusPolicyResult, "revise_status_policy": StatusPolicyResult, "approve_status_policy": ApprovalResult,
@@ -514,6 +553,8 @@ class SqlAlchemyStore:
             "create_case": "CASE", "add_participant": "PARTICIPANT", "grant_delegation": "DELEGATION", "revoke_delegation": "DELEGATION",
             "register_source_artifact": "SOURCE_ARTIFACT", "record_ambiguity_finding": "AMBIGUITY_FINDING", "resolve_ambiguity_finding": "AMBIGUITY_FINDING",
             "create_spec_package": "SPEC_PACKAGE", "revise_spec_package": "SPEC_PACKAGE", "mark_spec_package_ready": "SPEC_PACKAGE",
+            "mark_spec_package_item_ready": "SPEC_PACKAGE", "approve_spec_package_item": "APPROVAL",
+            "create_review_request": "SPEC_PACKAGE", "resolve_review_request": "SPEC_PACKAGE",
             "create_projection_plan": "PROJECTION_PLAN", "revise_projection_plan": "PROJECTION_PLAN",
             "create_status_policy": "STATUS_POLICY", "revise_status_policy": "STATUS_POLICY",
             "approve_spec_package": "APPROVAL", "approve_projection_plan": "APPROVAL", "approve_status_policy": "APPROVAL",
@@ -526,15 +567,20 @@ class SqlAlchemyStore:
             target = result_json["identity"]["artifact_id"]
         elif "binding" in result_json:
             target = result_json["binding"]["artifact_id"]
+        elif "item_binding" in result_json:
+            target = result_json["item_binding"]["item_id"]
+        elif "review_request" in result_json:
+            target = result_json["review_request"]["review_request_id"]
         elif "artifact_binding" in result_json and "approval_id" not in result_json:
             target = result_json["artifact_binding"]["artifact_id"]
         else:
             target = next((value for key, value in result_json.items() if key.endswith("_id") and key not in {"case_id", "command_id", "intent_id"}), str(case.id))
         binding = result_json.get("binding") or result_json.get("artifact_binding")
+        item_binding = result_json.get("item_binding") or (result_json.get("review_request") or {}).get("item_binding")
         audit_metadata = {
             "target_kind": target_kinds[command_name],
-            "target_version": binding.get("version") if binding else None,
-            "target_hash": binding.get("semantic_hash") if binding else None,
+            "target_version": binding.get("version") if binding else item_binding.get("item_version") if item_binding else None,
+            "target_hash": binding.get("semantic_hash") if binding else item_binding.get("item_hash") if item_binding else None,
             "operation_attempt": result_json.get("attempt"),
             "finding_categories": sorted({value["category"].value for value in case.metadata.get("findings", {}).values() if value.get("active")}),
         }
@@ -567,11 +613,12 @@ class SqlAlchemyStore:
     def _insert_version_or_update_state(connection, table: Table, **values: Any) -> None:
         primary_keys = [column.name for column in table.primary_key.columns]
         criteria = [table.c[key] == values[key] for key in primary_keys]
-        existing = connection.execute(select(table.c.state).where(*criteria)).scalar_one_or_none()
+        existing = connection.execute(select(table).where(*criteria)).mappings().one_or_none()
         if existing is None:
             connection.execute(insert(table).values(**values))
-        elif existing != values["state"]:
-            connection.execute(update(table).where(*criteria).values(state=values["state"]))
+        else:
+            mutable = {key: values[key] for key in ("state", "item_governance") if key in values and existing[key] != values[key]}
+            if mutable: connection.execute(update(table).where(*criteria).values(**mutable))
 
     def _save_domain(self, connection, case: CaseState) -> None:
         cid = str(case.id)
@@ -581,11 +628,23 @@ class SqlAlchemyStore:
         for item in case.sources.values():
             self._replace(connection, source_artifacts, artifact_id=str(item.artifact_id), version=item.version, case_id=cid, type=item.type.value, media_type=item.media_type, canonical_locator=item.canonical_locator, content_hash=item.content_hash, registered_at=item.registered_at)
         for item in case.ambiguities.values():
-            self._replace(connection, ambiguity_findings, id=str(item.id), case_id=cid, category=item.category, domain=item.domain.value, severity=item.severity, evidence_refs=dump([ref.model_dump(mode="python") for ref in item.evidence_refs]), clarification_question=item.clarification_question, status=item.status.value, resolutions=dump([record.model_dump(mode="python") for record in item.resolutions]), created_at=item.created_at, resolved_at=item.resolved_at)
+            self._replace(connection, ambiguity_findings, id=str(item.id), case_id=cid, category=item.category, domain=item.domain.value, severity=item.severity, evidence_refs=dump([ref.model_dump(mode="python") for ref in item.evidence_refs]), clarification_question=item.clarification_question, status=item.status.value, resolutions=dump([record.model_dump(mode="python") for record in item.resolutions]), item_binding=dump(item.item_binding.model_dump(mode="python")) if item.item_binding else None, created_at=item.created_at, resolved_at=item.resolved_at)
         if case.package:
+            governance = dump({
+                "marked_ready_item_bindings": [
+                    state.binding.model_dump(mode="python")
+                    for _, history in sorted(case.package_items.items(), key=lambda pair: pair[0].bytes)
+                    for state in history if state.marked_ready
+                ],
+                "review_requests": [
+                    request.model_dump(mode="python")
+                    for request in sorted(case.review_requests.values(), key=lambda value: value.review_request_id.bytes)
+                ],
+            })
             self._replace(connection, spec_packages, id=str(case.package.artifact_id), case_id=cid, current_version=case.package.current.version, created_at=case.created_at)
             for version in case.package.versions:
-                self._insert_version_or_update_state(connection, spec_package_versions, package_id=str(case.package.artifact_id), version=version.version, case_id=cid, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, state=version.state, created_at=case.created_at)
+                item_rows = [item.model_dump(mode="python") for item in version.payload.items] if isinstance(version.payload, SpecPackagePayloadV2) else None
+                self._insert_version_or_update_state(connection, spec_package_versions, package_id=str(case.package.artifact_id), version=version.version, case_id=cid, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, state=version.state, items=dump(item_rows) if item_rows is not None else None, item_governance=governance, created_at=case.created_at)
                 for unit in version.payload.requirements:
                     self._insert_once(connection, spec_requirements, package_id=str(case.package.artifact_id), package_version=version.version, unit_id=str(unit.unit_id), case_id=cid, statement=unit.statement, domain=unit.domain.value, delivery_required=unit.delivery_required, source_refs=dump([ref.model_dump(mode="python") for ref in unit.source_refs]))
                 for unit in version.payload.technical_decisions:
@@ -607,7 +666,8 @@ class SqlAlchemyStore:
                     }
                     for _, entry in sorted(tombstones.items(), key=lambda pair: pair[0].bytes)
                 ]
-                self._insert_version_or_update_state(connection, projection_plan_versions, plan_id=str(root.artifact_id), version=version.version, case_id=cid, target=target.value, project_key=payload.project_key, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, package_id=str(payload.package_binding.artifact_id), package_version=payload.package_binding.version, package_hash=payload.package_binding.semantic_hash, jira_plan_id=str(jira.artifact_id) if jira else None, jira_plan_version=jira.version if jira else None, jira_plan_hash=jira.semantic_hash if jira else None, retire_tombstones=dump(serialized_tombstones), state=version.state, created_at=case.created_at)
+                plan_item_bindings = payload.source_item_bindings if isinstance(payload, ProjectionPlanPayloadV2) else None
+                self._insert_version_or_update_state(connection, projection_plan_versions, plan_id=str(root.artifact_id), version=version.version, case_id=cid, target=target.value, project_key=payload.project_key, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, package_id=str(payload.package_binding.artifact_id), package_version=payload.package_binding.version, package_hash=payload.package_binding.semantic_hash, jira_plan_id=str(jira.artifact_id) if jira else None, jira_plan_version=jira.version if jira else None, jira_plan_hash=jira.semantic_hash if jira else None, source_item_bindings=dump([value.model_dump(mode="python") for value in plan_item_bindings]) if plan_item_bindings is not None else None, retire_tombstones=dump(serialized_tombstones), state=version.state, created_at=case.created_at)
                 hashes = case.metadata.get("item_hashes", {}).get((root.artifact_id, version.version), {})
                 remaining = {item.item_id: item for item in payload.items}
                 ordered_items = []
@@ -630,7 +690,8 @@ class SqlAlchemyStore:
                         emitted.add(plan_item.item_id)
                         remaining.pop(plan_item.item_id)
                 for plan_item in ordered_items:
-                    self._insert_once(connection, projection_items, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), case_id=cid, generation_key=plan_item.body.generation_key, kind=plan_item.kind.value, domain=plan_item.domain.value, title=plan_item.title, body=dump(plan_item.body.model_dump(mode="python")), parent_item_id=str(plan_item.parent_item_id) if plan_item.parent_item_id else None, implementation_required=plan_item.implementation_required, repository=plan_item.repository, primary_jira_item_id=str(plan_item.primary_jira_item_id) if plan_item.primary_jira_item_id else None, item_semantic_hash=hashes.get(plan_item.item_id, "0" * 64))
+                    source_item_bindings = plan_item.source_item_bindings if isinstance(plan_item, ProjectionItemV2) else None
+                    self._insert_once(connection, projection_items, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), case_id=cid, generation_key=plan_item.body.generation_key, kind=plan_item.kind.value, domain=plan_item.domain.value, title=plan_item.title, body=dump(plan_item.body.model_dump(mode="python")), parent_item_id=str(plan_item.parent_item_id) if plan_item.parent_item_id else None, implementation_required=plan_item.implementation_required, repository=plan_item.repository, primary_jira_item_id=str(plan_item.primary_jira_item_id) if plan_item.primary_jira_item_id else None, source_item_bindings=dump([value.model_dump(mode="python") for value in source_item_bindings]) if source_item_bindings is not None else None, item_semantic_hash=hashes.get(plan_item.item_id, "0" * 64))
                 for plan_item in ordered_items:
                     for source in plan_item.source_unit_ids: self._insert_once(connection, projection_item_sources, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), source_unit_id=str(source), case_id=cid)
                     for dependency in plan_item.dependency_item_ids: self._insert_once(connection, projection_dependencies, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), depends_on_item_id=str(dependency), case_id=cid)

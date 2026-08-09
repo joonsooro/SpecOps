@@ -11,12 +11,20 @@ from specops_workflow.canonical import sha256 as canonical_sha256
 from specops_workflow.enums import SourceArtifactType
 from specops_workflow.errors import DomainError, ErrorCode
 from specops_workflow.models import (
+    AmbiguityFindingResult,
+    ApproveSpecPackageItemCommand,
+    CreateSpecPackageV2Command,
+    ItemGovernanceResult,
     LineRange,
+    MarkSpecPackageItemReadyCommand,
     QueryOne,
+    RecordItemAmbiguityFindingCommand,
     RegisterSourceArtifactCommand,
+    ReviseSpecPackageV2Command,
     SourceArtifactIdentity,
     SourceArtifactResult,
     SourceRef,
+    SpecPackageResult,
 )
 
 from ..contracts import (
@@ -33,6 +41,15 @@ from ..sessions import WorkshopStore
 
 
 TRANSCRIPT_NAMESPACE = UUID("f620329f-45dc-5126-a43f-5e4e3e7a3769")
+FOUNDATION_OUTBOX_NAMESPACE = UUID("cfe59799-88f6-50d2-8962-96f09a159a17")
+FOUNDATION_COMMANDS = {
+    "register_source_artifact": (RegisterSourceArtifactCommand, SourceArtifactResult),
+    "create_spec_package": (CreateSpecPackageV2Command, SpecPackageResult),
+    "revise_spec_package": (ReviseSpecPackageV2Command, SpecPackageResult),
+    "record_item_ambiguity_finding": (RecordItemAmbiguityFindingCommand, AmbiguityFindingResult),
+    "mark_spec_package_item_ready": (MarkSpecPackageItemReadyCommand, ItemGovernanceResult),
+    "approve_spec_package_item": (ApproveSpecPackageItemCommand, ItemGovernanceResult),
+}
 
 
 class FoundationGateway(Protocol):
@@ -123,14 +140,15 @@ class WorkshopCoordinator:
 
     def dispatch(self, outbox_id: UUID):
         outbox = self.store.get_outbox(outbox_id)
+        command_type, result_type = FOUNDATION_COMMANDS[outbox.command_name]
         if outbox.status == OutboxStatus.CONFIRMED:
-            return SourceArtifactResult.model_validate_json(outbox.result_json)
+            return result_type.model_validate_json(outbox.result_json)
         if outbox.status == OutboxStatus.REJECTED:
             raise ValueError("rejected outbox entry cannot be retried")
-        command = RegisterSourceArtifactCommand.model_validate_json(outbox.command_json)
+        command = command_type.model_validate_json(outbox.command_json)
         now = self.clock.now().astimezone(timezone.utc)
         try:
-            result = self.foundation.register_source_artifact(command)
+            result = getattr(self.foundation, outbox.command_name)(command)
         except DomainError as exc:
             if exc.code == ErrorCode.STALE_ARTIFACT_BINDING:
                 self.store.record_dispatch(outbox_id, status=OutboxStatus.REJECTED, now=now, lock_reason="FOUNDATION_REVISION_MISMATCH")
@@ -144,7 +162,7 @@ class WorkshopCoordinator:
             )
             raise
         stored = result.stored_result if not result.mutated else result
-        if not isinstance(stored, SourceArtifactResult):
+        if not isinstance(stored, result_type):
             self.store.record_dispatch(outbox_id, status=OutboxStatus.REJECTED, now=now, lock_reason="FOUNDATION_RESULT_TYPE_MISMATCH")
             raise TypeError("foundation returned the wrong typed result")
         self.store.record_dispatch(
@@ -152,6 +170,42 @@ class WorkshopCoordinator:
             result_json=stored.model_dump_json(), confirmed_revision=stored.receipt.revision,
         )
         return stored
+
+    def enqueue_foundation_command(
+        self,
+        session_id: UUID,
+        *,
+        logical_action_key: str,
+        command_name: str,
+        command,
+    ) -> FoundationOutbox:
+        if command_name not in FOUNDATION_COMMANDS:
+            raise ValueError("unsupported foundation outbox command")
+        now = self.clock.now().astimezone(timezone.utc)
+        fingerprint = canonical_sha256({
+            "schema": "command-v1",
+            "command_name": command_name,
+            "payload": command.model_dump(mode="python", exclude_none=False),
+        })
+        outbox = FoundationOutbox(
+            outbox_id=uuid5(FOUNDATION_OUTBOX_NAMESPACE, f"outbox:{logical_action_key}"),
+            session_id=session_id,
+            command_id=command.command_id,
+            logical_action_key=logical_action_key,
+            command_name=command_name,
+            command_fingerprint=fingerprint,
+            command_json=command.model_dump_json(),
+            expected_foundation_revision=command.expected_case_revision,
+            status=OutboxStatus.PENDING,
+            attempts=0,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.store.enqueue_command(outbox)
+
+    def commit_foundation_command(self, session_id: UUID, **values):
+        outbox = self.enqueue_foundation_command(session_id, **values)
+        return self.dispatch(outbox.outbox_id)
 
     def commit_final_turn(self, session_id: UUID, **values):
         outbox = self.enqueue_final_turn(session_id, **values)

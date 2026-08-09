@@ -15,6 +15,8 @@ from ..contracts import (
     ConversationPhase,
     FoundationOutbox,
     OutboxStatus,
+    PackageProposalRecord,
+    ProposalStatus,
     TranscriptSnapshot,
     WorkshopSession,
     WorkshopState,
@@ -230,6 +232,28 @@ class WorkshopStore:
             )).mappings().one()
         return self._outbox(row)
 
+    def find_outbox_for_action(self, logical_action_key: str) -> FoundationOutbox | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(foundation_outbox).where(
+                foundation_outbox.c.logical_action_key == logical_action_key
+            )).mappings().one_or_none()
+        return None if row is None else self._outbox(row)
+
+    def enqueue_command(self, value: FoundationOutbox) -> FoundationOutbox:
+        existing = self.find_outbox_for_action(value.logical_action_key)
+        if existing is not None:
+            if (
+                existing.command_id != value.command_id
+                or existing.command_name != value.command_name
+                or existing.command_fingerprint != value.command_fingerprint
+                or existing.command_json != value.command_json
+            ):
+                raise ValueError("foundation logical action identity conflict")
+            return existing
+        with self.engine.begin() as connection:
+            connection.execute(insert(foundation_outbox).values(**self._outbox_values(value)))
+        return value
+
     def get_outbox(self, outbox_id: UUID) -> FoundationOutbox:
         with self.engine.connect() as connection:
             row = connection.execute(select(foundation_outbox).where(foundation_outbox.c.outbox_id == str(outbox_id))).mappings().one()
@@ -312,6 +336,111 @@ class WorkshopStore:
             latest[row["turn_sequence"]] = self._snapshot(row)
         return tuple(latest[key] for key in sorted(latest))
 
+    def record_analyzer_attempt(
+        self,
+        *,
+        request_id: UUID,
+        session_id: UUID,
+        turn_sequence: int,
+        effort: str,
+        status: str,
+        attempt_count: int,
+        now: datetime,
+    ) -> None:
+        with self.engine.begin() as connection:
+            row = connection.execute(select(analyzer_requests).where(
+                analyzer_requests.c.request_id == str(request_id)
+            )).mappings().one_or_none()
+            values = {
+                "status": status,
+                "attempt_count": attempt_count,
+                "updated_at": _instant(now),
+            }
+            if row is None:
+                connection.execute(insert(analyzer_requests).values(
+                    request_id=str(request_id),
+                    session_id=str(session_id),
+                    turn_sequence=turn_sequence,
+                    effort=effort,
+                    created_at=_instant(now),
+                    **values,
+                ))
+            else:
+                if (
+                    row["session_id"] != str(session_id)
+                    or row["turn_sequence"] != turn_sequence
+                    or row["effort"] != effort
+                ):
+                    raise ValueError("analyzer request identity conflict")
+                connection.execute(update(analyzer_requests).where(
+                    analyzer_requests.c.request_id == str(request_id)
+                ).values(**values))
+
+    def save_proposal(self, value: PackageProposalRecord) -> PackageProposalRecord:
+        with self.engine.begin() as connection:
+            prior = connection.execute(select(package_proposals).where(
+                package_proposals.c.session_id == str(value.session_id),
+                package_proposals.c.status == ProposalStatus.PENDING.value,
+            )).mappings().one_or_none()
+            if prior is not None:
+                connection.execute(update(package_proposals).where(
+                    package_proposals.c.proposal_ref == prior["proposal_ref"]
+                ).values(status=ProposalStatus.SUPERSEDED.value, updated_at=_instant(value.created_at)))
+            connection.execute(insert(package_proposals).values(
+                proposal_ref=value.proposal_ref, session_id=str(value.session_id), version=value.version,
+                base_foundation_revision=value.base_foundation_revision,
+                analyzer_result_json=value.analyzer_result_json, status=value.status.value,
+                created_at=_instant(value.created_at), updated_at=_instant(value.updated_at),
+            ))
+            connection.execute(update(sessions).where(sessions.c.session_id == str(value.session_id)).values(
+                pending_proposal_ref=value.proposal_ref, updated_at=_instant(value.updated_at),
+            ))
+        return value
+
+    def pending_proposal(self, session_id: UUID) -> PackageProposalRecord | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(package_proposals).where(
+                package_proposals.c.session_id == str(session_id),
+                package_proposals.c.status == ProposalStatus.PENDING.value,
+            )).mappings().one_or_none()
+        return None if row is None else self._proposal(row)
+
+    def latest_proposal(
+        self, session_id: UUID, *, status: ProposalStatus | None = None
+    ) -> PackageProposalRecord | None:
+        clauses = [package_proposals.c.session_id == str(session_id)]
+        if status is not None:
+            clauses.append(package_proposals.c.status == status.value)
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(package_proposals)
+                .where(*clauses)
+                .order_by(package_proposals.c.version.desc())
+                .limit(1)
+            ).mappings().one_or_none()
+        return None if row is None else self._proposal(row)
+
+    def set_proposal_status(self, proposal_ref: str, status: ProposalStatus, now: datetime) -> PackageProposalRecord:
+        with self.engine.begin() as connection:
+            row = connection.execute(select(package_proposals).where(
+                package_proposals.c.proposal_ref == proposal_ref
+            )).mappings().one()
+            connection.execute(update(package_proposals).where(
+                package_proposals.c.proposal_ref == proposal_ref
+            ).values(status=status.value, updated_at=_instant(now)))
+            connection.execute(update(sessions).where(sessions.c.session_id == row["session_id"]).values(
+                pending_proposal_ref=None if status != ProposalStatus.PENDING else proposal_ref,
+                updated_at=_instant(now),
+            ))
+        updated = dict(row); updated["status"] = status.value; updated["updated_at"] = _instant(now)
+        return self._proposal(updated)
+
+    def set_foundation_revision(self, session_id: UUID, revision: int, now: datetime) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(update(sessions).where(sessions.c.session_id == str(session_id)).values(
+                expected_foundation_revision=revision, updated_at=_instant(now),
+            ))
+
     @staticmethod
     def _session_values(value: WorkshopSession) -> dict[str, object]:
         return {
@@ -359,5 +488,14 @@ class WorkshopStore:
             command_fingerprint=row["command_fingerprint"], command_json=row["command_json"],
             expected_foundation_revision=row["expected_foundation_revision"], status=OutboxStatus(row["status"]),
             attempts=row["attempts"], result_json=row["result_json"], created_at=_parse_instant(row["created_at"]),
+            updated_at=_parse_instant(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _proposal(row) -> PackageProposalRecord:
+        return PackageProposalRecord(
+            proposal_ref=row["proposal_ref"], session_id=UUID(row["session_id"]), version=row["version"],
+            base_foundation_revision=row["base_foundation_revision"], analyzer_result_json=row["analyzer_result_json"],
+            status=ProposalStatus(row["status"]), created_at=_parse_instant(row["created_at"]),
             updated_at=_parse_instant(row["updated_at"]),
         )

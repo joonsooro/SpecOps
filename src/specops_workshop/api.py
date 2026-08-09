@@ -13,12 +13,14 @@ from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
 from .config import Settings
 from .contracts import FinalTurnInput, RecoveryView
 from .delegation import load_delegation_fixture
+from .gate import RegisteredEvidenceGrounding, WorkshopGate
 from .live_transport import LiveTransport
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider
 from .providers import GeminiLiveProvider
+from .providers.openai_responses import TerraResponsesProvider
 from .sessions import WorkshopStore
-from .sources import SourceCatalog
+from .sources import SourceCatalog, SourceName
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +34,8 @@ def create_app(
     clock=None,
     source_catalog: SourceCatalog | None = None,
     live_provider: LiveVoiceProvider | None = None,
+    analyzer_provider=None,
+    grounding_checker=None,
     idle_timeout_seconds: float = 30 * 60,
 ) -> FastAPI:
     runtime_clock = clock or SystemClock()
@@ -54,9 +58,30 @@ def create_app(
         api_key=runtime_settings.gemini_api_key,
         model=runtime_settings.gemini_model,
     )
+    resolved_analyzer = analyzer_provider
+    if resolved_analyzer is None and live_provider is None:
+        resolved_analyzer = TerraResponsesProvider(api_key=runtime_settings.openai_api_key, model=runtime_settings.terra_model)
+    gate = None
+    if resolved_analyzer is not None:
+        grounding = grounding_checker or RegisteredEvidenceGrounding(
+            static_refs={
+                bootstrap.pm_source_id: (
+                    1,
+                    catalog.digest(SourceName.PM_SPEC),
+                    len(catalog.numbered_lines(SourceName.PM_SPEC)),
+                ),
+                bootstrap.technical_source_id: (
+                    1,
+                    catalog.digest(SourceName.TECHNICAL_SPEC),
+                    len(catalog.numbered_lines(SourceName.TECHNICAL_SPEC)),
+                ),
+            },
+            store=workshop_store, session_id=DEMO_SESSION_ID,
+        )
+        gate = WorkshopGate(workshop_store, workflow, resolved_analyzer, grounding, clock=runtime_clock)
     live_transport = LiveTransport(
         voice_provider, coordinator, workshop_store,
-        session_id=DEMO_SESSION_ID, idle_timeout_seconds=idle_timeout_seconds,
+        session_id=DEMO_SESSION_ID, idle_timeout_seconds=idle_timeout_seconds, gate=gate,
     )
     app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
     app.state.settings = runtime_settings
@@ -68,6 +93,7 @@ def create_app(
     app.state.session_id = DEMO_SESSION_ID
     app.state.live_provider = voice_provider
     app.state.live_transport = live_transport
+    app.state.gate = gate
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:

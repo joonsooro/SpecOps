@@ -43,6 +43,8 @@ class OutboxStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
     CONFIRMED = "CONFIRMED"
     REJECTED = "REJECTED"
+class ProposalStatus(StrEnum):
+    PENDING = "PENDING"; SUPERSEDED = "SUPERSEDED"; REJECTED = "REJECTED"; COMMITTED = "COMMITTED"
 
 
 class WorkshopSession(WorkshopModel):
@@ -79,7 +81,7 @@ class FoundationOutbox(WorkshopModel):
     session_id: UUID
     command_id: UUID
     logical_action_key: str = Field(min_length=1, max_length=256)
-    command_name: Literal["register_source_artifact"]
+    command_name: str = Field(min_length=1, max_length=100)
     command_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     command_json: str
     expected_foundation_revision: int = Field(ge=0)
@@ -94,6 +96,17 @@ class RecoveryView(WorkshopModel):
     session: WorkshopSession
     final_transcripts: tuple[TranscriptSnapshot, ...]
     pending_outbox_ids: tuple[UUID, ...]
+
+
+class PackageProposalRecord(WorkshopModel):
+    proposal_ref: str
+    session_id: UUID
+    version: int = Field(ge=1)
+    base_foundation_revision: int = Field(ge=0)
+    analyzer_result_json: str
+    status: ProposalStatus
+    created_at: datetime
+    updated_at: datetime
 
 
 class FinalTurnInput(WorkshopModel):

@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .contracts import CallState, ConversationPhase
+from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider, LiveVoiceSession, VoiceContext, VoiceEventType
 from .sessions import WorkshopStore
@@ -57,6 +58,7 @@ class LiveTransport:
         *,
         session_id: UUID,
         idle_timeout_seconds: float = IDLE_TIMEOUT_SECONDS,
+        gate=None,
     ) -> None:
         self.provider = provider
         self.coordinator = coordinator
@@ -66,6 +68,8 @@ class LiveTransport:
             raise ValueError("idle timeout must be positive")
         self.idle_timeout_seconds = idle_timeout_seconds
         self._last_input_at = 0.0
+        self.gate = gate
+        self._generation_blocked = False
 
     async def handle(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -145,8 +149,57 @@ class LiveTransport:
                     provider_request_id=str(value["provider_request_id"]),
                     correction_of_version=value.get("correction_of_version"),
                 )
+                proposal = None
+                if self.gate is not None:
+                    proposal = await self.gate.analyze_final_turn(
+                        self.session_id, int(value["turn_sequence"])
+                    )
                 await websocket.send_json({"type": "FINAL_COMMITTED", "revision": result.receipt.revision})
-                await session.send_text(str(value["text"]))
+                if proposal is not None and proposal.complete_package_proposal is not None:
+                    self._generation_blocked = True
+                    await session.interrupt()
+                    pending = self.store.pending_proposal(self.session_id)
+                    await websocket.send_json({
+                        "type": "PROPOSAL_PENDING",
+                        "proposal_ref": pending.proposal_ref if pending else None,
+                        "acknowledgement": proposal.acknowledgement,
+                        "next_question": proposal.next_question,
+                    })
+                else:
+                    await session.send_text(str(value["text"]))
+            elif kind == "CONTROL" and self.gate is not None:
+                snapshots = self.store.latest_snapshots(self.session_id)
+                if not snapshots:
+                    await websocket.send_json({"type": "ERROR", "code": "NO_FINAL_EVIDENCE"})
+                    continue
+                intent = ControlIntent(str(value.get("intent")))
+                control = AnalyzerTurnResult(
+                    schema_version=1,
+                    turn_source_ref=snapshots[-1].final_source_ref,
+                    finding_proposals=[],
+                    complete_package_proposal=None,
+                    control_intent=intent,
+                    control_target=ControlTarget.WORKSHOP_PATCH,
+                    target_proposal_ref=str(value.get("proposal_ref")),
+                    edit_instruction=value.get("edit_instruction"),
+                    acknowledgement=value.get("acknowledgement"),
+                    next_question=None,
+                )
+                applied = self.gate.apply_control(
+                    self.session_id,
+                    control,
+                    confirmation_context=self._generation_blocked,
+                )
+                self._generation_blocked = False
+                await websocket.send_json({
+                    "type": "CONTROL_APPLIED",
+                    "intent": intent.value,
+                    "status": None if applied is None else applied.status.value,
+                })
+                if intent == ControlIntent.CONFIRM:
+                    await session.send_text(
+                        "The proposed package is committed. Continue with one focused question."
+                    )
             elif kind == "INTERRUPT":
                 audio.clear()
                 await websocket.send_json({"type": "INTERRUPTED", "playback_cleared": True})
@@ -183,6 +236,8 @@ class LiveTransport:
         next_sequence = len(self.store.latest_snapshots(self.session_id)) + 1
         async for event in session.events():
             if event.type == VoiceEventType.AUDIO and event.audio is not None:
+                if self._generation_blocked:
+                    continue
                 output.push(event.audio)
                 chunk = output.pop()
                 if chunk is not None:
@@ -194,12 +249,27 @@ class LiveTransport:
                     self.session_id, turn_sequence=next_sequence, text=event.text,
                     provider_request_id=event.provider_request_id or f"provider-turn-{next_sequence}",
                 )
+                if self.gate is not None:
+                    proposal = await self.gate.analyze_final_turn(self.session_id, next_sequence)
+                    if proposal.complete_package_proposal is not None:
+                        self._generation_blocked = True
+                        await session.interrupt()
                 await websocket.send_json({
                     "type": "TRANSCRIPT_FINAL", "text": event.text,
                     "turn_sequence": next_sequence, "revision": result.receipt.revision,
                 })
+                if self._generation_blocked:
+                    pending = self.store.pending_proposal(self.session_id)
+                    await websocket.send_json({
+                        "type": "PROPOSAL_PENDING",
+                        "proposal_ref": pending.proposal_ref if pending else None,
+                        "acknowledgement": proposal.acknowledgement,
+                        "next_question": proposal.next_question,
+                    })
                 next_sequence += 1
             elif event.type == VoiceEventType.OUTPUT_TRANSCRIPT:
+                if self._generation_blocked:
+                    continue
                 await websocket.send_json({"type": "AGENT_TRANSCRIPT", "text": event.text})
             elif event.type == VoiceEventType.INTERRUPTED:
                 output.clear()
@@ -217,6 +287,8 @@ class LiveTransport:
                     provider_request_id=str(value["provider_request_id"]),
                     correction_of_version=value.get("correction_of_version"),
                 )
+                if self.gate is not None:
+                    await self.gate.analyze_final_turn(self.session_id, int(value["turn_sequence"]))
                 await websocket.send_json({"type": "FINAL_COMMITTED", "revision": result.receipt.revision})
             elif value.get("type") == "END":
                 self.store.update_phase(

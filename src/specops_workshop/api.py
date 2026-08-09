@@ -17,6 +17,11 @@ from .boundary import assert_downstream_boundary
 from .config import Settings
 from .contracts import FinalTurnInput, RecoveryView
 from .delegation import load_delegation_fixture
+from .evidence import (
+    EvidenceIndexer,
+    EvidenceSourceRole,
+    RegisteredMarkdownSnapshot,
+)
 from .gate import RegisteredEvidenceGrounding, WorkshopGate
 from .finish import FinishCoordinator, FinishResult
 from .live_transport import LiveTransport
@@ -66,6 +71,25 @@ def create_app(
         workshop_store, workflow, clock=runtime_clock, telemetry=telemetry
     )
     coordinator.start_session(DEMO_SESSION_ID, case_id=bootstrap.case_id, pm_actor_id=bootstrap.pm_actor_id)
+    registered_by_id = {
+        identity.artifact_id: identity
+        for identity in bootstrap.registered_source_identities
+    }
+    evidence_index = EvidenceIndexer().build(
+        case_id=bootstrap.case_id,
+        snapshots=(
+            RegisteredMarkdownSnapshot.from_registered(
+                EvidenceSourceRole.PM_SPEC,
+                registered_by_id[bootstrap.pm_source_id],
+                catalog.read_text(SourceName.PM_SPEC),
+            ),
+            RegisteredMarkdownSnapshot.from_registered(
+                EvidenceSourceRole.TECHNICAL_SPEC,
+                registered_by_id[bootstrap.technical_source_id],
+                catalog.read_text(SourceName.TECHNICAL_SPEC),
+            ),
+        ),
+    )
     voice_provider = live_provider or GeminiLiveProvider(
         api_key=runtime_settings.gemini_api_key.get_secret_value(),
         model=runtime_settings.gemini_model,
@@ -117,6 +141,7 @@ def create_app(
     app.state.workflow = workflow
     app.state.bootstrap = bootstrap
     app.state.source_catalog = catalog
+    app.state.evidence_index = evidence_index
     app.state.workshop_store = workshop_store
     app.state.coordinator = coordinator
     app.state.session_id = DEMO_SESSION_ID

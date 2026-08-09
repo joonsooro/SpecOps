@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from specops_workflow import Clock, WorkflowService, migrate
 from specops_workflow.enums import Domain, SourceArtifactType
@@ -48,6 +48,9 @@ class BootstrapView(BaseModel):
     pm_source_id: UUID
     technical_source_id: UUID
     technical_source_lines: tuple[tuple[int, str], ...]
+    registered_source_identities: tuple[SourceArtifactIdentity, ...] = Field(
+        exclude=True, repr=False
+    )
 
 
 def bootstrap_foundation(
@@ -94,7 +97,7 @@ def bootstrap_foundation(
         revision=revision,
     )
     revision = pm_source.stored_result.receipt.revision if not pm_source.mutated else pm_source.receipt.revision
-    _register(
+    technical_source = _register(
         service,
         catalog,
         SourceName.TECHNICAL_SPEC,
@@ -102,6 +105,12 @@ def bootstrap_foundation(
         source_type=SourceArtifactType.TECHNICAL_CONTRACT,
         actor=PM_ACTOR_ID,
         revision=revision,
+    )
+    pm_identity = pm_source.identity if pm_source.mutated else pm_source.stored_result.identity
+    technical_identity = (
+        technical_source.identity
+        if technical_source.mutated
+        else technical_source.stored_result.identity
     )
     return service, BootstrapView(
         case_id=CASE_ID,
@@ -116,6 +125,7 @@ def bootstrap_foundation(
         pm_source_id=PM_SOURCE_ID,
         technical_source_id=TECHNICAL_SOURCE_ID,
         technical_source_lines=tuple(catalog.numbered_lines(SourceName.TECHNICAL_SPEC)),
+        registered_source_identities=(pm_identity, technical_identity),
     )
 
 

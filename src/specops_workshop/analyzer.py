@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import re
-from datetime import timezone
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
 from uuid import UUID, uuid5
@@ -12,7 +9,8 @@ from pydantic import Field, model_validator
 from specops_workflow.enums import AmbiguityCategory, Domain, Severity
 from specops_workflow.models import SourceRef
 
-from .contracts import AnalyzerSourceContext, ConversationPhase, TranscriptSnapshot, WorkshopModel
+from .contracts import ConversationPhase, WorkshopModel
+from .evidence import EvidenceAlias
 
 
 PROPOSAL_NAMESPACE = UUID("99ebaa1a-2bed-5df3-92b5-9c577fdcad77")
@@ -118,17 +116,124 @@ class AnalyzerTurnResult(WorkshopModel):
         return self
 
 
-class AnalyzerRequest(WorkshopModel):
-    request_id: UUID; session_id: UUID; effort: Literal["low", "medium", "high"]
+class SelectedSemanticEvidence(WorkshopModel):
+    alias: EvidenceAlias
+    display_label: str = Field(min_length=1, max_length=240)
+    text: str = Field(min_length=1, max_length=20_000)
+
+
+class CommittedPackageSemantics(WorkshopModel):
+    item_title: str = Field(min_length=1, max_length=240)
+    business_requirement: str = Field(min_length=1, max_length=2000)
+    technical_decision: str = Field(min_length=1, max_length=2000)
+    acceptance_check: str = Field(min_length=1, max_length=2000)
+
+
+class CommittedSemanticContext(WorkshopModel):
+    package: CommittedPackageSemantics | None
+
+
+class SemanticAnalyzerRequest(WorkshopModel):
+    schema_version: Literal[1]
     purpose: Literal["TURN", "FINISH_AUDIT"] = "TURN"
-    phase: ConversationPhase; final_turn: TranscriptSnapshot
-    source_context: AnalyzerSourceContext | None = None
-    final_transcript_snapshots: tuple[TranscriptSnapshot, ...] = ()
-    committed_context_json: str
+    phase: ConversationPhase
+    final_turn_text: str = Field(min_length=1, max_length=100_000)
+    business_context: str = Field(min_length=1, max_length=250_000)
+    candidates: tuple[SelectedSemanticEvidence, ...] = Field(min_length=1, max_length=5)
+    committed_context: CommittedSemanticContext
+    edit_instruction: str | None = Field(default=None, max_length=2000)
+    remaining_budget_ms: int = Field(ge=1, le=30_000)
+    effort: Literal["medium"] = "medium"
+
+    @model_validator(mode="after")
+    def unique_candidate_aliases(self):
+        aliases = [candidate.alias for candidate in self.candidates]
+        if len(aliases) != len(set(aliases)):
+            raise ValueError("semantic request candidate aliases must be unique")
+        return self
+
+
+class SupportingExcerpt(WorkshopModel):
+    alias: EvidenceAlias
+    excerpt: str = Field(min_length=1, max_length=20_000)
+
+
+class GroundedSemanticText(WorkshopModel):
+    text: str = Field(min_length=1, max_length=2000)
+    evidence_aliases: tuple[EvidenceAlias, ...] = Field(min_length=1, max_length=5)
+    supporting_excerpts: tuple[SupportingExcerpt, ...] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def exact_unique_support(self):
+        aliases = list(self.evidence_aliases)
+        excerpts = [value.alias for value in self.supporting_excerpts]
+        if len(aliases) != len(set(aliases)) or len(excerpts) != len(set(excerpts)):
+            raise ValueError("grounded semantic aliases must be unique")
+        if set(aliases) != set(excerpts):
+            raise ValueError("every grounded alias requires exactly one supporting excerpt")
+        return self
+
+
+class SemanticFinding(WorkshopModel):
+    domain: Literal[Domain.TECHNICAL, Domain.CROSS_DOMAIN]
+    question: GroundedSemanticText
+    uncertainty: str = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def focused_question(self):
+        value = self.question.text
+        if (
+            len(value.split()) > 25
+            or not value.rstrip().endswith("?")
+            or value.count("?") != 1
+        ):
+            raise ValueError(
+                "semantic finding question must be one focused interrogative of at most 25 words"
+            )
+        return self
+
+
+class SemanticPackageDelta(WorkshopModel):
+    item_title: str = Field(min_length=1, max_length=240)
+    business_requirement: GroundedSemanticText
+    technical_decision: GroundedSemanticText
+    acceptance_check: GroundedSemanticText
+
+
+class SemanticTurnDraft(WorkshopModel):
+    schema_version: Literal[1]
+    findings: tuple[SemanticFinding, ...] = Field(max_length=1)
+    package_delta: SemanticPackageDelta | None
+    control_intent: ControlIntent
+    edit_instruction: str | None = Field(default=None, max_length=2000)
+    acknowledgement: str | None = Field(default=None, max_length=240)
+    next_question: str | None = Field(default=None, max_length=2000)
+    uncertainty: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def exact_semantic_shape(self):
+        if self.acknowledgement and len(self.acknowledgement.split()) > 5:
+            raise ValueError("acknowledgement exceeds five words")
+        if self.next_question and (
+            len(self.next_question.split()) > 25
+            or not self.next_question.rstrip().endswith("?")
+            or self.next_question.count("?") != 1
+        ):
+            raise ValueError("next question must be one focused interrogative of at most 25 words")
+        if self.control_intent == ControlIntent.EDIT:
+            if not self.edit_instruction:
+                raise ValueError("EDIT requires an edit instruction")
+        elif self.edit_instruction is not None:
+            raise ValueError("only EDIT may carry an edit instruction")
+        if self.control_intent != ControlIntent.NONE and (
+            self.findings or self.package_delta is not None
+        ):
+            raise ValueError("control-only semantic drafts cannot carry analysis")
+        return self
 
 
 class SpecAnalyzerProvider(Protocol):
-    async def analyze(self, request: AnalyzerRequest) -> AnalyzerTurnResult: ...
+    async def analyze(self, request: SemanticAnalyzerRequest) -> SemanticTurnDraft: ...
 
 
 class GroundingChecker(Protocol):

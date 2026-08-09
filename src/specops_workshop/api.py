@@ -27,7 +27,7 @@ from .finish import FinishCoordinator, FinishResult
 from .live_transport import LiveTransport
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider
-from .provider_context import build_analyzer_source_context
+from .provider_context import build_analyzer_business_context
 from .providers import GeminiLiveProvider
 from .providers.openai_responses import TerraResponsesProvider
 from .projections import PendingProposalView, ProposalControlInput, WorkshopProjection
@@ -75,9 +75,7 @@ def create_app(
         identity.artifact_id: identity
         for identity in bootstrap.registered_source_identities
     }
-    evidence_index = EvidenceIndexer().build(
-        case_id=bootstrap.case_id,
-        snapshots=(
+    evidence_snapshots = (
             RegisteredMarkdownSnapshot.from_registered(
                 EvidenceSourceRole.PM_SPEC,
                 registered_by_id[bootstrap.pm_source_id],
@@ -88,7 +86,10 @@ def create_app(
                 registered_by_id[bootstrap.technical_source_id],
                 catalog.read_text(SourceName.TECHNICAL_SPEC),
             ),
-        ),
+        )
+    evidence_index = EvidenceIndexer().build(
+        case_id=bootstrap.case_id,
+        snapshots=evidence_snapshots,
     )
     voice_provider = live_provider or GeminiLiveProvider(
         api_key=runtime_settings.gemini_api_key.get_secret_value(),
@@ -101,7 +102,7 @@ def create_app(
             model=runtime_settings.terra_model,
         )
     gate = None
-    analyzer_source_context = build_analyzer_source_context(catalog, bootstrap)
+    analyzer_business_context = build_analyzer_business_context(catalog)
     if resolved_analyzer is not None:
         grounding = grounding_checker or RegisteredEvidenceGrounding(
             static_refs={
@@ -124,7 +125,10 @@ def create_app(
             resolved_analyzer,
             grounding,
             clock=runtime_clock,
-            source_context=analyzer_source_context,
+            evidence_index=evidence_index,
+            evidence_snapshots=evidence_snapshots,
+            business_context=analyzer_business_context,
+            dev_lead_actor_id=bootstrap.dev_lead_actor_id,
             telemetry=telemetry,
             default_effort=runtime_settings.analyzer_reasoning_effort,
         )
@@ -142,13 +146,14 @@ def create_app(
     app.state.bootstrap = bootstrap
     app.state.source_catalog = catalog
     app.state.evidence_index = evidence_index
+    app.state.evidence_snapshots = evidence_snapshots
     app.state.workshop_store = workshop_store
     app.state.coordinator = coordinator
     app.state.session_id = DEMO_SESSION_ID
     app.state.live_provider = voice_provider
     app.state.live_transport = live_transport
     app.state.gate = gate
-    app.state.analyzer_source_context = analyzer_source_context
+    app.state.analyzer_business_context = analyzer_business_context
     app.state.finish_coordinator = finish_coordinator
     app.state.telemetry = telemetry
 

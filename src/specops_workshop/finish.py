@@ -64,6 +64,13 @@ class FinishCoordinator:
             effort="medium",
             purpose="FINISH_AUDIT",
         )
+        if audit.acknowledgement == "Clarification needed":
+            self.store.update_phase(
+                session_id, workshop_state=WorkshopState.ACTIVE, now=self.clock.now()
+            )
+            raise ValueError(
+                audit.next_question or "Clarify the selected evidence before finishing."
+            )
         if audit.complete_package_proposal is not None or self.store.pending_proposal(session_id) is not None:
             self.store.update_phase(
                 session_id, workshop_state=WorkshopState.ACTIVE, now=self.clock.now()

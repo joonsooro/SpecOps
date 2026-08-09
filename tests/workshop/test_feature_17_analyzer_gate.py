@@ -13,8 +13,11 @@ from specops_workflow import FrozenClock
 from specops_workflow.enums import Domain, ItemReadiness
 from specops_workflow.models import LineRange, QueryOne, SourceRef
 from specops_workshop.analyzer import (
-    AcceptanceCheckProposal, AnalyzerRequest, AnalyzerTurnResult, CompletePackageProposal, ControlIntent, ControlTarget,
-    RequirementProposal, SpecPackageItemProposal, TechnicalDecisionProposal, validate_phase,
+    AcceptanceCheckProposal, AnalyzerTurnResult, CommittedSemanticContext,
+    CompletePackageProposal, ControlIntent, ControlTarget, GroundedSemanticText,
+    RequirementProposal, SelectedSemanticEvidence, SemanticAnalyzerRequest,
+    SemanticPackageDelta, SemanticTurnDraft, SpecPackageItemProposal, SupportingExcerpt,
+    TechnicalDecisionProposal, validate_phase,
 )
 from specops_workshop.api import DEMO_SESSION_ID, create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
@@ -22,14 +25,6 @@ from specops_workshop.contracts import ConversationPhase, ProposalStatus
 from specops_workshop.gate import WorkshopGate
 from specops_workshop.gate import RegisteredEvidenceGrounding
 from specops_workshop.providers.openai_responses import TerraResponsesProvider
-from specops_workshop.providers.terra_decomposition import (
-    TerraCacheWarmResult,
-    TerraDecisionPlan,
-    TerraFindingPlan,
-    TerraFinishAuditPlan,
-    TerraGroundedText,
-    TerraPackageOutline,
-)
 from specops_workshop.sources import SourceCatalog, SourceName
 
 
@@ -51,7 +46,7 @@ class AnalyzerFixture:
     async def analyze(self, request):
         self.requests.append(request)
         if len(self.requests) <= self.failures: raise ConnectionError("fixture analyzer unavailable")
-        return self.result
+        return self.result(request) if callable(self.result) else self.result
 class GroundingFixture:
     def __init__(self, supported=True): self.supported=supported; self.calls=[]
     def supports(self, claim, refs): self.calls.append((claim, refs)); return self.supported
@@ -61,7 +56,7 @@ class DynamicAnalyzer:
     def __init__(self): self.requests = []
     async def analyze(self, request):
         self.requests.append(request)
-        return proposal_result(request.final_turn.final_source_ref)
+        return semantic_draft(request)
 
 
 class QuietVoiceSession:
@@ -95,20 +90,59 @@ def proposal_result(ref):
     )
 
 
+def semantic_draft(request):
+    candidate = request.candidates[0]
+    support = lambda text: GroundedSemanticText(
+        text=text,
+        evidence_aliases=(candidate.alias,),
+        supporting_excerpts=(SupportingExcerpt(alias=candidate.alias, excerpt=candidate.text),),
+    )
+    return SemanticTurnDraft(
+        schema_version=1,
+        findings=(),
+        package_delta=SemanticPackageDelta(
+            item_title="Timezone-safe filtered export",
+            business_requirement=support("Use the organization profile timezone for exports."),
+            technical_decision=support("Use the organization profile IANA zone with UTC fallback."),
+            acceptance_check=support("Timezone boundaries and rendering use the selected configuration."),
+        ),
+        control_intent=ControlIntent.NONE,
+        edit_instruction=None,
+        acknowledgement="Drafted grounded package",
+        next_question="Should we confirm this package?",
+        uncertainty=None,
+    )
+
+
+def direct_gate(app, analyzer, grounding, *, foundation=None):
+    return WorkshopGate(
+        app.state.workshop_store,
+        foundation or app.state.workflow,
+        analyzer,
+        grounding,
+        clock=FrozenClock(NOW),
+        evidence_index=app.state.evidence_index,
+        evidence_snapshots=app.state.evidence_snapshots,
+        business_context=app.state.analyzer_business_context,
+        dev_lead_actor_id=app.state.bootstrap.dev_lead_actor_id,
+    )
+
+
 def test_final_evidence_proposes_without_mutation_then_confirm_commits_exact_cross_domain_item(tmp_path):
     app = create_app(settings=configured(tmp_path), clock=FrozenClock(NOW), source_catalog=SourceCatalog(ROOT), live_provider=object())
     coordinator, store, foundation = app.state.coordinator, app.state.workshop_store, app.state.workflow
-    coordinator.commit_final_turn(DEMO_SESSION_ID, turn_sequence=1, text="Export every filtered order and keep large generation complete.", provider_request_id="pm-final-1")
+    coordinator.commit_final_turn(DEMO_SESSION_ID, turn_sequence=1, text="Resolve D-02 timezone configuration for the export.", provider_request_id="pm-final-1")
     snapshot = store.latest_snapshots(DEMO_SESSION_ID)[0]
-    result = proposal_result(snapshot.final_source_ref)
-    analyzer = AnalyzerFixture(result, failures=2)
+    analyzer = AnalyzerFixture(semantic_draft)
     grounding = GroundingFixture(True)
-    gate = WorkshopGate(store, foundation, analyzer, grounding, clock=FrozenClock(NOW))
+    gate = direct_gate(app, analyzer, grounding)
     before = foundation.get_workflow_view(QueryOne(case_id=app.state.bootstrap.case_id, acting_actor_id=app.state.bootstrap.pm_actor_id))
     analyzed = asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
     after_analysis = foundation.get_workflow_view(QueryOne(case_id=before.case_id, acting_actor_id=app.state.bootstrap.pm_actor_id))
-    assert analyzed == result and after_analysis.revision == before.revision and after_analysis.current_package is None
-    assert len(analyzer.requests) == 3 and len({request.request_id for request in analyzer.requests}) == 1
+    assert analyzed.complete_package_proposal is not None
+    assert after_analysis.revision == before.revision and after_analysis.current_package is None
+    assert len(analyzer.requests) == 1
+    assert analyzer.requests[0].effort == "medium"
     pending = store.pending_proposal(DEMO_SESSION_ID)
     assert pending is not None and pending.status == ProposalStatus.PENDING
 
@@ -127,17 +161,15 @@ def test_final_evidence_proposes_without_mutation_then_confirm_commits_exact_cro
 
 def test_ungrounded_or_wrong_phase_output_creates_no_proposal_or_foundation_mutation(tmp_path):
     app = create_app(settings=configured(tmp_path), clock=FrozenClock(NOW), source_catalog=SourceCatalog(ROOT), live_provider=object())
-    app.state.coordinator.commit_final_turn(DEMO_SESSION_ID, turn_sequence=1, text="Keep the export complete.", provider_request_id="pm-final-2")
-    snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    result = proposal_result(snapshot.final_source_ref)
-    gate = WorkshopGate(app.state.workshop_store, app.state.workflow, AnalyzerFixture(result), GroundingFixture(False), clock=FrozenClock(NOW))
+    app.state.coordinator.commit_final_turn(DEMO_SESSION_ID, turn_sequence=1, text="Resolve D-02 timezone configuration.", provider_request_id="pm-final-2")
+    gate = direct_gate(app, AnalyzerFixture(semantic_draft), GroundingFixture(False))
     revision = app.state.workflow.get_workflow_view(QueryOne(case_id=app.state.bootstrap.case_id, acting_actor_id=app.state.bootstrap.pm_actor_id)).revision
     with pytest.raises(ValueError, match="not grounded"):
         asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
     assert app.state.workshop_store.pending_proposal(DEMO_SESSION_ID) is None
     assert app.state.workflow.get_workflow_view(QueryOne(case_id=app.state.bootstrap.case_id, acting_actor_id=app.state.bootstrap.pm_actor_id)).revision == revision
     with pytest.raises(ValueError, match="HANDOFF_READY"):
-        validate_phase(result.model_copy(update={"control_intent": ControlIntent.FINISH}), ConversationPhase.HANDOFF_READY)
+        validate_phase(proposal_result(app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0].final_source_ref).model_copy(update={"control_intent": ControlIntent.FINISH}), ConversationPhase.HANDOFF_READY)
 
 
 def test_control_acknowledgement_question_and_extra_fields_are_strict():
@@ -189,28 +221,23 @@ def test_missing_fields_reused_keys_and_model_uuid_are_rejected(tmp_path):
         source_catalog=SourceCatalog(ROOT),
         live_provider=object(),
     )
-    app.state.coordinator.commit_final_turn(
-        DEMO_SESSION_ID,
-        turn_sequence=1,
-        text="Keep all export rows.",
-        provider_request_id="unknown-uuid",
-    )
-    snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    invalid = proposal_result(snapshot.final_source_ref)
-    invalid_package = invalid.complete_package_proposal.model_copy(
-        update={"existing_package_id": uuid4()}
-    )
-    invalid = invalid.model_copy(update={"complete_package_proposal": invalid_package})
-    gate = WorkshopGate(
-        app.state.workshop_store,
-        app.state.workflow,
-        AnalyzerFixture(invalid),
-        GroundingFixture(True),
-        clock=FrozenClock(NOW),
-    )
-    with pytest.raises(ValueError, match="unknown"):
-        asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
-    assert app.state.workshop_store.pending_proposal(DEMO_SESSION_ID) is None
+    with pytest.raises(ValidationError):
+        SemanticTurnDraft.model_validate({
+            **semantic_draft(SemanticAnalyzerRequest(
+                schema_version=1,
+                phase=ConversationPhase.WORKSHOP,
+                final_turn_text="Resolve D-02.",
+                business_context="Authorized business context",
+                candidates=(SelectedSemanticEvidence(
+                    alias="technical-agenda:d-02",
+                    display_label="D-02 — Timezone configuration",
+                    text="Timezone configuration uses an IANA zone.",
+                ),),
+                committed_context=CommittedSemanticContext(package=None),
+                remaining_budget_ms=25_000,
+            )).model_dump(mode="python"),
+            "existing_package_id": uuid4(),
+        })
 
 
 def test_registered_evidence_rejects_unsupported_identity_hash_or_range(tmp_path):
@@ -256,17 +283,11 @@ def test_confirmation_requires_explicit_prompt_context_and_generic_ack_is_not_a_
     app.state.coordinator.commit_final_turn(
         DEMO_SESSION_ID,
         turn_sequence=1,
-        text="Keep all rows.",
+        text="Resolve D-02 timezone configuration.",
         provider_request_id="generic-ack",
     )
     snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    gate = WorkshopGate(
-        app.state.workshop_store,
-        app.state.workflow,
-        AnalyzerFixture(proposal_result(snapshot.final_source_ref)),
-        GroundingFixture(True),
-        clock=FrozenClock(NOW),
-    )
+    gate = direct_gate(app, AnalyzerFixture(semantic_draft), GroundingFixture(True))
     asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
     pending = app.state.workshop_store.pending_proposal(DEMO_SESSION_ID)
     generic = AnalyzerTurnResult(
@@ -306,7 +327,7 @@ def test_substantive_voice_continuation_waits_for_typed_confirmed_foundation_com
         assert websocket.receive_json()["state"] == "LISTENING"
         websocket.send_json({
             "type": "TEXT",
-            "text": "Keep every filtered order and generate large exports asynchronously.",
+            "text": "Resolve D-02 timezone configuration for filtered exports.",
             "turn_sequence": 1,
             "provider_request_id": "progression-gate-final",
         })
@@ -345,13 +366,12 @@ def test_substantive_voice_continuation_waits_for_typed_confirmed_foundation_com
         assert websocket.receive_json()["state"] == "ENDED"
 
 
-def test_terra_adapter_pins_responses_structured_output_and_low_effort(tmp_path):
+def test_terra_adapter_pins_one_responses_call_and_medium_effort(tmp_path):
     class Responses:
         def __init__(self): self.calls = []
         async def create(self, **kwargs):
             self.calls.append(kwargs)
-            value = responses[len(self.calls) - 1]
-            return type("Response", (), {"output_text": value.model_dump_json()})()
+            return type("Response", (), {"output_text": response.model_dump_json()})()
     class Client:
         def __init__(self): self.responses = Responses()
 
@@ -361,56 +381,19 @@ def test_terra_adapter_pins_responses_structured_output_and_low_effort(tmp_path)
         source_catalog=SourceCatalog(ROOT),
         live_provider=object(),
     )
-    app.state.coordinator.commit_final_turn(
-        DEMO_SESSION_ID,
-        turn_sequence=1,
-        text="Keep all export rows.",
-        provider_request_id="terra-request-shape",
-    )
-    snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    ref = snapshot.final_source_ref
-    plan = TerraDecisionPlan(
+    unit = app.state.evidence_index.unit_for("technical-agenda:d-02")
+    request = SemanticAnalyzerRequest(
         schema_version=1,
-        turn_source_ref=ref,
-        findings=[TerraFindingPlan(
-            domain=Domain.TECHNICAL,
-            evidence_refs=[ref],
-            clarification_question="Which export decision remains unresolved?",
-        )],
-    )
-    outline = TerraPackageOutline(
-        schema_version=1,
-        turn_source_ref=ref,
-        item_title="Complete filtered export",
-        business_requirement=TerraGroundedText(
-            statement="Export every filtered order",
-            evidence_refs=[ref],
-        ),
-        technical_decision=TerraGroundedText(
-            statement="Generate large exports asynchronously",
-            evidence_refs=[ref],
-        ),
-        acceptance_check=TerraGroundedText(
-            statement="No filtered order is truncated",
-            evidence_refs=[ref],
-        ),
-    )
-    responses = [
-        TerraCacheWarmResult(status="ready"),
-        plan,
-        TerraCacheWarmResult(status="ready"),
-        outline,
-    ]
-    request = AnalyzerRequest(
-        request_id=uuid4(),
-        session_id=DEMO_SESSION_ID,
-        effort="low",
         phase=ConversationPhase.WORKSHOP,
-        final_turn=snapshot,
-        source_context=app.state.analyzer_source_context,
-        final_transcript_snapshots=(snapshot,),
-        committed_context_json='{"content":null,"edit_instruction":null,"governance":null}',
+        final_turn_text="Resolve D-02 timezone configuration.",
+        business_context=app.state.analyzer_business_context,
+        candidates=(SelectedSemanticEvidence(
+            alias=unit.alias, display_label=unit.display_label, text=unit.text
+        ),),
+        committed_context=CommittedSemanticContext(package=None),
+        remaining_budget_ms=25_000,
     )
+    response = semantic_draft(request)
     client = Client()
     provider = TerraResponsesProvider(
         api_key="server-only-test-value",
@@ -418,27 +401,12 @@ def test_terra_adapter_pins_responses_structured_output_and_low_effort(tmp_path)
         client=client,
     )
     analyzed = asyncio.run(provider.analyze(request))
-    package = analyzed.complete_package_proposal
-    assert package is not None
-    assert package.proposal_key == "package-001"
-    assert package.items[0].proposal_key == "item-001"
-    assert package.requirements[0].proposal_key == "requirement-001"
-    assert package.technical_decisions[0].proposal_key == "technical-decision-001"
-    assert package.acceptance_checks[0].related_unit_proposal_keys == [
-        "requirement-001", "technical-decision-001"
-    ]
-    assert analyzed.acknowledgement == "Evidence analyzed"
-    assert analyzed.next_question == plan.findings[0].clarification_question
-    assert len(client.responses.calls) == 4
-    assert [call["text"]["format"]["name"] for call in client.responses.calls] == [
-        "terra_cache_warm_v1",
-        "terra_decision_plan_v1",
-        "terra_cache_warm_v1",
-        "terra_package_outline_v1",
-    ]
+    assert analyzed == response
+    assert len(client.responses.calls) == 1
+    assert client.responses.calls[0]["text"]["format"]["name"] == "semantic_turn_draft_v1"
     for call in client.responses.calls:
         assert call["model"] == TERRA_MODEL
-        assert call["reasoning"] == {"effort": "low"}
+        assert call["reasoning"] == {"effort": "medium"}
         assert call["store"] is False
         assert call["text"]["format"]["type"] == "json_schema"
         assert call["text"]["format"]["strict"] is True
@@ -450,8 +418,7 @@ def test_terra_medium_finish_audit_allows_no_new_finding_or_package(tmp_path):
         def __init__(self): self.calls = []
         async def create(self, **kwargs):
             self.calls.append(kwargs)
-            value = responses[len(self.calls) - 1]
-            return type("Response", (), {"output_text": value.model_dump_json()})()
+            return type("Response", (), {"output_text": audit.model_dump_json()})()
 
     app = create_app(
         settings=configured(tmp_path),
@@ -459,42 +426,37 @@ def test_terra_medium_finish_audit_allows_no_new_finding_or_package(tmp_path):
         source_catalog=SourceCatalog(ROOT),
         live_provider=object(),
     )
-    app.state.coordinator.commit_final_turn(
-        DEMO_SESSION_ID,
-        turn_sequence=1,
-        text="Finish workshop",
-        provider_request_id="terra-medium-audit",
-    )
-    snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    audit = TerraFinishAuditPlan(
+    unit = app.state.evidence_index.unit_for("technical-agenda:d-02")
+    audit = SemanticTurnDraft(
         schema_version=1,
-        turn_source_ref=snapshot.final_source_ref,
-        findings=[],
+        findings=(), package_delta=None, control_intent=ControlIntent.NONE,
+        edit_instruction=None, acknowledgement="Audit complete", next_question=None,
+        uncertainty=None,
     )
-    responses = [TerraCacheWarmResult(status="ready"), audit]
     client = type("Client", (), {"responses": Responses()})()
-    request = AnalyzerRequest(
-        request_id=uuid4(),
-        session_id=DEMO_SESSION_ID,
-        effort="medium",
+    request = SemanticAnalyzerRequest(
+        schema_version=1,
         purpose="FINISH_AUDIT",
         phase=ConversationPhase.WORKSHOP,
-        final_turn=snapshot,
-        source_context=app.state.analyzer_source_context,
-        final_transcript_snapshots=(snapshot,),
-        committed_context_json='{"content":null,"edit_instruction":null,"governance":null}',
+        final_turn_text="Resolve D-02 timezone configuration.",
+        business_context=app.state.analyzer_business_context,
+        candidates=(SelectedSemanticEvidence(
+            alias=unit.alias, display_label=unit.display_label, text=unit.text
+        ),),
+        committed_context=CommittedSemanticContext(package=None),
+        remaining_budget_ms=25_000,
     )
     result = asyncio.run(TerraResponsesProvider(
         api_key="server-only-test-value",
         model=TERRA_MODEL,
         client=client,
     ).analyze(request))
-    assert result.complete_package_proposal is None
-    assert result.finding_proposals == []
+    assert result.package_delta is None
+    assert result.findings == ()
     assert result.acknowledgement == "Audit complete"
     assert result.next_question is None
     assert [call["text"]["format"]["name"] for call in client.responses.calls] == [
-        "terra_cache_warm_v1", "terra_finish_audit_v1"
+        "semantic_turn_draft_v1"
     ]
     assert all(
         call["reasoning"] == {"effort": "medium"}
@@ -512,18 +474,12 @@ def test_crash_after_package_commit_replays_same_outbox_identity_and_finishes_ga
     app.state.coordinator.commit_final_turn(
         DEMO_SESSION_ID,
         turn_sequence=1,
-        text="Keep every row and use asynchronous generation.",
+        text="Resolve D-02 timezone configuration.",
         provider_request_id="gate-crash-final",
     )
     snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    analyzer = AnalyzerFixture(proposal_result(snapshot.final_source_ref))
-    gate = WorkshopGate(
-        app.state.workshop_store,
-        app.state.workflow,
-        analyzer,
-        GroundingFixture(True),
-        clock=FrozenClock(NOW),
-    )
+    analyzer = AnalyzerFixture(semantic_draft)
+    gate = direct_gate(app, analyzer, GroundingFixture(True))
     asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
     pending = app.state.workshop_store.pending_proposal(DEMO_SESSION_ID)
     confirm = AnalyzerTurnResult(
@@ -549,12 +505,9 @@ def test_crash_after_package_commit_replays_same_outbox_identity_and_finishes_ga
                 raise ConnectionError("lost package response")
             return result
 
-    crashing = WorkshopGate(
-        app.state.workshop_store,
-        CrashAfterCommit(app.state.workflow),
-        analyzer,
-        GroundingFixture(True),
-        clock=FrozenClock(NOW),
+    crashing = direct_gate(
+        app, analyzer, GroundingFixture(True),
+        foundation=CrashAfterCommit(app.state.workflow),
     )
     with pytest.raises(ConnectionError, match="lost package"):
         crashing.apply_control(DEMO_SESSION_ID, confirm, confirmation_context=True)
@@ -566,13 +519,9 @@ def test_crash_after_package_commit_replays_same_outbox_identity_and_finishes_ga
     )).current_package
     assert committed_binding is not None
 
-    replay = WorkshopGate(
-        app.state.workshop_store,
-        app.state.workflow,
-        analyzer,
-        GroundingFixture(True),
-        clock=FrozenClock(NOW),
-    ).apply_control(DEMO_SESSION_ID, confirm, confirmation_context=True)
+    replay = direct_gate(app, analyzer, GroundingFixture(True)).apply_control(
+        DEMO_SESSION_ID, confirm, confirmation_context=True
+    )
     assert replay.status == ProposalStatus.COMMITTED
     assert app.state.workshop_store.replayable_outbox(DEMO_SESSION_ID) == ()
     assert app.state.workflow.get_workflow_view(QueryOne(

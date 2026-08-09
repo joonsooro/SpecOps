@@ -105,33 +105,6 @@ class ProviderResumeContext(WorkshopModel):
     final_transcript_snapshots: tuple[TranscriptSnapshot, ...]
 
 
-class ProviderAuthorityContext(WorkshopModel):
-    case_id: UUID
-    pm_actor_id: UUID
-    dev_lead_actor_id: UUID
-    technical_delegation_id: UUID
-    delegation_domain: Literal["TECHNICAL"]
-    delegation_valid_from: datetime
-    delegation_valid_until: datetime
-    delegation_command_scope: tuple[str, ...]
-    later_review_required: Literal[True]
-
-
-class ProviderSourceDocument(WorkshopModel):
-    source_name: Literal["PM_SPECS", "DEV_LEAD_TECHNICAL_SPEC"]
-    artifact_id: UUID
-    version: Literal[1]
-    media_type: Literal["text/markdown"]
-    canonical_locator: str = Field(min_length=1, max_length=4096)
-    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    content: str = Field(min_length=1, max_length=250_000)
-
-
-class AnalyzerSourceContext(WorkshopModel):
-    authority: ProviderAuthorityContext
-    documents: tuple[ProviderSourceDocument, ProviderSourceDocument]
-
-
 class PackageProposalRecord(WorkshopModel):
     proposal_ref: str
     session_id: UUID

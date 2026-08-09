@@ -31,8 +31,12 @@ class RecordingAnalyzer:
         self.request_ids: list[str] = []
 
     async def analyze(self, request):
-        self.request_ids.append(str(request.request_id))
-        return await self.provider.analyze(request)
+        result = await self.provider.analyze(request)
+        diagnostic = self.provider.request_diagnostics[-1]
+        self.request_ids.append(
+            diagnostic.provider_request_id or diagnostic.client_request_id
+        )
+        return result
 
 
 class LiveTerraAnalysisError(RuntimeError):

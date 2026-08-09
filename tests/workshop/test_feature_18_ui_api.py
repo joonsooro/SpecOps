@@ -6,15 +6,12 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from specops_workflow import FrozenClock
-from specops_workflow.enums import Domain
 from specops_workshop.analyzer import (
-    AcceptanceCheckProposal,
-    AnalyzerTurnResult,
-    CompletePackageProposal,
     ControlIntent,
-    RequirementProposal,
-    SpecPackageItemProposal,
-    TechnicalDecisionProposal,
+    GroundedSemanticText,
+    SemanticPackageDelta,
+    SemanticTurnDraft,
+    SupportingExcerpt,
 )
 from specops_workshop.api import create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
@@ -42,38 +39,29 @@ class Grounded:
 
 class ProposalAnalyzer:
     async def analyze(self, request):
-        ref = request.final_turn.final_source_ref
-        package = CompletePackageProposal(
-            proposal_key="csv-package",
-            existing_package_id=None,
-            requirements=[RequirementProposal(
-                proposal_key="all-rows", existing_unit_id=None,
-                statement="Export every filtered order", domain=Domain.BUSINESS,
-                delivery_required=True, source_refs=[ref],
-            )],
-            technical_decisions=[TechnicalDecisionProposal(
-                proposal_key="async-mode", existing_unit_id=None,
-                statement="Generate large exports asynchronously", domain=Domain.TECHNICAL,
-                delivery_required=True, source_refs=[ref],
-            )],
-            acceptance_checks=[AcceptanceCheckProposal(
-                proposal_key="complete-check", existing_check_id=None,
-                statement="No filtered order is truncated", domain=Domain.CROSS_DOMAIN,
-                related_unit_proposal_keys=["all-rows", "async-mode"], source_refs=[ref],
-            )],
-            items=[SpecPackageItemProposal(
-                proposal_key="complete-export", existing_item_id=None,
-                title="Complete filtered export", requirement_proposal_keys=["all-rows"],
-                technical_decision_proposal_keys=["async-mode"],
-                acceptance_check_proposal_keys=["complete-check"], dependency_item_proposal_keys=[],
-            )],
-        )
-        return AnalyzerTurnResult(
-            schema_version=1, turn_source_ref=ref, finding_proposals=[],
-            complete_package_proposal=package, control_intent=ControlIntent.NONE,
-            control_target=None, target_proposal_ref=None, edit_instruction=None,
+        candidate = request.candidates[0]
+        def grounded(text):
+            return GroundedSemanticText(
+                text=text,
+                evidence_aliases=(candidate.alias,),
+                supporting_excerpts=(SupportingExcerpt(
+                    alias=candidate.alias, excerpt=candidate.text
+                ),),
+            )
+        return SemanticTurnDraft(
+            schema_version=1,
+            findings=(),
+            package_delta=SemanticPackageDelta(
+                item_title="Complete filtered export",
+                business_requirement=grounded("Use the organization timezone."),
+                technical_decision=grounded("Use an IANA timezone with UTC fallback."),
+                acceptance_check=grounded("Timezone boundaries and rendering stay exact."),
+            ),
+            control_intent=ControlIntent.NONE,
+            edit_instruction=None,
             acknowledgement="Drafted grounded package",
             next_question="Should this package be committed?",
+            uncertainty=None,
         )
 
 
@@ -86,7 +74,7 @@ def test_workshop_projection_and_accessible_control_use_server_state_only(tmp_pa
     with TestClient(app) as client:
         turn = client.post("/api/session/final-turn", json={
             "turn_sequence": 1,
-            "text": "Keep every filtered row and generate large exports asynchronously.",
+            "text": "Resolve D-02 timezone configuration for the export.",
             "provider_request_id": "browser-final-1",
             "correction_of_version": None,
         })

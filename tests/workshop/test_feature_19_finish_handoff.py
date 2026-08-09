@@ -7,18 +7,15 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from specops_workflow import FrozenClock
-from specops_workflow.enums import AmbiguityCategory, Domain, ItemReadiness, Severity
+from specops_workflow.enums import Domain, ItemReadiness
 from specops_workflow.models import QueryOne, UUIDListQuery
 from specops_workshop.analyzer import (
-    AcceptanceCheckProposal,
-    AnalyzerTurnResult,
-    CompletePackageProposal,
     ControlIntent,
-    FindingProposal,
-    ProposalDisposition,
-    RequirementProposal,
-    SpecPackageItemProposal,
-    TechnicalDecisionProposal,
+    GroundedSemanticText,
+    SemanticFinding,
+    SemanticPackageDelta,
+    SemanticTurnDraft,
+    SupportingExcerpt,
 )
 from specops_workshop.api import DEMO_SESSION_ID, create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
@@ -46,92 +43,56 @@ class Grounded:
 
 
 class FinishAnalyzer:
-    def __init__(self, *, blocked=False, wrong_owner=False):
+    def __init__(self, *, blocked=False):
         self.blocked = blocked
-        self.wrong_owner = wrong_owner
         self.requests = []
 
     async def analyze(self, request):
         self.requests.append(request)
-        ref = request.final_turn.final_source_ref
-        if request.purpose == "FINISH_AUDIT" or request.final_turn.normalized_text.lower() == "finish workshop":
-            return AnalyzerTurnResult(
-                schema_version=1, turn_source_ref=ref, finding_proposals=[],
-                complete_package_proposal=None, control_intent=ControlIntent.FINISH,
-                control_target=None, target_proposal_ref=None, edit_instruction=None,
-                acknowledgement="Audit complete", next_question=None,
+        candidate = request.candidates[0]
+
+        def grounded(text):
+            return GroundedSemanticText(
+                text=text,
+                evidence_aliases=(candidate.alias,),
+                supporting_excerpts=(SupportingExcerpt(
+                    alias=candidate.alias, excerpt=candidate.text
+                ),),
             )
-        domain = Domain.TECHNICAL if self.blocked else Domain.BUSINESS
-        requirements = [RequirementProposal(
-            proposal_key="all-rows", existing_unit_id=None,
-            statement="Export every filtered order", domain=domain,
-            delivery_required=True, source_refs=[ref],
-        )]
-        decisions = [TechnicalDecisionProposal(
-            proposal_key="async-mode", existing_unit_id=None,
-            statement="Generate large exports asynchronously", domain=Domain.TECHNICAL,
-            delivery_required=True, source_refs=[ref],
-        )]
-        checks = [AcceptanceCheckProposal(
-            proposal_key="complete-check", existing_check_id=None,
-            statement="No filtered order is truncated",
-            domain=Domain.TECHNICAL if self.blocked else Domain.CROSS_DOMAIN,
-            related_unit_proposal_keys=["all-rows", "async-mode"], source_refs=[ref],
-        )]
-        item = SpecPackageItemProposal(
-            proposal_key="complete-export", existing_item_id=None,
-            title="Complete filtered export", requirement_proposal_keys=["all-rows"],
-            technical_decision_proposal_keys=["async-mode"],
-            acceptance_check_proposal_keys=["complete-check"], dependency_item_proposal_keys=[],
-        )
-        items = [item]
-        if not self.blocked:
-            requirements.append(RequirementProposal(
-                proposal_key="fixed-schema", existing_unit_id=None,
-                statement="Keep the six-column CSV schema fixed", domain=Domain.BUSINESS,
-                delivery_required=True, source_refs=[ref],
-            ))
-            checks.append(AcceptanceCheckProposal(
-                proposal_key="schema-check", existing_check_id=None,
-                statement="Every CSV contains the fixed header", domain=Domain.BUSINESS,
-                related_unit_proposal_keys=["fixed-schema"], source_refs=[ref],
-            ))
-            items.append(SpecPackageItemProposal(
-                proposal_key="csv-schema", existing_item_id=None,
-                title="CSV schema and encoding", requirement_proposal_keys=["fixed-schema"],
-                technical_decision_proposal_keys=[],
-                acceptance_check_proposal_keys=["schema-check"], dependency_item_proposal_keys=[],
-            ))
-        findings = []
-        if self.blocked:
-            findings = [FindingProposal(
-                proposal_key="retention-decision", existing_finding_id=None,
-                item_proposal_key="complete-export",
-                category=AmbiguityCategory.MISSING_TECH_DECISION,
-                domain=Domain.TECHNICAL, severity=Severity.BLOCKING,
-                evidence_refs=[ref], clarification_question="How long are generated exports retained?",
-                owner_actor_ids=[PM_ACTOR_ID if self.wrong_owner else DEV_LEAD_ACTOR_ID],
-                disposition=ProposalDisposition.OPEN,
-            ), FindingProposal(
-                proposal_key="expiry-decision", existing_finding_id=None,
-                item_proposal_key="complete-export",
-                category=AmbiguityCategory.MISSING_EDGE_CASE,
-                domain=Domain.TECHNICAL, severity=Severity.BLOCKING,
-                evidence_refs=[ref], clarification_question="What happens when a generated export expires?",
-                owner_actor_ids=[PM_ACTOR_ID if self.wrong_owner else DEV_LEAD_ACTOR_ID],
-                disposition=ProposalDisposition.OPEN,
-            )]
-        return AnalyzerTurnResult(
-            schema_version=1, turn_source_ref=ref, finding_proposals=findings,
-            complete_package_proposal=CompletePackageProposal(
-                proposal_key="csv-package", existing_package_id=None,
-                requirements=requirements, technical_decisions=decisions,
-                acceptance_checks=checks, items=items,
+
+        if request.purpose == "FINISH_AUDIT":
+            return SemanticTurnDraft(
+                schema_version=1, findings=(), package_delta=None,
+                control_intent=ControlIntent.NONE, edit_instruction=None,
+                acknowledgement="Audit complete", next_question=None, uncertainty=None,
+            )
+        if request.final_turn_text.lower().startswith("finish workshop"):
+            return SemanticTurnDraft(
+                schema_version=1, findings=(), package_delta=None,
+                control_intent=ControlIntent.FINISH, edit_instruction=None,
+                acknowledgement="Workshop finished", next_question=None, uncertainty=None,
+            )
+        findings = () if not self.blocked else (
+            SemanticFinding(
+                domain=Domain.TECHNICAL,
+                question=grounded("How is timezone configuration resolved?"),
+                uncertainty="The selected agenda decision remains open.",
             ),
-            control_intent=ControlIntent.NONE, control_target=None,
-            target_proposal_ref=None, edit_instruction=None,
+        )
+        return SemanticTurnDraft(
+            schema_version=1,
+            findings=findings,
+            package_delta=SemanticPackageDelta(
+                item_title="Complete filtered export",
+                business_requirement=grounded("Use the organization timezone."),
+                technical_decision=grounded("Use an IANA timezone with UTC fallback."),
+                acceptance_check=grounded("Timezone boundaries and rendering stay exact."),
+            ),
+            control_intent=ControlIntent.NONE,
+            edit_instruction=None,
             acknowledgement="Drafted grounded package",
             next_question="Should this package be committed?",
+            uncertainty=None,
         )
 
 
@@ -147,7 +108,7 @@ def runtime(tmp_path, analyzer, live_provider=object()):
 def prepare(client):
     assert client.post("/api/session/final-turn", json={
         "turn_sequence": 1,
-        "text": "Keep every filtered row and make large generation complete.",
+        "text": "Resolve D-02 timezone configuration for the export.",
         "provider_request_id": "finish-final-1",
         "correction_of_version": None,
     }).status_code == 200
@@ -169,7 +130,7 @@ def test_finish_runs_medium_audit_keeps_voice_live_and_exposes_exact_idempotent_
         assert value["workshop_state"] == "COMPLETED"
         assert value["conversation_phase"] == "HANDOFF_READY"
         handoff = value["handoff"]
-        assert len(handoff["ready_item_bindings"]) == 2
+        assert len(handoff["ready_item_bindings"]) == 1
         assert [value["item_id"] for value in handoff["ready_item_bindings"]] == sorted(
             value["item_id"] for value in handoff["ready_item_bindings"]
         )
@@ -199,7 +160,7 @@ def test_pending_patch_prevents_finish_before_medium_audit(tmp_path):
     _, client = runtime(tmp_path, analyzer)
     with client:
         assert client.post("/api/session/final-turn", json={
-            "turn_sequence": 1, "text": "Keep every filtered row.",
+            "turn_sequence": 1, "text": "Resolve D-02 timezone configuration.",
             "provider_request_id": "pending-finish", "correction_of_version": None,
         }).status_code == 200
         refused = client.post("/api/finish")
@@ -219,36 +180,41 @@ def test_explicit_technical_blocker_creates_native_decision_request_and_may_fini
         assert finished.status_code == 200
         handoff = finished.json()["handoff"]
         assert handoff["ready_item_bindings"] == []
-        assert len(handoff["blocked_review_requests"]) == 2
+        assert len(handoff["blocked_review_requests"]) == 1
         assert [value["review_request_id"] for value in handoff["blocked_review_requests"]] == sorted(
             value["review_request_id"] for value in handoff["blocked_review_requests"]
         )
         assert handoff["later_review_requests"] == []
         assert {request["kind"] for request in handoff["blocked_review_requests"]} == {"DECISION_REQUIRED"}
         assert {request["question"] for request in handoff["blocked_review_requests"]} == {
-            "How long are generated exports retained?",
-            "What happens when a generated export expires?",
+            "How is timezone configuration resolved?",
         }
-        assert {tuple(request["reviewer_actor_ids"]) for request in handoff["blocked_review_requests"]} == {(str(DEV_LEAD_ACTOR_ID),)}
+        assert {
+            frozenset(request["reviewer_actor_ids"])
+            for request in handoff["blocked_review_requests"]
+        } == {frozenset((str(PM_ACTOR_ID), str(DEV_LEAD_ACTOR_ID)))}
         projection = client.get("/api/workshop").json()
         assert projection["governance"]["items"][0]["readiness"] == "BLOCKED"
         assert app.state.workshop_store.get_session(DEMO_SESSION_ID).conversation_phase == ConversationPhase.HANDOFF_READY
 
 
-def test_incomplete_finding_owner_refuses_finish_and_restores_active_formulation(tmp_path):
-    analyzer = FinishAnalyzer(blocked=True, wrong_owner=True)
-    app, client = runtime(tmp_path, analyzer)
-    with client:
-        prepare(client)
-        refused = client.post("/api/finish")
-        assert refused.status_code == 409
-        assert "owner" in refused.json()["detail"]
-        session = app.state.workshop_store.get_session(DEMO_SESSION_ID)
-        assert session.workshop_state == WorkshopState.ACTIVE
-        assert session.conversation_phase == ConversationPhase.WORKSHOP
-        assert app.state.workflow.list_review_requests(UUIDListQuery(
-            case_id=session.case_id, acting_actor_id=session.pm_actor_id
-        )).items == []
+def test_semantic_finding_schema_cannot_supply_authoritative_owner():
+    from pydantic import ValidationError
+    import pytest
+
+    with pytest.raises(ValidationError):
+        SemanticFinding.model_validate({
+            "domain": "TECHNICAL",
+            "question": {
+                "text": "Which timezone is authoritative?",
+                "evidence_aliases": ["technical-agenda:d-02"],
+                "supporting_excerpts": [{
+                    "alias": "technical-agenda:d-02", "excerpt": "timezone"
+                }],
+            },
+            "uncertainty": "The choice is open.",
+            "owner_actor_ids": [str(DEV_LEAD_ACTOR_ID)],
+        })
 
 
 def test_provider_final_spoken_finish_uses_same_coordinator_and_does_not_end_voice(tmp_path):
@@ -260,7 +226,7 @@ def test_provider_final_spoken_finish_uses_same_coordinator_and_does_not_end_voi
         async def events(self):
             yield VoiceEvent(
                 VoiceEventType.INPUT_FINAL,
-                text="finish workshop",
+                text="finish workshop after D-02 timezone configuration",
                 provider_request_id="spoken-finish-final",
             )
             while not self.closed: await asyncio.sleep(.01)

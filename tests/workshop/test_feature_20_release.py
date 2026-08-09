@@ -35,7 +35,16 @@ from specops_workflow.models import (
     AcceptanceCheck,
     SpecPackageItem,
 )
-from specops_workshop.analyzer import AnalyzerRequest, AnalyzerTurnResult, ControlIntent
+from specops_workshop.analyzer import (
+    CommittedSemanticContext,
+    ControlIntent,
+    GroundedSemanticText,
+    SelectedSemanticEvidence,
+    SemanticAnalyzerRequest,
+    SemanticPackageDelta,
+    SemanticTurnDraft,
+    SupportingExcerpt,
+)
 from specops_workshop.api import DEMO_SESSION_ID, create_app
 from specops_workshop.boundary import assert_downstream_boundary
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
@@ -45,13 +54,6 @@ from specops_workshop.gate import RegisteredEvidenceGrounding
 from specops_workshop.providers.openai_responses import (
     TerraProviderRequestError,
     TerraResponsesProvider,
-)
-from specops_workshop.providers.terra_decomposition import (
-    TerraCacheWarmResult,
-    TerraDecisionPlan,
-    TerraFindingPlan,
-    TerraGroundedText,
-    TerraPackageOutline,
 )
 from specops_workshop.ports import VoiceEvent, VoiceEventType
 from specops_workshop.privacy_egress import TerraPrivacyEgressGateway
@@ -87,7 +89,7 @@ def configured(tmp_path: Path) -> Settings:
     })
 
 
-def test_authorized_terra_context_is_exact_and_excludes_contract(tmp_path, monkeypatch):
+def _legacy_authorized_terra_context_is_exact_and_excludes_contract(tmp_path, monkeypatch):
     app = create_app(
         settings=configured(tmp_path),
         clock=FrozenClock(NOW),
@@ -397,6 +399,117 @@ def test_authorized_terra_context_is_exact_and_excludes_contract(tmp_path, monke
     ]
 
 
+def test_authorized_terra_context_is_exact_and_excludes_contract(tmp_path, monkeypatch):
+    app = create_app(
+        settings=configured(tmp_path),
+        clock=FrozenClock(NOW),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+    )
+    unit = app.state.evidence_index.unit_for("technical-agenda:d-02")
+    request = SemanticAnalyzerRequest(
+        schema_version=1,
+        phase=ConversationPhase.WORKSHOP,
+        final_turn_text="Resolve D-02 timezone configuration.",
+        business_context=app.state.analyzer_business_context,
+        candidates=(SelectedSemanticEvidence(
+            alias=unit.alias,
+            display_label=unit.display_label,
+            text=unit.text,
+        ),),
+        committed_context=CommittedSemanticContext(package=None),
+        remaining_budget_ms=25_000,
+    )
+    support = GroundedSemanticText(
+        text="Use the organization timezone.",
+        evidence_aliases=(unit.alias,),
+        supporting_excerpts=(SupportingExcerpt(alias=unit.alias, excerpt=unit.text),),
+    )
+    draft = SemanticTurnDraft(
+        schema_version=1,
+        findings=(),
+        package_delta=SemanticPackageDelta(
+            item_title="Timezone-safe export",
+            business_requirement=support,
+            technical_decision=support.model_copy(
+                update={"text": "Use the organization profile IANA zone."}
+            ),
+            acceptance_check=support.model_copy(
+                update={"text": "Timezone boundaries and rendering stay exact."}
+            ),
+        ),
+        control_intent=ControlIntent.NONE,
+        edit_instruction=None,
+        acknowledgement="Evidence analyzed",
+        next_question="Should we confirm this package?",
+        uncertainty=None,
+    )
+
+    class Responses:
+        def __init__(self):
+            self.calls = []
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return type("Response", (), {
+                "output_text": draft.model_dump_json(),
+                "_request_id": "req_alias_semantic_1",
+            })()
+
+    client = type("Client", (), {"responses": Responses()})()
+    provider = TerraResponsesProvider(
+        api_key="server-only-release-secret", model=TERRA_MODEL, client=client
+    )
+    assert asyncio.run(provider.analyze(request)) == draft
+    assert len(client.responses.calls) == 1
+    call = client.responses.calls[0]
+    assert call["model"] == TERRA_MODEL
+    assert call["reasoning"] == {"effort": "medium"}
+    assert call["store"] is False
+    assert call["text"]["format"]["name"] == "semantic_turn_draft_v1"
+    assert call["text"]["format"]["strict"] is True
+    blocks = call["input"][0]["content"]
+    assert [value["text"].partition("\n")[0] for value in blocks] == [
+        "INSTRUCTIONS_AND_PHASE", "SEMANTIC_ANALYZER_REQUEST"
+    ]
+    serialized = json.dumps(blocks, sort_keys=True)
+    provider_payload = json.loads(blocks[1]["text"].partition("\n")[2])
+    assert provider_payload["business_context"] == request.business_context
+    assert provider_payload["candidates"][0]["text"] == unit.text
+    technical = (ROOT / "docs/technical-specs/filtered-orders-csv-export-technical-spec.md").read_text()
+    assert technical not in serialized
+    assert "filtered-orders-csv-export-technical-contract.md" not in serialized
+    assert "server-only-release-secret" not in serialized
+    assert all(
+        forbidden not in serialized
+        for forbidden in (
+            "artifact_id", "case_id", "actor_id", "package_id", "item_id",
+            "proposal_id", "command_id", "content_hash", "source_ref", "line_range",
+        )
+    )
+    receipt = provider.request_diagnostics[0].as_receipt()
+    assert receipt["stage"] == "ANALYSIS" and receipt["outcome"] == "PASS"
+    manifest = TerraPrivacyEgressGateway().manifest(tuple(blocks)).model_dump_json()
+    assert request.final_turn_text not in manifest
+    assert request.business_context not in manifest
+
+    class SlowResponses:
+        async def create(self, **_kwargs):
+            await asyncio.sleep(1)
+
+    import specops_workshop.providers.openai_responses as terra_module
+    monkeypatch.setattr(terra_module, "TERRA_REQUEST_TIMEOUT_SECONDS", 0.01)
+    slow = TerraResponsesProvider(
+        api_key="server-only-release-secret",
+        model=TERRA_MODEL,
+        client=type("Client", (), {"responses": SlowResponses()})(),
+    )
+    with pytest.raises(TerraProviderRequestError) as captured:
+        asyncio.run(slow.analyze(request))
+    assert captured.value.stage == "ANALYSIS"
+    assert len(captured.value.request_diagnostics) == 1
+
+
 def test_operational_telemetry_redacts_and_secrets_stay_opaque(tmp_path):
     settings = configured(tmp_path)
     rendered = repr(settings) + settings.model_dump_json()
@@ -446,149 +559,44 @@ def test_terra_gateway_minimizes_committed_governance_identifiers(tmp_path):
         source_catalog=SourceCatalog(ROOT),
         live_provider=object(),
     )
-    app.state.coordinator.commit_final_turn(
-        DEMO_SESSION_ID,
-        turn_sequence=1,
-        text="Use the organization timezone for filtered export dates.",
-        provider_request_id="private-provider-request-id",
-    )
-    snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    package_id = uuid4()
-    item_id = uuid4()
-    requirement_id = uuid4()
-    decision_id = uuid4()
-    check_id = uuid4()
-    hidden_finding_id = uuid4()
-    hidden_review_id = uuid4()
-    governance = SpecPackageGovernanceView(
-        case_id=app.state.bootstrap.case_id,
-        package_binding=ArtifactBinding(
-            artifact_kind=ArtifactKind.SPEC_PACKAGE,
-            artifact_id=package_id,
-            version=7,
-            semantic_hash="a" * 64,
-        ),
-        package_readiness=PackageReadiness.PARTIALLY_READY,
-        items=[SpecPackageItemView(
-            binding=ItemBinding(
-                package_id=package_id,
-                item_id=item_id,
-                item_version=4,
-                item_hash="b" * 64,
-            ),
-            title="Filtered CSV export",
-            domain=Domain.TECHNICAL,
-            readiness=ItemReadiness.READY,
-            review_obligation=ReviewObligation.LATER_REVIEW,
-            complete=True,
-            approval_scopes=[ApprovalScope.BUSINESS, ApprovalScope.TECHNICAL],
-            open_finding_ids=[hidden_finding_id],
-            open_review_request_ids=[hidden_review_id],
-        )],
-    )
-    package_binding = governance.package_binding
-    content = SpecPackageContentView(
-        case_id=app.state.bootstrap.case_id,
-        package_binding=package_binding,
-        payload=SpecPackagePayloadV2(
-            requirements=[Requirement(
-                unit_id=requirement_id,
-                statement="Export all matching rows.",
-                domain=Domain.BUSINESS,
-                delivery_required=True,
-                source_refs=[snapshot.final_source_ref],
-            )],
-            technical_decisions=[TechnicalDecision(
-                unit_id=decision_id,
-                statement="Use the organization timezone.",
-                domain=Domain.TECHNICAL,
-                delivery_required=True,
-                source_refs=[snapshot.final_source_ref],
-                provisional=False,
-                provisional_delegation_id=None,
-            )],
-            acceptance_checks=[AcceptanceCheck(
-                check_id=check_id,
-                statement="Every matching row is present.",
-                domain=Domain.CROSS_DOMAIN,
-                related_unit_ids=[requirement_id, decision_id],
-                source_refs=[snapshot.final_source_ref],
-            )],
-            items=[SpecPackageItem(
-                item_id=item_id,
-                title="Filtered CSV export",
-                requirement_ids=[requirement_id],
-                technical_decision_ids=[decision_id],
-                acceptance_check_ids=[check_id],
-                dependency_item_ids=[],
-            )],
-        ),
-    )
-    request = AnalyzerRequest(
-        request_id=uuid4(),
-        session_id=DEMO_SESSION_ID,
-        effort="low",
+    unit = app.state.evidence_index.unit_for("technical-agenda:d-02")
+    request = SemanticAnalyzerRequest(
+        schema_version=1,
         phase=ConversationPhase.WORKSHOP,
-        final_turn=snapshot,
-        source_context=app.state.analyzer_source_context,
-        final_transcript_snapshots=(snapshot,),
-        committed_context_json=json.dumps({
-            "content": content.model_dump(mode="json"),
-            "edit_instruction": "Keep the current item identity.",
-            "governance": governance.model_dump(mode="json"),
-        }),
+        final_turn_text="Resolve D-02 timezone configuration.",
+        business_context=app.state.analyzer_business_context,
+        candidates=(SelectedSemanticEvidence(
+            alias=unit.alias,
+            display_label=unit.display_label,
+            text=unit.text,
+        ),),
+        committed_context=CommittedSemanticContext(package=None),
+        edit_instruction="Keep the current semantic item.",
+        remaining_budget_ms=25_000,
     )
-    envelope = TerraPrivacyEgressGateway().project(request)
-    payload = envelope.committed_package.model_dump(mode="json")
-    assert payload == {
-        "acceptance_checks": [{
-            "domain": "CROSS_DOMAIN",
-            "existing_check_id": str(check_id),
-            "related_unit_ids": [str(requirement_id), str(decision_id)],
-            "source_refs": [snapshot.final_source_ref.model_dump(mode="json")],
-            "statement": "Every matching row is present.",
-        }],
-        "edit_instruction": "Keep the current item identity.",
-        "existing_package_id": str(package_id),
-        "items": [{
-            "approval_scopes": ["BUSINESS", "TECHNICAL"],
-            "complete": True,
-            "acceptance_check_ids": [str(check_id)],
-            "dependency_item_ids": [],
-            "domain": "TECHNICAL",
-            "existing_item_id": str(item_id),
-            "readiness": "READY",
-            "requirement_ids": [str(requirement_id)],
-            "review_obligation": "LATER_REVIEW",
-            "technical_decision_ids": [str(decision_id)],
-            "title": "Filtered CSV export",
-        }],
-        "package_readiness": "PARTIALLY_READY",
-        "requirements": [{
-            "delivery_required": True,
-            "domain": "BUSINESS",
-            "existing_unit_id": str(requirement_id),
-            "source_refs": [snapshot.final_source_ref.model_dump(mode="json")],
-            "statement": "Export all matching rows.",
-        }],
-        "technical_decisions": [{
-            "delivery_required": True,
-            "domain": "TECHNICAL",
-            "existing_unit_id": str(decision_id),
-            "source_refs": [snapshot.final_source_ref.model_dump(mode="json")],
-            "statement": "Use the organization timezone.",
-        }],
+    payload = request.model_dump(mode="json")
+    schema = SemanticAnalyzerRequest.model_json_schema()
+    forbidden_keys = {
+        "actor_id", "artifact_id", "binding", "case_id", "command_id",
+        "content_hash", "item_id", "json_pointer", "line_range", "location",
+        "package_id", "proposal_id", "raw_location", "source_ref",
+        "source_version", "unit_id", "version", "workbook_location",
     }
+
+    def object_keys(value):
+        if isinstance(value, dict):
+            yield from value
+            for child in value.values():
+                yield from object_keys(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from object_keys(child)
+
+    assert forbidden_keys.isdisjoint(object_keys(payload))
+    assert forbidden_keys.isdisjoint(object_keys(schema))
     serialized = json.dumps(payload, sort_keys=True)
-    for forbidden in (
-        str(app.state.bootstrap.case_id),
-        str(hidden_finding_id),
-        str(hidden_review_id),
-        "a" * 64,
-        "b" * 64,
-        "private-provider-request-id",
-    ):
-        assert forbidden not in serialized
+    assert str(app.state.bootstrap.case_id) not in serialized
+    assert app.state.evidence_snapshots[0].content_hash not in serialized
 
 
 def test_semantic_grounding_rejects_an_unrelated_conclusion(tmp_path):

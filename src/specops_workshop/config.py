@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 TERRA_MODEL = "gpt-5.6-terra"
-AnalyzerReasoningEffort = Literal["low", "medium", "high"]
+AnalyzerReasoningEffort = Literal["medium"]
 
 
 class Settings(BaseModel):

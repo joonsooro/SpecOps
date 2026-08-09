@@ -41,9 +41,8 @@ def test_settings_are_closed_server_only_and_reject_platform_configuration(tmp_p
     assert configured.gemini_model == GEMINI_MODEL
     assert configured.terra_model == TERRA_MODEL
     assert configured.analyzer_reasoning_effort == "medium"
-    assert settings(
-        tmp_path, OPENAI_ANALYZER_REASONING_EFFORT="high"
-    ).analyzer_reasoning_effort == "high"
+    with pytest.raises(ValueError):
+        settings(tmp_path, OPENAI_ANALYZER_REASONING_EFFORT="high")
     with pytest.raises(ValueError):
         settings(tmp_path, OPENAI_ANALYZER_REASONING_EFFORT="flexible")
     assert "api_key" not in str(configured.model_dump(exclude={"gemini_api_key", "openai_api_key"}))

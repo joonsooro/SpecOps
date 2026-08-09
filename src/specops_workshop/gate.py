@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-import json
 import re
-from datetime import timezone
 from uuid import UUID, uuid5
 
-from specops_workflow.enums import ApprovalScope, Domain
+from specops_workflow.enums import AmbiguityCategory, ApprovalScope, Domain, Severity
 from specops_workflow.canonical import sha256 as canonical_sha256
 from specops_workflow.models import (
     AcceptanceCheck,
@@ -24,15 +21,36 @@ from specops_workflow.models import (
 from specops_workflow.models import LineRange
 
 from .analyzer import (
-    AnalyzerRequest,
+    AcceptanceCheckProposal,
     AnalyzerTurnResult,
+    CommittedPackageSemantics,
+    CommittedSemanticContext,
+    CompletePackageProposal,
     ControlIntent,
+    ControlTarget,
+    FindingProposal,
     GroundingChecker,
+    GroundedSemanticText,
+    ProposalDisposition,
+    RequirementProposal,
+    SelectedSemanticEvidence,
+    SemanticAnalyzerRequest,
+    SemanticPackageDelta,
+    SemanticTurnDraft,
     SpecAnalyzerProvider,
+    SpecPackageItemProposal,
+    TechnicalDecisionProposal,
     proposal_id,
     validate_phase,
 )
 from .contracts import PackageProposalRecord, ProposalStatus
+from .evidence import (
+    AliasMaterializer,
+    DeterministicEvidenceRetriever,
+    EvidenceIndex,
+    RegisteredMarkdownSnapshot,
+    RetrievalOutcome,
+)
 from .orchestration import WorkshopCoordinator
 from .sessions import WorkshopStore
 from .telemetry import SpanOutcome, TelemetryStage
@@ -108,12 +126,18 @@ class WorkshopGate:
         grounding: GroundingChecker,
         *,
         clock,
-        source_context=None,
+        evidence_index: EvidenceIndex,
+        evidence_snapshots: tuple[RegisteredMarkdownSnapshot, ...],
+        business_context: str,
+        dev_lead_actor_id: UUID,
         telemetry=None,
         default_effort: str = "medium",
     ) -> None:
         self.store = store; self.foundation = foundation; self.analyzer = analyzer; self.grounding = grounding; self.clock = clock
-        self.source_context = source_context
+        self.evidence_index = evidence_index
+        self.evidence_snapshots = evidence_snapshots
+        self.business_context = business_context
+        self.dev_lead_actor_id = dev_lead_actor_id
         self.telemetry = telemetry
         self.default_effort = default_effort
         self.coordinator = WorkshopCoordinator(
@@ -130,6 +154,8 @@ class WorkshopGate:
         edit_instruction: str | None = None,
     ) -> AnalyzerTurnResult:
         resolved_effort = self.default_effort if effort is None else effort
+        if resolved_effort != "medium":
+            raise ValueError("Workshop analyzer reasoning effort is pinned to medium")
         session = self.store.get_session(session_id)
         snapshots = {value.turn_sequence: value for value in self.store.latest_snapshots(session_id)}
         final = snapshots.get(turn_sequence)
@@ -137,13 +163,42 @@ class WorkshopGate:
             raise ValueError("only persisted provider-final PM evidence may be analyzed")
         edit_identity = canonical_sha256(edit_instruction or "")
         request_id = uuid5(GATE_NAMESPACE, f"{session_id}:analyze:{turn_sequence}:{final.version}:{resolved_effort}:{purpose}:{edit_identity}")
-        request = AnalyzerRequest(
-            request_id=request_id, session_id=session_id, effort=resolved_effort, purpose=purpose,
+        candidates = DeterministicEvidenceRetriever(self.evidence_index).retrieve(
+            final.normalized_text
+        )
+        if candidates.outcome == RetrievalOutcome.NEEDS_CLARIFICATION:
+            return AnalyzerTurnResult(
+                schema_version=1,
+                turn_source_ref=final.final_source_ref,
+                finding_proposals=[],
+                complete_package_proposal=None,
+                control_intent=ControlIntent.NONE,
+                control_target=None,
+                target_proposal_ref=None,
+                edit_instruction=None,
+                acknowledgement="Clarification needed",
+                next_question=candidates.clarification,
+            )
+        selected = tuple(
+            SelectedSemanticEvidence(
+                alias=value.alias,
+                display_label=value.display_label,
+                text=value.text,
+            )
+            for value in candidates.candidates
+            if value.alias in candidates.selected_aliases
+        )
+        request = SemanticAnalyzerRequest(
+            schema_version=1,
+            effort="medium",
+            purpose=purpose,
             phase=session.conversation_phase,
-            final_turn=final,
-            source_context=self.source_context,
-            final_transcript_snapshots=self.store.all_snapshots(session_id),
-            committed_context_json=self._committed_context(session, edit_instruction),
+            final_turn_text=final.normalized_text,
+            business_context=self.business_context,
+            candidates=selected,
+            committed_context=self._semantic_committed_context(session),
+            edit_instruction=edit_instruction,
+            remaining_budget_ms=25_000,
         )
         span_id = None
         if self.telemetry is not None:
@@ -152,60 +207,79 @@ class WorkshopGate:
                 stage=TelemetryStage.ANALYZER,
                 operation_id=str(request_id),
             )
-        result = None
-        last_error = None
-        for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
-            if delay: await asyncio.sleep(delay)
-            self.store.record_analyzer_attempt(
-                request_id=request_id,
-                session_id=session_id,
-                turn_sequence=turn_sequence,
-                effort=resolved_effort,
-                status="IN_FLIGHT",
-                attempt_count=attempt,
-                now=self.clock.now(),
+        self.store.record_analyzer_attempt(
+            request_id=request_id,
+            session_id=session_id,
+            turn_sequence=turn_sequence,
+            effort=resolved_effort,
+            status="IN_FLIGHT",
+            attempt_count=1,
+            now=self.clock.now(),
+        )
+        try:
+            draft = await self.analyzer.analyze(request)
+            draft = SemanticTurnDraft.model_validate(
+                draft.model_dump(mode="python")
             )
-            try:
-                result = await self.analyzer.analyze(request)
-                self.store.record_analyzer_attempt(
-                    request_id=request_id,
-                    session_id=session_id,
-                    turn_sequence=turn_sequence,
-                    effort=resolved_effort,
-                    status="CONFIRMED",
-                    attempt_count=attempt,
-                    now=self.clock.now(),
-                )
-                break
-            except Exception as exc:
-                last_error = exc
-                continue
-        if result is None:
+        except Exception as exc:
             self.store.record_analyzer_attempt(
                 request_id=request_id,
                 session_id=session_id,
                 turn_sequence=turn_sequence,
                 effort=resolved_effort,
                 status="FAILED",
-                attempt_count=3,
+                attempt_count=1,
                 now=self.clock.now(),
             )
-            self.store.lock_session(session_id, "ANALYZER_UNAVAILABLE", self.clock.now())
             if span_id is not None:
                 self.telemetry.finish(
                     span_id,
                     outcome=SpanOutcome.ERROR,
                     error_code="ANALYZER_UNAVAILABLE",
                 )
-            raise RuntimeError("analyzer failed after bounded retries") from last_error
+            raise RuntimeError("analyzer semantic call failed") from exc
+        try:
+            result = self._assemble_semantic_result(
+                session_id=session_id,
+                final_source_ref=final.final_source_ref,
+                purpose=purpose,
+                phase=session.conversation_phase,
+                selected_aliases=candidates.selected_aliases,
+                draft=draft,
+            )
+            validate_phase(result, session.conversation_phase)
+            self._validate_grounding(result)
+            if result.complete_package_proposal is not None:
+                self._validate_identities(session_id, result)
+        except Exception:
+            self.store.record_analyzer_attempt(
+                request_id=request_id,
+                session_id=session_id,
+                turn_sequence=turn_sequence,
+                effort=resolved_effort,
+                status="FAILED",
+                attempt_count=1,
+                now=self.clock.now(),
+            )
+            if span_id is not None:
+                self.telemetry.finish(
+                    span_id,
+                    outcome=SpanOutcome.ERROR,
+                    error_code="ANALYZER_SEMANTIC_REJECTED",
+                )
+            raise
+        self.store.record_analyzer_attempt(
+            request_id=request_id,
+            session_id=session_id,
+            turn_sequence=turn_sequence,
+            effort=resolved_effort,
+            status="CONFIRMED",
+            attempt_count=1,
+            now=self.clock.now(),
+        )
         if span_id is not None:
             self.telemetry.finish(span_id, outcome=SpanOutcome.OK)
-        if result.turn_source_ref != final.final_source_ref:
-            raise ValueError("analyzer turn SourceRef mismatch")
-        validate_phase(result, session.conversation_phase)
-        self._validate_grounding(result)
         if result.complete_package_proposal is not None:
-            self._validate_identities(session_id, result)
             latest = self.store.latest_proposal(session_id)
             version = 1 if latest is None else latest.version + 1
             proposal_ref = f"workshop-patch-{proposal_id(session_id, 'package', result.complete_package_proposal.proposal_key)}-v{version}"
@@ -450,22 +524,242 @@ class WorkshopGate:
                     "analyzer proposal is not grounded in its cited evidence" + suffix
                 )
 
-    def _committed_context(self, session, edit_instruction: str | None = None) -> str:
+    def _current_content(self, session):
         try:
-            governance = self.foundation.get_spec_package_governance(
+            return self.foundation.get_spec_package_content(
                 QueryOne(case_id=session.case_id, acting_actor_id=session.pm_actor_id)
-            ).model_dump(mode="json")
-            content = self.foundation.get_spec_package_content(
-                QueryOne(case_id=session.case_id, acting_actor_id=session.pm_actor_id)
-            ).model_dump(mode="json")
+            )
         except Exception:
-            governance = None
-            content = None
-        return json.dumps({
-            "content": content,
-            "governance": governance,
-            "edit_instruction": edit_instruction,
-        }, sort_keys=True, separators=(",", ":"))
+            return None
+
+    def _semantic_committed_context(self, session) -> CommittedSemanticContext:
+        content = self._current_content(session)
+        if content is None:
+            return CommittedSemanticContext(package=None)
+        payload = content.payload
+        if not (
+            len(payload.items) == 1
+            and len(payload.requirements) == 1
+            and len(payload.technical_decisions) == 1
+            and len(payload.acceptance_checks) == 1
+        ):
+            raise ValueError("Workshop v0 semantic analyzer supports one complete governed item")
+        return CommittedSemanticContext(
+            package=CommittedPackageSemantics(
+                item_title=payload.items[0].title,
+                business_requirement=payload.requirements[0].statement,
+                technical_decision=payload.technical_decisions[0].statement,
+                acceptance_check=payload.acceptance_checks[0].statement,
+            )
+        )
+
+    def _assemble_semantic_result(
+        self,
+        *,
+        session_id: UUID,
+        final_source_ref,
+        purpose: str,
+        phase,
+        selected_aliases: tuple[str, ...],
+        draft: SemanticTurnDraft,
+    ) -> AnalyzerTurnResult:
+        if purpose == "FINISH_AUDIT" and draft.package_delta is not None:
+            raise ValueError("finish audit cannot return a package delta")
+        if phase.value != "WORKSHOP" and draft.package_delta is not None:
+            raise ValueError("package semantic deltas are WORKSHOP-only")
+        if purpose == "FINISH_AUDIT" and draft.control_intent != ControlIntent.NONE:
+            raise ValueError("finish audit cannot return a control intent")
+
+        grounded = [value.question for value in draft.findings]
+        if draft.package_delta is not None:
+            grounded.extend(
+                (
+                    draft.package_delta.business_requirement,
+                    draft.package_delta.technical_decision,
+                    draft.package_delta.acceptance_check,
+                )
+            )
+        selected = set(selected_aliases)
+        units = {value.alias: value for value in self.evidence_index.units}
+        requested: set[str] = set()
+        for value in grounded:
+            for alias in value.evidence_aliases:
+                if alias not in selected or alias not in units:
+                    raise ValueError("semantic draft cited an unknown or unselected alias")
+                requested.add(alias)
+            for support in value.supporting_excerpts:
+                if support.alias not in selected or support.alias not in units:
+                    raise ValueError("semantic draft excerpt cited an unknown or unselected alias")
+                if support.excerpt not in units[support.alias].text:
+                    raise ValueError("semantic supporting excerpt is not exact evidence text")
+        refs = ()
+        if requested:
+            refs = AliasMaterializer(self.evidence_index).materialize(
+                case_id=self.store.get_session(session_id).case_id,
+                requested_aliases=tuple(sorted(requested)),
+                selected_aliases=selected_aliases,
+                current_snapshots=self.evidence_snapshots,
+            )
+        refs_by_alias = dict(zip(sorted(requested), refs, strict=True))
+
+        def source_refs(value: GroundedSemanticText):
+            return [refs_by_alias[alias] for alias in value.evidence_aliases]
+
+        session = self.store.get_session(session_id)
+        package = self._assemble_package(
+            session_id, session, draft.package_delta, source_refs
+        )
+        item_key = "item-001"
+        if package is not None:
+            item_key = package.items[0].proposal_key
+        else:
+            committed = self.store.latest_proposal(
+                session_id, status=ProposalStatus.COMMITTED
+            )
+            if committed is not None:
+                prior = AnalyzerTurnResult.model_validate_json(
+                    committed.analyzer_result_json
+                ).complete_package_proposal
+                if prior is not None:
+                    item_key = prior.items[0].proposal_key
+
+        def owners(domain: Domain) -> list[UUID]:
+            if domain == Domain.BUSINESS:
+                return [session.pm_actor_id]
+            if domain == Domain.TECHNICAL:
+                return [self.dev_lead_actor_id]
+            return [session.pm_actor_id, self.dev_lead_actor_id]
+
+        findings = [
+            FindingProposal(
+                proposal_key=f"finding-{index:03d}",
+                existing_finding_id=None,
+                item_proposal_key=item_key,
+                category=AmbiguityCategory.MISSING_TECH_DECISION,
+                domain=value.domain,
+                severity=Severity.BLOCKING,
+                evidence_refs=source_refs(value.question),
+                clarification_question=value.question.text,
+                owner_actor_ids=owners(
+                    Domain.CROSS_DOMAIN if package is not None else value.domain
+                ),
+                disposition=ProposalDisposition.OPEN,
+            )
+            for index, value in enumerate(draft.findings, start=1)
+        ]
+        control_target = None
+        target_proposal_ref = None
+        if draft.control_intent in {
+            ControlIntent.CONFIRM,
+            ControlIntent.EDIT,
+            ControlIntent.REJECT,
+        }:
+            pending = self.store.pending_proposal(session_id)
+            if pending is None:
+                raise ValueError("semantic control requires one visible pending proposal")
+            control_target = ControlTarget.WORKSHOP_PATCH
+            target_proposal_ref = pending.proposal_ref
+        next_question = draft.next_question
+        if next_question is None and findings:
+            next_question = findings[0].clarification_question
+        return AnalyzerTurnResult(
+            schema_version=1,
+            turn_source_ref=final_source_ref,
+            finding_proposals=findings,
+            complete_package_proposal=package,
+            control_intent=draft.control_intent,
+            control_target=control_target,
+            target_proposal_ref=target_proposal_ref,
+            edit_instruction=draft.edit_instruction,
+            acknowledgement=draft.acknowledgement,
+            next_question=next_question,
+        )
+
+    def _assemble_package(self, session_id, session, delta, source_refs):
+        if delta is None:
+            return None
+        content = self._current_content(session)
+        if content is not None and not (
+            len(content.payload.items) == 1
+            and len(content.payload.requirements) == 1
+            and len(content.payload.technical_decisions) == 1
+            and len(content.payload.acceptance_checks) == 1
+        ):
+            raise ValueError("Workshop v0 local assembler supports one complete governed item")
+        prior_record = self.store.latest_proposal(
+            session_id, status=ProposalStatus.COMMITTED
+        )
+        prior = None
+        if prior_record is not None:
+            prior = AnalyzerTurnResult.model_validate_json(
+                prior_record.analyzer_result_json
+            ).complete_package_proposal
+        package_key = prior.proposal_key if prior is not None else "package-001"
+        requirement_key = (
+            prior.requirements[0].proposal_key if prior is not None else "requirement-001"
+        )
+        decision_key = (
+            prior.technical_decisions[0].proposal_key
+            if prior is not None
+            else "technical-decision-001"
+        )
+        check_key = (
+            prior.acceptance_checks[0].proposal_key
+            if prior is not None
+            else "acceptance-check-001"
+        )
+        item_key = prior.items[0].proposal_key if prior is not None else "item-001"
+        payload = None if content is None else content.payload
+        requirement_id = None if payload is None else payload.requirements[0].unit_id
+        decision_id = None if payload is None else payload.technical_decisions[0].unit_id
+        check_id = None if payload is None else payload.acceptance_checks[0].check_id
+        item_id = None if payload is None else payload.items[0].item_id
+        package_id = None if content is None else content.package_binding.artifact_id
+        return CompletePackageProposal(
+            proposal_key=package_key,
+            existing_package_id=package_id,
+            requirements=[
+                RequirementProposal(
+                    proposal_key=requirement_key,
+                    existing_unit_id=requirement_id,
+                    statement=delta.business_requirement.text,
+                    domain=Domain.BUSINESS,
+                    delivery_required=True,
+                    source_refs=source_refs(delta.business_requirement),
+                )
+            ],
+            technical_decisions=[
+                TechnicalDecisionProposal(
+                    proposal_key=decision_key,
+                    existing_unit_id=decision_id,
+                    statement=delta.technical_decision.text,
+                    domain=Domain.TECHNICAL,
+                    delivery_required=True,
+                    source_refs=source_refs(delta.technical_decision),
+                )
+            ],
+            acceptance_checks=[
+                AcceptanceCheckProposal(
+                    proposal_key=check_key,
+                    existing_check_id=check_id,
+                    statement=delta.acceptance_check.text,
+                    domain=Domain.CROSS_DOMAIN,
+                    related_unit_proposal_keys=[requirement_key, decision_key],
+                    source_refs=source_refs(delta.acceptance_check),
+                )
+            ],
+            items=[
+                SpecPackageItemProposal(
+                    proposal_key=item_key,
+                    existing_item_id=item_id,
+                    title=delta.item_title,
+                    requirement_proposal_keys=[requirement_key],
+                    technical_decision_proposal_keys=[decision_key],
+                    acceptance_check_proposal_keys=[check_key],
+                    dependency_item_proposal_keys=[],
+                )
+            ],
+        )
 
     @staticmethod
     def _materialize(session_id, proposed):

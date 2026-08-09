@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -41,6 +43,7 @@ from specops_workflow.models import (
     ApproveProjectionPlanCommand,
     ApproveSpecPackageCommand,
     ApproveStatusPolicyCommand,
+    ApprovalPage,
     ArtifactBinding,
     AuditQuery,
     BodyAcceptanceCheck,
@@ -52,6 +55,8 @@ from specops_workflow.models import (
     LineRange,
     MarkSpecPackageReadyCommand,
     NominalSuccess,
+    OperationAttemptPage,
+    OperationAttemptQuery,
     ProjectionItem,
     ProjectionPlanPayload,
     QueryOne,
@@ -112,6 +117,10 @@ def _public_reads(service: WorkflowService, case_id):
         service.get_traceability_map(one),
         service.list_drift_findings(uuids),
         service.list_pending_operation_intents(uuids),
+        service.list_approval_records(uuids),
+        service.list_external_operation_attempts(
+            OperationAttemptQuery(case_id=case_id, acting_actor_id="SYSTEM", limit=500)
+        ),
         service.list_audit_events(audit),
     )
 
@@ -175,9 +184,10 @@ def _found_for_intent(
 @pytest.mark.ev("EV-036")
 @pytest.mark.ev("EV-040")
 @pytest.mark.ev("EV-041")
-def test_clean_public_workflow_reaches_linked_with_exact_audit(tmp_path):
+@pytest.mark.release_evidence("authorization", "create_case", "draft_package_or_projection", "approve_artifact", "create_or_revise_status_policy", "external_callback", "read_model")
+def test_clean_public_workflow_reaches_linked_with_exact_audit(tmp_path, record_property):
     harness = fresh_harness(tmp_path).complete()
-    workflow, delivery, trace, findings, intents, audit = _public_reads(
+    workflow, delivery, trace, findings, intents, approvals, attempts, audit = _public_reads(
         harness.service, harness.case_id
     )
 
@@ -199,7 +209,65 @@ def test_clean_public_workflow_reaches_linked_with_exact_audit(tmp_path):
     )
     assert trace.complete is True and trace.edges
     assert len({edge.id for edge in trace.edges}) == len(trace.edges)
+    assert {edge.edge_type.value for edge in trace.edges} == {
+        "SOURCE_TO_UNIT",
+        "PACKAGE_TO_UNIT",
+        "UNIT_TO_JIRA_ITEM",
+        "JIRA_PARENT",
+        "JIRA_ITEM_TO_BINDING",
+        "JIRA_BINDING_TO_GITHUB_ITEM",
+        "GITHUB_ITEM_TO_BINDING",
+        "ITEM_TO_PACKAGE",
+        "ITEM_TO_PLAN",
+    }
+    assert all(
+        (endpoint.version is None) == (endpoint.kind.value == "EXTERNAL_BINDING")
+        for edge in trace.edges
+        for endpoint in (edge.from_endpoint, edge.to_endpoint)
+    )
+    jira_epic, jira_task = harness.jira_payload.items
+    github_item = harness.github_payload.items[0]
+    assert any(
+        edge.edge_type.value == "JIRA_PARENT"
+        and edge.from_endpoint.id == jira_epic.item_id
+        and edge.to_endpoint.id == jira_task.item_id
+        for edge in trace.edges
+    )
+    jira_binding_edge = next(
+        edge
+        for edge in trace.edges
+        if edge.edge_type.value == "JIRA_ITEM_TO_BINDING"
+        and edge.from_endpoint.id == jira_task.item_id
+    )
+    assert any(
+        edge.edge_type.value == "JIRA_BINDING_TO_GITHUB_ITEM"
+        and edge.from_endpoint.id == jira_binding_edge.to_endpoint.id
+        and edge.to_endpoint.id == github_item.item_id
+        for edge in trace.edges
+    )
+    assert any(
+        edge.edge_type.value == "GITHUB_ITEM_TO_BINDING"
+        and edge.from_endpoint.id == github_item.item_id
+        for edge in trace.edges
+    )
+    for plan_item, plan_binding in [
+        *((item, harness.jira_binding) for item in harness.jira_payload.items),
+        *((item, harness.github_binding) for item in harness.github_payload.items),
+    ]:
+        assert any(
+            edge.edge_type.value == "ITEM_TO_PACKAGE"
+            and edge.from_endpoint.id == plan_item.item_id
+            and edge.to_endpoint.id == harness.package_binding.artifact_id
+            for edge in trace.edges
+        )
+        assert any(
+            edge.edge_type.value == "ITEM_TO_PLAN"
+            and edge.from_endpoint.id == plan_item.item_id
+            and edge.to_endpoint.id == plan_binding.artifact_id
+            for edge in trace.edges
+        )
     assert findings.items == [] and intents.items == []
+    assert approvals.items and attempts.items
     assert len(audit.items) == len(harness.successful_command_ids) == workflow.revision
     assert [event.case_sequence for event in audit.items] == list(
         range(1, workflow.revision + 1)
@@ -207,6 +275,9 @@ def test_clean_public_workflow_reaches_linked_with_exact_audit(tmp_path):
     assert {event.command_id for event in audit.items} == set(harness.successful_command_ids)
     operation_events = [event for event in audit.items if event.command_name == "start_external_operation"]
     assert len(operation_events) == len({event.result["operation_id"] for event in operation_events})
+    record_property("specops_metric", {"name": "duplicate_operations", "value": len(operation_events) - len({event.result["operation_id"] for event in operation_events})})
+    identities = [json.dumps(item.external_identity.model_dump(mode="json"), sort_keys=True) for item in delivery.items if item.external_identity is not None]
+    record_property("specops_metric", {"name": "duplicate_bindings", "value": len(identities) - len(set(identities))})
     assert {event.result["action"] for event in operation_events} == {Action.CREATE.value}
     assert {item.value for item in Action} == {
         "CREATE", "UPDATE", "RETIRE", "TRANSITION_STATUS"
@@ -215,6 +286,7 @@ def test_clean_public_workflow_reaches_linked_with_exact_audit(tmp_path):
 
 
 @pytest.mark.ev("EV-002")
+@pytest.mark.ev("EV-043")
 def test_release_manifest_and_canonical_schema_snapshot_are_exact():
     manifest = json.loads((SNAPSHOT_DIR / "release_manifest.json").read_text())
     schemas = json.loads((SNAPSHOT_DIR / "public_schemas.json").read_text())
@@ -224,15 +296,17 @@ def test_release_manifest_and_canonical_schema_snapshot_are_exact():
     assert tuple(manifest["ev_ids"]) == EV_IDS
     assert len(COMMAND_MODELS) == 21
     assert len(MUTATION_RESULT_MODELS) == 11
-    assert len(READ_MODELS) == 6
-    assert len(PUBLIC_SCHEMA_MODELS) == 39
+    assert len(READ_MODELS) == 8
+    assert len(PUBLIC_SCHEMA_MODELS) == 41
     assert len(manifest["stable_failure_codes"]) == 22
     assert set(manifest["rejecting_fixtures"]) == set(manifest["stable_failure_codes"])
     assert tuple(manifest["authorization_counterparts"]) == AUTHORIZATION_ROWS
     assert tuple(manifest["operation_branches"]) == OPERATION_BRANCHES
-    assert manifest["accepted_rejecting_fixtures"] == 0
-    assert manifest["duplicate_operations"] == 0
-    assert manifest["duplicate_bindings"] == 0
+    assert tuple(manifest["runtime_metrics"]) == (
+        "accepted_rejecting_fixtures",
+        "duplicate_operations",
+        "duplicate_bindings",
+    )
     for model in PUBLIC_SCHEMA_MODELS:
         with pytest.raises(ValidationError) as caught:
             model.model_validate({"__unexpected__": True})
@@ -240,7 +314,7 @@ def test_release_manifest_and_canonical_schema_snapshot_are_exact():
 
 
 @pytest.mark.ev("EV-002")
-def test_all_22_stable_error_codes_have_executable_rejecting_fixtures(tmp_path):
+def test_all_22_stable_error_codes_have_executable_rejecting_fixtures(tmp_path, record_property):
     observed: set[ErrorCode] = set()
 
     def reject(code: ErrorCode, harness, call) -> None:
@@ -706,7 +780,7 @@ def test_all_22_stable_error_codes_have_executable_rejecting_fixtures(tmp_path):
             )
         )
     )
-    next_intent = unmapped.pending_intents()[0]
+    assert unmapped.pending_intents() == []
     reject(
         ErrorCode.UNMAPPED_REMOTE_STATUS,
         unmapped,
@@ -717,7 +791,7 @@ def test_all_22_stable_error_codes_have_executable_rejecting_fixtures(tmp_path):
                 acting_actor_id="SYSTEM",
                 expected_case_revision=unmapped.revision,
                 operation_id=unmapped.id(),
-                intent_id=next_intent.intent_id,
+                intent_id=unmapped.id(),
                 idempotency_key="unmapped-blocker",
             )
         ),
@@ -749,7 +823,7 @@ def test_all_22_stable_error_codes_have_executable_rejecting_fixtures(tmp_path):
             )
         )
     )
-    blocked_intent = blocking.pending_intents()[0]
+    assert blocking.pending_intents() == []
     reject(
         ErrorCode.BLOCKING_FINDING,
         blocking,
@@ -760,13 +834,14 @@ def test_all_22_stable_error_codes_have_executable_rejecting_fixtures(tmp_path):
                 acting_actor_id="SYSTEM",
                 expected_case_revision=blocking.revision,
                 operation_id=blocking.id(),
-                intent_id=blocked_intent.intent_id,
+                intent_id=blocking.id(),
                 idempotency_key="content-drift-blocker",
             )
         ),
     )
 
     assert observed == set(ErrorCode)
+    record_property("specops_metric", {"name": "accepted_rejecting_fixtures", "value": len(ErrorCode) - len(observed)})
 
 
 @pytest.mark.ev("EV-003")
@@ -804,6 +879,35 @@ def test_found_and_not_found_restart_is_publicly_equal(tmp_path):
     assert before == after
 
 
+@pytest.mark.ev("EV-003")
+@pytest.mark.ev("EV-044")
+def test_typed_approval_and_attempt_reads_survive_real_process_restart(tmp_path):
+    probe = Path(__file__).parent / "process_restart_probe.py"
+    writer = subprocess.run(
+        [sys.executable, str(probe), "write", str(tmp_path / "writer")],
+        cwd=Path(__file__).parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    written = json.loads(writer.stdout)
+    reader = subprocess.run(
+        [sys.executable, str(probe), "read", written["database_url"], written["case_id"]],
+        cwd=Path(__file__).parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    reopened = json.loads(reader.stdout)
+    before_approvals = ApprovalPage.model_validate_json(json.dumps(written["approvals"]))
+    after_approvals = ApprovalPage.model_validate_json(json.dumps(reopened["approvals"]))
+    before_attempts = OperationAttemptPage.model_validate_json(json.dumps(written["attempts"]))
+    after_attempts = OperationAttemptPage.model_validate_json(json.dumps(reopened["attempts"]))
+    assert before_approvals.items and before_attempts.items
+    assert before_approvals == after_approvals
+    assert before_attempts == after_attempts
+
+
 @pytest.mark.ev("EV-004")
 def test_domain_failure_rolls_back_every_table_and_public_read(tmp_path):
     harness = fresh_harness(tmp_path).complete()
@@ -833,6 +937,7 @@ def test_domain_failure_rolls_back_every_table_and_public_read(tmp_path):
 @pytest.mark.ev("EV-009")
 @pytest.mark.ev("EV-010")
 @pytest.mark.ev("EV-012")
+@pytest.mark.release_evidence("authorization", "add_participant", "grant_or_revoke_delegation", "register_source_or_record_ambiguity", "resolve_ambiguity")
 def test_authority_delegation_later_review_and_ambiguity_history(tmp_path):
     harness = fresh_harness(tmp_path)
     with pytest.raises(DomainError) as occupied:
@@ -951,6 +1056,51 @@ def test_authority_delegation_later_review_and_ambiguity_history(tmp_path):
     )
 
     harness.build_approved_package()
+    blocking_id = harness.id()
+    harness.record(
+        harness.service.record_ambiguity_finding(
+            RecordAmbiguityFindingCommand(
+                command_id=harness.id(), case_id=harness.case_id, acting_actor_id="SYSTEM",
+                expected_case_revision=harness.revision, finding_id=blocking_id,
+                category=AmbiguityCategory.MISSING_OUTCOME, domain=Domain.CROSS_DOMAIN,
+                severity=Severity.BLOCKING, evidence_refs=[harness.source_ref],
+                clarification_question="Which exact outcome is required?",
+            )
+        )
+    )
+    ambiguity_drift = next(
+        item
+        for item in harness.service.list_drift_findings(
+            UUIDListQuery(case_id=harness.case_id, acting_actor_id="SYSTEM", limit=500)
+        ).items
+        if item.category == FindingCategory.AMBIGUITY_UNRESOLVED and item.active
+    )
+    assert ambiguity_drift.affected.kind == "ENTITY"
+    assert ambiguity_drift.affected.id == blocking_id
+    assert ambiguity_drift.expected_value.kind == "FINDING_STATE"
+    assert ambiguity_drift.expected_value.value == FindingStatus.RESOLVED
+    assert ambiguity_drift.observed_value.kind == "FINDING_STATE"
+    assert ambiguity_drift.observed_value.value == FindingStatus.OPEN
+    for actor in (harness.pm_actor_id, harness.dev_lead_actor_id):
+        harness.record(
+            harness.service.resolve_ambiguity_finding(
+                ResolveAmbiguityFindingCommand(
+                    command_id=harness.id(), case_id=harness.case_id, acting_actor_id=actor,
+                    expected_case_revision=harness.revision, finding_id=blocking_id,
+                    resolution_text="Use the registered exact outcome",
+                    resolution_source_refs=[harness.source_ref],
+                )
+            )
+        )
+    resolved_ambiguity_drift = next(
+        item
+        for item in harness.service.list_drift_findings(
+            UUIDListQuery(case_id=harness.case_id, acting_actor_id="SYSTEM", limit=500)
+        ).items
+        if item.id == ambiguity_drift.id
+    )
+    assert resolved_ambiguity_drift.active is False
+    assert resolved_ambiguity_drift.resolved_at == FROZEN_NOW
     finding_id = harness.id()
     finding = harness.record(
         harness.service.record_ambiguity_finding(
@@ -1097,6 +1247,20 @@ def test_authority_delegation_later_review_and_ambiguity_history(tmp_path):
     )
     assert delegated.approval_id in pending.pending_later_review_ids
     assert pending.foundation_ready is False
+    later_review = next(
+        item
+        for item in harness.service.list_drift_findings(
+            UUIDListQuery(case_id=harness.case_id, acting_actor_id="SYSTEM", limit=500)
+        ).items
+        if item.category == FindingCategory.LATER_REVIEW_REQUIRED and item.active
+    )
+    assert later_review.affected.kind == "APPROVAL"
+    assert later_review.affected.actor_id == delegate
+    assert later_review.affected.delegation_id == later_review_delegation
+    assert later_review.expected_value.kind == "APPROVAL"
+    assert later_review.expected_value.actor_id == harness.dev_lead_actor_id
+    assert later_review.expected_value.delegation_id is None
+    assert later_review.observed_value == later_review.affected
     harness.record(
         harness.service.revoke_delegation(
             RevokeDelegationCommand(
@@ -1128,6 +1292,15 @@ def test_authority_delegation_later_review_and_ambiguity_history(tmp_path):
     assert harness.service.get_workflow_view(
         QueryOne(case_id=harness.case_id, acting_actor_id="SYSTEM")
     ).pending_later_review_ids == []
+    resolved_later_review = next(
+        item
+        for item in harness.service.list_drift_findings(
+            UUIDListQuery(case_id=harness.case_id, acting_actor_id="SYSTEM", limit=500)
+        ).items
+        if item.id == later_review.id
+    )
+    assert resolved_later_review.active is False
+    assert resolved_later_review.resolved_at == FROZEN_NOW
 
 
 @pytest.mark.ev("EV-013")
@@ -1541,6 +1714,8 @@ def test_projection_hierarchy_cycle_leaf_and_revision_contracts(tmp_path):
 
 
 @pytest.mark.ev("EV-024")
+@pytest.mark.ev("EV-039")
+@pytest.mark.ev("EV-041")
 def test_jira_revision_emits_exact_new_changed_removed_matrix(tmp_path):
     harness = fresh_harness(tmp_path)
     harness.build_approved_package()
@@ -1699,12 +1874,62 @@ def test_jira_revision_emits_exact_new_changed_removed_matrix(tmp_path):
     )
     assert update.existing == retained_identity
 
+    changed_again = changed_task.model_copy(
+        update={"title": "Changed retained item updated by version four"}
+    )
+    version_four_payload = version_three_payload.model_copy(
+        update={"items": [epic, changed_again, new_item]}
+    )
+    version_four = harness.record(
+        harness.service.revise_projection_plan(
+            ReviseProjectionPlanCommand(
+                command_id=harness.id(),
+                case_id=harness.case_id,
+                acting_actor_id="SYSTEM",
+                expected_case_revision=harness.revision,
+                expected_artifact_id=version_three.binding.artifact_id,
+                expected_artifact_version=version_three.binding.version,
+                expected_artifact_hash=version_three.binding.semantic_hash,
+                content_schema_version=1,
+                hash_schema_version=1,
+                payload=version_four_payload,
+            )
+        )
+    )
+    approve(version_four.binding)
+    carried = next(
+        item
+        for item in harness.pending_intents()
+        if item.action == Action.RETIRE
+        and str(item.item_ref["item_id"]) == str(bound_removed_id)
+    )
+    assert carried.item_ref["plan_version"] == 4
+    assert carried.item_ref["prior_plan_version"] == 2
+    assert carried.item_ref["prior_plan_hash"] == version_two.binding.semantic_hash
+    reopened = WorkflowService(clock=FrozenClock(FROZEN_NOW), database_url=harness.database_url)
+    restarted_carried = next(
+        item
+        for item in reopened.list_pending_operation_intents(
+            UUIDListQuery(case_id=harness.case_id, acting_actor_id="SYSTEM", limit=500)
+        ).items
+        if item.action == Action.RETIRE
+        and str(item.item_ref["item_id"]) == str(bound_removed_id)
+    )
+    assert restarted_carried == carried
+    assert any(
+        item.item_id == bound_removed_id
+        for item in reopened.get_delivery_view(
+            QueryOne(case_id=harness.case_id, acting_actor_id="SYSTEM")
+        ).items
+    )
+
 
 @pytest.mark.ev("EV-029")
 @pytest.mark.ev("EV-030")
 @pytest.mark.ev("EV-031")
 @pytest.mark.ev("EV-033")
 @pytest.mark.ev("EV-034")
+@pytest.mark.release_evidence("operation", "first_attempt_pending", "pending_retry_blocked", "failed_exact_retry", "unknown_retry_blocked", "unknown_reconcile_found", "succeeded_exact_command_replay", "succeeded_readback_reconcile", "idempotency_key_conflict")
 def test_operation_retry_unknown_reconcile_and_replay_branches(tmp_path):
     harness = fresh_harness(tmp_path)
     harness.build_approved_package()
@@ -1781,8 +2006,9 @@ def test_operation_retry_unknown_reconcile_and_replay_branches(tmp_path):
     assert reconciled.status == OperationStatus.SUCCEEDED
     replayed = harness.service.reconcile_operation(reconcile_command)
     assert isinstance(replayed, ReplayResult)
-    assert replayed.kind == "MUTATED"
-    assert replayed.result["operation_id"] == str(operation_id)
+    assert replayed.kind == "REPLAY" and replayed.mutated is False
+    assert replayed.stored_result.kind == "MUTATED"
+    assert replayed.stored_result.operation_id == operation_id
     assert len(harness.audit_events()) == len(harness.successful_command_ids)
     refreshed = harness.record(
         harness.service.reconcile_operation(
@@ -1868,7 +2094,82 @@ def test_operation_retry_unknown_reconcile_and_replay_branches(tmp_path):
     assert retried.status == OperationStatus.PENDING and retried.attempt == 2
 
 
+@pytest.mark.ev("EV-043")
+@pytest.mark.release_evidence("operation", "failed_changed_fingerprint_conflict", "operation_id_conflict", "intent_id_conflict")
+def test_operation_identity_and_changed_fingerprint_conflicts_are_executed(tmp_path):
+    harness = fresh_harness(tmp_path)
+    harness.build_approved_package()
+    harness.build_approved_jira_plan()
+    harness.build_approved_status_policy()
+    intent = harness.pending_intents()[0]
+    operation_id = harness.id()
+    idempotency_key = "release-evidence-conflict"
+    started = harness.record(
+        harness.service.start_external_operation(
+            StartExternalOperationCommand(
+                command_id=harness.id(),
+                case_id=harness.case_id,
+                acting_actor_id="SYSTEM",
+                expected_case_revision=harness.revision,
+                operation_id=operation_id,
+                intent_id=intent.intent_id,
+                idempotency_key=idempotency_key,
+            )
+        )
+    )
+    harness.record(
+        harness.service.record_operation_result(
+            RecordOperationResultCommand(
+                command_id=harness.id(),
+                case_id=harness.case_id,
+                acting_actor_id="SYSTEM",
+                expected_case_revision=started.receipt.revision,
+                operation_id=operation_id,
+                attempt=1,
+                outcome=ExplicitFailure(
+                    outcome=ResultOutcome.EXPLICIT_FAILURE,
+                    failure_code="release-probe-failure",
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(DomainError) as operation_id_conflict:
+        harness.service.start_external_operation(
+            StartExternalOperationCommand(
+                command_id=harness.id(), case_id=harness.case_id, acting_actor_id="SYSTEM",
+                expected_case_revision=harness.revision, operation_id=operation_id,
+                intent_id=intent.intent_id, idempotency_key="different-key",
+            )
+        )
+    assert operation_id_conflict.value.code == ErrorCode.IDEMPOTENCY_CONFLICT
+
+    with pytest.raises(DomainError) as intent_id_conflict:
+        harness.service.start_external_operation(
+            StartExternalOperationCommand(
+                command_id=harness.id(), case_id=harness.case_id, acting_actor_id="SYSTEM",
+                expected_case_revision=harness.revision, operation_id=harness.id(),
+                intent_id=intent.intent_id, idempotency_key="different-operation",
+            )
+        )
+    assert intent_id_conflict.value.code == ErrorCode.IDEMPOTENCY_CONFLICT
+
+    harness.revise_and_approve_policy_for_github()
+    changed = next(item for item in harness.pending_intents() if item.system == System.JIRA)
+    assert changed.fingerprint != intent.fingerprint
+    with pytest.raises(DomainError) as changed_fingerprint:
+        harness.service.start_external_operation(
+            StartExternalOperationCommand(
+                command_id=harness.id(), case_id=harness.case_id, acting_actor_id="SYSTEM",
+                expected_case_revision=harness.revision, operation_id=operation_id,
+                intent_id=changed.intent_id, idempotency_key=idempotency_key,
+            )
+        )
+    assert changed_fingerprint.value.code == ErrorCode.IDEMPOTENCY_CONFLICT
+
+
 @pytest.mark.ev("EV-034")
+@pytest.mark.release_evidence("operation", "unknown_reconcile_not_found")
 def test_unknown_update_reconciles_not_found_to_failed_without_new_binding(tmp_path):
     harness = fresh_harness(tmp_path).complete()
     github_item = harness.github_payload.items[0]
@@ -2120,8 +2421,12 @@ def test_status_sync_resolves_on_equality_and_conflicting_targets_block_intent(t
         ).items
         if item.category == FindingCategory.STATUS_SYNC_REQUIRED and item.active
     )
-    assert sync_finding.expected_value == JiraStatus.TODO.value
-    assert sync_finding.observed_value == JiraStatus.DONE.value
+    assert sync_finding.expected_value.kind == "STATUS"
+    assert sync_finding.expected_value.system == System.JIRA
+    assert sync_finding.expected_value.value == JiraStatus.TODO
+    assert sync_finding.observed_value.kind == "STATUS"
+    assert sync_finding.observed_value.system == System.JIRA
+    assert sync_finding.observed_value.value == JiraStatus.DONE
     assert all(
         not (item.category == FindingCategory.CONTENT_DRIFT and item.active)
         for item in harness.service.list_drift_findings(
@@ -2241,7 +2546,9 @@ def test_status_sync_resolves_on_equality_and_conflicting_targets_block_intent(t
         if item.category == FindingCategory.STATUS_CONFLICT and item.active
     ]
     assert len(conflicts) == 1
-    assert sorted(conflicts[0].observed_value) == [JiraStatus.DONE.value, JiraStatus.TODO.value]
+    assert conflicts[0].observed_value.kind == "STATUS_SET"
+    assert conflicts[0].observed_value.system == System.JIRA
+    assert conflicts[0].observed_value.values == [JiraStatus.TODO, JiraStatus.DONE]
     assert all(
         not (
             item.action == Action.TRANSITION_STATUS
@@ -2570,6 +2877,18 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
     inspector = inspect(engine)
     assert set(inspector.get_table_names()) == set(metadata.tables) | {"alembic_version"}
     assert len(metadata.tables) == 25
+    assert str(inspector.get_columns("source_artifacts")[4]["type"]).upper() == "TEXT"
+    assert str(inspector.get_columns("projection_plan_versions")[4]["type"]).upper() == "TEXT"
+    for table_name, column_name in (
+        ("delegations", "later_review_required"),
+        ("spec_requirements", "delivery_required"),
+        ("technical_decisions", "provisional"),
+        ("projection_items", "implementation_required"),
+        ("approvals", "later_review_required"),
+        ("drift_findings", "active"),
+    ):
+        column = next(value for value in inspector.get_columns(table_name) if value["name"] == column_name)
+        assert str(column["type"]).upper() == "INTEGER"
     for table_name, table in metadata.tables.items():
         actual_columns = {column["name"]: column for column in inspector.get_columns(table_name)}
         assert set(actual_columns) == {column.name for column in table.columns}
@@ -2654,6 +2973,29 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
     with pytest.raises(DatabaseError, match="AUDIT_APPEND_ONLY"):
         with engine.begin() as connection:
             connection.execute(text("UPDATE audit_events SET command_name='changed'"))
+    with pytest.raises(DatabaseError):
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE cases SET revision=0"))
+    with pytest.raises(DatabaseError):
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO source_artifacts (artifact_id,version,case_id,type,media_type,canonical_locator,content_hash,registered_at) VALUES (:id,1,:case_id,'INVALID','application/json','/invalid.json',:hash,:at)"),
+                {"id": str(harness.id()), "case_id": str(harness.case_id), "hash": "0" * 64, "at": "2026-08-07T12:00:00.000000Z"},
+            )
+    with pytest.raises(DatabaseError):
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO delegations (id,case_id,delegator_id,delegate_id,domain,command_names,artifact_kind,artifact_id,valid_from,valid_until,later_review_required,revoked_at,created_at) VALUES (:id,:case_id,:pm,:dev,'BUSINESS','[]',NULL,NULL,:at,:at,2,NULL,:at)"),
+                {"id": str(harness.id()), "case_id": str(harness.case_id), "pm": str(harness.pm_actor_id), "dev": str(harness.dev_lead_actor_id), "at": "2026-08-07T12:00:00.000000Z"},
+            )
+    populated = fresh_harness(tmp_path / "row-checks").complete()
+    populated_engine = engine_for(populated.database_url)
+    with pytest.raises(DatabaseError):
+        with populated_engine.begin() as connection:
+            connection.execute(text("UPDATE external_operation_attempts SET status='PENDING', failure_code='invalid' WHERE rowid=(SELECT MIN(rowid) FROM external_operation_attempts)"))
+    with pytest.raises(DatabaseError):
+        with populated_engine.begin() as connection:
+            connection.execute(text("UPDATE remote_snapshots SET observation_kind='NOT_FOUND' WHERE rowid=(SELECT MIN(rowid) FROM remote_snapshots)"))
     reopened = WorkflowService(clock=FrozenClock(FROZEN_NOW), database_url=harness.database_url)
     assert _public_reads(reopened, harness.case_id) == _public_reads(
         harness.service, harness.case_id

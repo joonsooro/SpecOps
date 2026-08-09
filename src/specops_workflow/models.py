@@ -47,6 +47,8 @@ class JsonPointer(StrictModel):
     @field_validator("pointer")
     @classmethod
     def valid_rfc6901(cls, value: str) -> str:
+        if value and not value.startswith("/"):
+            raise ValueError("JSON Pointer must be empty or begin with /")
         if not re.fullmatch(r"(?:[^~]|~[01])*", value):
             raise ValueError("invalid RFC 6901 escape")
         return value
@@ -87,7 +89,7 @@ class WorkbookRange(StrictModel):
         last_row = int(match[4]) if match[4] else first_row
         if first_col > 16_384 or last_col > 16_384 or first_row > 1_048_576 or last_row > 1_048_576:
             raise ValueError("A1 range exceeds worksheet bounds")
-        if (last_row, last_col) < (first_row, first_col):
+        if last_row < first_row or last_col < first_col:
             raise ValueError("A1 range must be ordered")
         return self
 
@@ -117,6 +119,8 @@ class SourceArtifactIdentity(StrictModel):
     def canonical_posix_locator(cls, value: str) -> str:
         if not value.startswith("/") or (value != "/" and value.endswith("/")):
             raise ValueError("locator must be an absolute canonical POSIX path")
+        if value == "/":
+            return value
         segments = value.split("/")[1:]
         if any(segment in {"", ".", ".."} for segment in segments):
             raise ValueError("locator contains a non-canonical segment")
@@ -295,6 +299,13 @@ class StatusPolicyPayload(StrictModel):
 class JiraIdentity(StrictModel):
     key: Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,17}$")]
 
+    @field_validator("key")
+    @classmethod
+    def reject_render_sentinel(cls, value: str) -> str:
+        if value == "AAAAAAAAAA-999999999999999999":
+            raise ValueError("render-only Jira sizing sentinel is not an external identity")
+        return value
+
 
 class GitHubIdentity(StrictModel):
     repository: ShortText
@@ -307,6 +318,8 @@ class GitHubIdentity(StrictModel):
         repository_pattern = r"^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9._-]{1,100}$"
         if not re.fullmatch(repository_pattern, self.repository) or self.html_url != f"https://github.com/{self.repository}/issues/{self.issue_number}":
             raise ValueError("GitHub identity must use the canonical repository issue URL")
+        if self.repository == "placeholder/placeholder" or self.node_id == "placeholder":
+            raise ValueError("placeholder GitHub identity is not confirmable")
         return self
 
 
@@ -411,32 +424,44 @@ class SubmitRemoteSnapshotCommand(CommandBase): observation: RemoteObservation
 
 
 class Receipt(StrictModel): case_id: UUID; revision: BoundedInt; command_id: UUID; occurred_at: datetime
-class CaseResult(StrictModel): case_id: UUID; pm_actor_id: UUID; dev_lead_actor_id: UUID; receipt: Receipt
-class ParticipantResult(StrictModel): case_id: UUID; actor_id: UUID; receipt: Receipt
-class DelegationResult(StrictModel): case_id: UUID; delegation_id: UUID; revoked_at: datetime | None; receipt: Receipt
-class SourceArtifactResult(StrictModel): identity: SourceArtifactIdentity; receipt: Receipt
+class MutatedResult(StrictModel): kind: Literal["MUTATED"] = "MUTATED"; mutated: Literal[True] = True
+class CaseResult(MutatedResult): case_id: UUID; pm_actor_id: UUID; dev_lead_actor_id: UUID; receipt: Receipt
+class ParticipantResult(MutatedResult): case_id: UUID; actor_id: UUID; receipt: Receipt
+class DelegationResult(MutatedResult): case_id: UUID; delegation_id: UUID; revoked_at: datetime | None; receipt: Receipt
+class SourceArtifactResult(MutatedResult): identity: SourceArtifactIdentity; receipt: Receipt
 class ResolutionRecord(StrictModel):
     resolution_id: UUID; scope: ApprovalScope; actor_id: UUID; delegation_id: UUID | None = None; delegator_id: UUID | None = None
     later_review_required: bool = False; resolution_text: Statement; resolution_source_refs: list[SourceRef]; recorded_at: datetime
     reviewed_by: UUID | None = None; reviewed_at: datetime | None = None
-class AmbiguityFindingResult(StrictModel):
+class AmbiguityFindingResult(MutatedResult):
     finding_id: UUID; status: FindingStatus; resolutions: list[ResolutionRecord]; resolved_at: datetime | None; receipt: Receipt
-class SpecPackageResult(StrictModel): binding: ArtifactBinding; state: PackageState; receipt: Receipt
-class ProjectionPlanResult(StrictModel): binding: ArtifactBinding; target: PlanTarget; state: PlanState; derived_intent_ids: list[UUID] = []; receipt: Receipt
-class StatusPolicyResult(StrictModel): binding: ArtifactBinding; state: PolicyState; receipt: Receipt
-class ApprovalResult(StrictModel): approval_id: UUID; scope: ApprovalScope; artifact_binding: ArtifactBinding; receipt: Receipt
-class OperationResult(StrictModel):
+class SpecPackageResult(MutatedResult): binding: ArtifactBinding; state: PackageState; receipt: Receipt
+class ProjectionPlanResult(MutatedResult): binding: ArtifactBinding; target: PlanTarget; state: PlanState; derived_intent_ids: list[UUID] = []; receipt: Receipt
+class StatusPolicyResult(MutatedResult): binding: ArtifactBinding; state: PolicyState; receipt: Receipt
+class ApprovalResult(MutatedResult): approval_id: UUID; scope: ApprovalScope; artifact_binding: ArtifactBinding; receipt: Receipt
+class OperationResult(MutatedResult):
     operation_id: UUID; intent_id: UUID; system: System; action: Action; status: OperationStatus; attempt: BoundedInt
     failure_code: ShortText | None = None; confirmation: RemoteObservation | None = None; confirmed_snapshot_sequence: BoundedInt | None = None; receipt: Receipt
-class SnapshotResult(StrictModel):
+class SnapshotResult(MutatedResult):
     observation_kind: Literal["FOUND_ACCEPTED", "NOT_FOUND_ACCEPTED"]; observation: RemoteObservation
     binding_id: UUID; observation_sequence: BoundedInt; active_finding_ids: list[UUID]; receipt: Receipt
-class ReplayResult(StrictModel): kind: Literal["MUTATED"] = "MUTATED"; result: dict[str, Any]
+StoredMutationResult = (
+    CaseResult | ParticipantResult | DelegationResult | SourceArtifactResult | AmbiguityFindingResult |
+    SpecPackageResult | ProjectionPlanResult | StatusPolicyResult | ApprovalResult | OperationResult | SnapshotResult
+)
+class ReplayResult(StrictModel):
+    kind: Literal["REPLAY"] = "REPLAY"
+    mutated: Literal[False] = False
+    stored_result: StoredMutationResult
+    receipt: None = None
 
 
 class QueryOne(StrictModel): case_id: UUID; acting_actor_id: Actor
 class AuditQuery(QueryOne): limit: Annotated[int, Field(strict=True, ge=1, le=500)] = 100; after_cursor: BoundedInt | None = None
 class UUIDListQuery(QueryOne): limit: Annotated[int, Field(strict=True, ge=1, le=500)] = 100; after_cursor: UUID | None = None
+class OperationAttemptQuery(QueryOne):
+    limit: Annotated[int, Field(strict=True, ge=1, le=500)] = 100
+    after_cursor: Annotated[str, Field(strict=True, min_length=38, max_length=64, pattern=r"^[0-9a-f-]{36}:[1-9][0-9]*$")] | None = None
 class WorkflowView(StrictModel):
     case_id: UUID; revision: Revision; current_package: ArtifactBinding | None = None; current_jira_plan: ArtifactBinding | None = None
     current_github_plan: ArtifactBinding | None = None; current_status_policy: ArtifactBinding | None = None; setup_stage: SetupStage
@@ -445,11 +470,51 @@ class DeliveryItem(StrictModel):
     system: System; plan_id: UUID; plan_version: BoundedInt; item_id: UUID; external_identity: ExternalIdentity | None = None
     normalized_status: JiraStatus | GitHubStatus; lifecycle_state: Lifecycle; remote_revision: ShortText | None = None; pending_intent_ids: list[UUID] = []
 class DeliveryView(StrictModel): delivery_state: DeliveryState; delivery_complete: bool; items: Annotated[list[DeliveryItem], Field(max_length=2000)]
-class TraceEndpoint(StrictModel): kind: ShortText; id: UUID; version: BoundedInt | None = None
-class TraceEdge(StrictModel): id: UUID; edge_type: ShortText; from_endpoint: TraceEndpoint; to_endpoint: TraceEndpoint
+class TraceEndpoint(StrictModel): kind: TraceNodeKind; id: UUID; version: BoundedInt | None = None
+class TraceEdge(StrictModel): id: UUID; edge_type: TraceEdgeType; from_endpoint: TraceEndpoint; to_endpoint: TraceEndpoint
 class TraceabilityMap(StrictModel): case_id: UUID; complete: bool; edges: list[TraceEdge]
+class EntityValue(StrictModel): kind: Literal["ENTITY"] = "ENTITY"; entity_kind: EntityKind; id: UUID
+class BindingValue(StrictModel): kind: Literal["BINDING"] = "BINDING"; value: ArtifactBinding
+class ContentValue(StrictModel): kind: Literal["CONTENT"] = "CONTENT"; value: Hash
+class StatusValue(StrictModel):
+    kind: Literal["STATUS"] = "STATUS"; system: System; value: JiraStatus | GitHubStatus
+
+    @model_validator(mode="after")
+    def status_matches_system(self):
+        if (self.system == System.JIRA) != isinstance(self.value, JiraStatus):
+            raise ValueError("status enum must match system")
+        return self
+class StatusSetValue(StrictModel):
+    kind: Literal["STATUS_SET"] = "STATUS_SET"; system: System
+    values: Annotated[list[JiraStatus | GitHubStatus], Field(min_length=2, max_length=5)]
+
+    @model_validator(mode="after")
+    def closed_unique_enum_order(self):
+        enum_type = JiraStatus if self.system == System.JIRA else GitHubStatus
+        if any(not isinstance(value, enum_type) for value in self.values):
+            raise ValueError("status enum must match system")
+        if len(set(self.values)) != len(self.values) or self.values != sorted(self.values, key=lambda value: list(enum_type).index(value)):
+            raise ValueError("statuses must be unique and in enum order")
+        return self
+class LifecycleValue(StrictModel): kind: Literal["LIFECYCLE"] = "LIFECYCLE"; value: Lifecycle
+class NativeMappingKeyValue(StrictModel): kind: Literal["MAPPING_KEY"] = "MAPPING_KEY"; system: System; native_status: ShortText
+class OperationStateValue(StrictModel): kind: Literal["OPERATION_STATE"] = "OPERATION_STATE"; value: OperationStatus
+class FindingStateValue(StrictModel): kind: Literal["FINDING_STATE"] = "FINDING_STATE"; value: FindingStatus
+class ResolutionReviewValue(StrictModel):
+    kind: Literal["RESOLUTION_REVIEW"] = "RESOLUTION_REVIEW"; finding_id: UUID; scope: ApprovalScope; delegation_id: UUID; reviewed: bool
+class ExternalValue(StrictModel): kind: Literal["EXTERNAL"] = "EXTERNAL"; value: ExternalIdentity
+class MissingValue(StrictModel): kind: Literal["MISSING"] = "MISSING"
+class TraceValue(StrictModel): kind: Literal["TRACE"] = "TRACE"; value: TraceEdge
+class ApprovalValue(StrictModel):
+    kind: Literal["APPROVAL"] = "APPROVAL"; binding: ArtifactBinding; scope: ApprovalScope; actor_id: UUID; delegation_id: UUID | None = None
+FindingValue = Annotated[
+    EntityValue | BindingValue | ContentValue | StatusValue | StatusSetValue | LifecycleValue |
+    NativeMappingKeyValue | OperationStateValue | FindingStateValue | ResolutionReviewValue |
+    ExternalValue | MissingValue | TraceValue | ApprovalValue,
+    Field(discriminator="kind"),
+]
 class DriftFinding(StrictModel):
-    id: UUID; case_id: UUID; category: FindingCategory; affected: dict[str, Any]; expected_value: Any; observed_value: Any
+    id: UUID; case_id: UUID; category: FindingCategory; affected: FindingValue; expected_value: FindingValue; observed_value: FindingValue
     active: bool; created_at: datetime; resolved_at: datetime | None = None
 class AuditEvent(StrictModel):
     event_id: UUID; case_id: UUID; case_sequence: BoundedInt; command_id: UUID; command_name: ShortText; command_fingerprint: Hash
@@ -461,9 +526,18 @@ class OperationIntent(StrictModel):
     status_policy_binding: ArtifactBinding; request_owned_content_hash: Hash; fingerprint: Hash
     existing: ExternalIdentity | None = None; expected: ShortText | None = None
     target_normalized_status: JiraStatus | GitHubStatus | None = None; contributing_rule_ids: list[UUID] = []
+class ApprovalRecord(StrictModel):
+    approval_id: UUID; artifact_binding: ArtifactBinding; scope: ApprovalScope; actor_id: UUID
+    delegation_id: UUID | None = None; delegator_id: UUID | None = None; later_review_required: bool; approved_at: datetime
+class OperationAttemptRecord(StrictModel):
+    operation_id: UUID; attempt: BoundedInt; intent_id: UUID; system: System; action: Action; idempotency_key: ShortText
+    request: dict[str, Any]; expected_remote_revision: ShortText | None = None; status: OperationStatus
+    failure_code: ShortText | None = None; result: OperationResult | None = None; started_at: datetime; completed_at: datetime | None = None
 class AuditPage(StrictModel): items: list[AuditEvent]; next_cursor: BoundedInt | None = None
 class FindingPage(StrictModel): items: list[DriftFinding]; next_cursor: UUID | None = None
 class IntentPage(StrictModel): items: list[OperationIntent]; next_cursor: UUID | None = None
+class ApprovalPage(StrictModel): items: list[ApprovalRecord]; next_cursor: UUID | None = None
+class OperationAttemptPage(StrictModel): items: list[OperationAttemptRecord]; next_cursor: ShortText | None = None
 
 COMMAND_MODELS = {
     c.__name__: c for c in (

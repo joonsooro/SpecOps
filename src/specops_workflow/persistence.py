@@ -9,7 +9,7 @@ from uuid import UUID
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import (
-    Boolean, CHAR, CheckConstraint, Column, ForeignKey, ForeignKeyConstraint, Index, Integer, MetaData, String, Table, Text,
+    CHAR, CheckConstraint, Column, ForeignKey, ForeignKeyConstraint, Index, Integer, MetaData, Table, Text,
     UniqueConstraint, create_engine, event, insert, select, update,
 )
 from sqlalchemy.engine import Engine
@@ -18,7 +18,7 @@ from sqlalchemy.types import TypeDecorator
 from pydantic import TypeAdapter
 
 from .artifacts import ArtifactRoot, ArtifactVersion
-from .canonical import canonical_json, sha256
+from .canonical import SchemaRegistry, canonical_json, default_registry, sha256
 from .enums import *  # noqa: F403
 from .models import *  # noqa: F403
 from .state import AmbiguityState, ApprovalState, BindingState, CaseState, DelegationState, OperationState
@@ -45,28 +45,28 @@ def owned(name: str, *columns: Column, constraints: tuple[Any, ...] = ()) -> Tab
 
 cases = owned("cases", Column("id", UUIDText, primary_key=True), Column("revision", Integer, nullable=False), Column("pm_actor_id", UUIDText, nullable=False), Column("dev_lead_actor_id", UUIDText, nullable=False), Column("created_at", UTCText(), nullable=False), CheckConstraint("pm_actor_id <> dev_lead_actor_id"), UniqueConstraint("id", "revision"))
 case_participants = owned("case_participants", Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True), Column("actor_id", UUIDText, primary_key=True), Column("created_at", UTCText(), nullable=False))
-delegations = owned("delegations", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("delegator_id", UUIDText, nullable=False), Column("delegate_id", UUIDText, nullable=False), Column("domain", EnumText, nullable=False), Column("command_names", JSONText, nullable=False), Column("artifact_kind", EnumText), Column("artifact_id", UUIDText), Column("valid_from", UTCText(), nullable=False), Column("valid_until", UTCText(), nullable=False), Column("later_review_required", Boolean, nullable=False), Column("revoked_at", UTCText()), Column("created_at", UTCText(), nullable=False), UniqueConstraint("id", "case_id"), CheckConstraint("valid_from <= valid_until"))
-source_artifacts = owned("source_artifacts", Column("artifact_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("type", EnumText, nullable=False), Column("media_type", String(128), nullable=False), Column("canonical_locator", Text, nullable=False), Column("content_hash", HashText, nullable=False), Column("registered_at", UTCText(), nullable=False), UniqueConstraint("artifact_id", "version", "case_id"))
+delegations = owned("delegations", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("delegator_id", UUIDText, nullable=False), Column("delegate_id", UUIDText, nullable=False), Column("domain", EnumText, nullable=False), Column("command_names", JSONText, nullable=False), Column("artifact_kind", EnumText), Column("artifact_id", UUIDText), Column("valid_from", UTCText(), nullable=False), Column("valid_until", UTCText(), nullable=False), Column("later_review_required", Integer, nullable=False), Column("revoked_at", UTCText()), Column("created_at", UTCText(), nullable=False), UniqueConstraint("id", "case_id"), CheckConstraint("valid_from <= valid_until"))
+source_artifacts = owned("source_artifacts", Column("artifact_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("type", EnumText, nullable=False), Column("media_type", Text, nullable=False), Column("canonical_locator", Text, nullable=False), Column("content_hash", HashText, nullable=False), Column("registered_at", UTCText(), nullable=False), UniqueConstraint("artifact_id", "version", "case_id"))
 ambiguity_findings = owned("ambiguity_findings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("category", EnumText, nullable=False), Column("domain", EnumText, nullable=False), Column("severity", EnumText, nullable=False), Column("evidence_refs", JSONText, nullable=False), Column("clarification_question", Text, nullable=False), Column("status", EnumText, nullable=False), Column("resolutions", JSONText, nullable=False), Column("created_at", UTCText(), nullable=False), Column("resolved_at", UTCText()), UniqueConstraint("id", "case_id"))
 spec_packages = owned("spec_packages", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False, unique=True), Column("current_version", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("id", "case_id"))
 spec_package_versions = owned("spec_package_versions", Column("package_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("state", EnumText, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("package_id", "version", "case_id"))
-spec_requirements = owned("spec_requirements", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("delivery_required", Boolean, nullable=False), Column("source_refs", JSONText, nullable=False))
-technical_decisions = owned("technical_decisions", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("delivery_required", Boolean, nullable=False), Column("provisional", Boolean, nullable=False), Column("provisional_delegation_id", UUIDText), Column("source_refs", JSONText, nullable=False))
+spec_requirements = owned("spec_requirements", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("delivery_required", Integer, nullable=False), Column("source_refs", JSONText, nullable=False))
+technical_decisions = owned("technical_decisions", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("delivery_required", Integer, nullable=False), Column("provisional", Integer, nullable=False), Column("provisional_delegation_id", UUIDText), Column("source_refs", JSONText, nullable=False))
 acceptance_checks = owned("acceptance_checks", Column("package_id", UUIDText, primary_key=True), Column("package_version", Integer, primary_key=True), Column("check_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("statement", Text, nullable=False), Column("domain", EnumText, nullable=False), Column("related_unit_ids", JSONText, nullable=False), Column("source_refs", JSONText, nullable=False))
 projection_plans = owned("projection_plans", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("target", EnumText, nullable=False), Column("current_version", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("case_id", "target"), UniqueConstraint("id", "case_id"))
-projection_plan_versions = owned("projection_plan_versions", Column("plan_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("target", EnumText, nullable=False), Column("project_key", String(16)), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("package_id", UUIDText, nullable=False), Column("package_version", Integer, nullable=False), Column("package_hash", HashText, nullable=False), Column("jira_plan_id", UUIDText), Column("jira_plan_version", Integer), Column("jira_plan_hash", HashText), Column("retire_tombstones", JSONText, nullable=False), Column("state", EnumText, nullable=False), Column("created_at", UTCText(), nullable=False))
-projection_items = owned("projection_items", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("generation_key", Text, nullable=False), Column("kind", EnumText, nullable=False), Column("domain", EnumText, nullable=False), Column("title", Text, nullable=False), Column("body", JSONText, nullable=False), Column("parent_item_id", UUIDText), Column("implementation_required", Boolean, nullable=False), Column("repository", Text), Column("primary_jira_item_id", UUIDText), Column("item_semantic_hash", HashText, nullable=False), UniqueConstraint("plan_id", "plan_version", "generation_key"))
+projection_plan_versions = owned("projection_plan_versions", Column("plan_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("target", EnumText, nullable=False), Column("project_key", Text), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("package_id", UUIDText, nullable=False), Column("package_version", Integer, nullable=False), Column("package_hash", HashText, nullable=False), Column("jira_plan_id", UUIDText), Column("jira_plan_version", Integer), Column("jira_plan_hash", HashText), Column("retire_tombstones", JSONText, nullable=False), Column("state", EnumText, nullable=False), Column("created_at", UTCText(), nullable=False))
+projection_items = owned("projection_items", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("generation_key", Text, nullable=False), Column("kind", EnumText, nullable=False), Column("domain", EnumText, nullable=False), Column("title", Text, nullable=False), Column("body", JSONText, nullable=False), Column("parent_item_id", UUIDText), Column("implementation_required", Integer, nullable=False), Column("repository", Text), Column("primary_jira_item_id", UUIDText), Column("item_semantic_hash", HashText, nullable=False), UniqueConstraint("plan_id", "plan_version", "generation_key"))
 projection_item_sources = owned("projection_item_sources", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("source_unit_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False))
 projection_dependencies = owned("projection_dependencies", Column("plan_id", UUIDText, primary_key=True), Column("plan_version", Integer, primary_key=True), Column("item_id", UUIDText, primary_key=True), Column("depends_on_item_id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), CheckConstraint("item_id <> depends_on_item_id"))
 status_policies = owned("status_policies", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False, unique=True), Column("current_version", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), UniqueConstraint("id", "case_id"))
 status_policy_versions = owned("status_policy_versions", Column("policy_id", UUIDText, primary_key=True), Column("version", Integer, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("semantic_hash", HashText, nullable=False), Column("content_schema_version", Integer, nullable=False), Column("hash_schema_version", Integer, nullable=False), Column("state", EnumText, nullable=False), Column("mappings", JSONText, nullable=False), Column("rules", JSONText, nullable=False), Column("created_at", UTCText(), nullable=False))
-approvals = owned("approvals", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("artifact_kind", EnumText, nullable=False), Column("artifact_id", UUIDText, nullable=False), Column("artifact_version", Integer, nullable=False), Column("artifact_hash", HashText, nullable=False), Column("scope", EnumText, nullable=False), Column("actor_id", UUIDText, nullable=False), Column("delegation_id", UUIDText), Column("later_review_required", Boolean, nullable=False), Column("approved_at", UTCText(), nullable=False), UniqueConstraint("case_id", "artifact_kind", "artifact_id", "artifact_version", "artifact_hash", "scope", "actor_id"))
-external_operations = owned("external_operations", Column("id", UUIDText, primary_key=True), Column("intent_id", UUIDText, nullable=False), Column("case_id", UUIDText, nullable=False), Column("system", EnumText, nullable=False), Column("plan_id", UUIDText, nullable=False), Column("plan_version", Integer, nullable=False), Column("status_policy_id", UUIDText, nullable=False), Column("status_policy_version", Integer, nullable=False), Column("status_policy_hash", HashText, nullable=False), Column("item_ref", JSONText, nullable=False), Column("action", EnumText, nullable=False), Column("idempotency_key", Text, nullable=False), Column("request_owned_content_hash", HashText, nullable=False), Column("fingerprint", HashText, nullable=False), Column("target_normalized_status", EnumText), Column("contributing_rule_ids", JSONText, nullable=False), Column("status", EnumText, nullable=False), Column("current_attempt", Integer, nullable=False), Column("confirmed_result", JSONText), Column("confirmed_snapshot_sequence", Integer), Column("created_at", UTCText(), nullable=False), Column("updated_at", UTCText(), nullable=False), UniqueConstraint("case_id", "idempotency_key"), UniqueConstraint("case_id", "intent_id"), UniqueConstraint("id", "case_id"))
+approvals = owned("approvals", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("artifact_kind", EnumText, nullable=False), Column("artifact_id", UUIDText, nullable=False), Column("artifact_version", Integer, nullable=False), Column("artifact_hash", HashText, nullable=False), Column("scope", EnumText, nullable=False), Column("actor_id", UUIDText, nullable=False), Column("delegation_id", UUIDText), Column("later_review_required", Integer, nullable=False), Column("approved_at", UTCText(), nullable=False), UniqueConstraint("case_id", "artifact_kind", "artifact_id", "artifact_version", "artifact_hash", "scope", "actor_id"))
+external_operations = owned("external_operations", Column("id", UUIDText, primary_key=True), Column("intent_id", UUIDText, nullable=False), Column("case_id", UUIDText, nullable=False), Column("system", EnumText, nullable=False), Column("plan_id", UUIDText, nullable=False), Column("plan_version", Integer, nullable=False), Column("status_policy_id", UUIDText, nullable=False), Column("status_policy_version", Integer, nullable=False), Column("status_policy_hash", HashText, nullable=False), Column("item_ref", JSONText, nullable=False), Column("action", EnumText, nullable=False), Column("idempotency_key", Text, nullable=False), Column("request_owned_content_hash", HashText, nullable=False), Column("fingerprint", HashText, nullable=False), Column("target_normalized_status", EnumText), Column("contributing_rule_ids", JSONText, nullable=False), Column("status", EnumText, nullable=False), Column("current_attempt", Integer, nullable=False), Column("confirmed_result", JSONText), Column("confirmed_snapshot_sequence", Integer), Column("created_at", UTCText(), nullable=False), Column("updated_at", UTCText(), nullable=False), UniqueConstraint("idempotency_key"), UniqueConstraint("case_id", "intent_id"), UniqueConstraint("id", "case_id"))
 external_operation_attempts = owned("external_operation_attempts", Column("operation_id", UUIDText, primary_key=True), Column("attempt", Integer, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("request", JSONText, nullable=False), Column("expected_remote_revision", Text), Column("status", EnumText, nullable=False), Column("failure_code", Text), Column("result", JSONText), Column("started_at", UTCText(), nullable=False), Column("completed_at", UTCText()))
 external_bindings = owned("external_bindings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("system", EnumText, nullable=False), Column("projection_plan_id", UUIDText, nullable=False), Column("item_id", UUIDText, nullable=False), Column("current_plan_version", Integer, nullable=False), Column("generation_key", Text, nullable=False), Column("external_identity_key", Text, nullable=False), Column("external_identity", JSONText, nullable=False), Column("current_observation_sequence", Integer, nullable=False), Column("confirmed_at", UTCText(), nullable=False), UniqueConstraint("system", "external_identity_key"), UniqueConstraint("case_id", "system", "projection_plan_id", "item_id"), UniqueConstraint("id", "case_id"))
 remote_snapshots = owned("remote_snapshots", Column("binding_id", UUIDText, primary_key=True), Column("observation_sequence", Integer, primary_key=True), Column("observation_kind", EnumText, nullable=False), Column("case_id", UUIDText, nullable=False), Column("operation_id", UUIDText), Column("status_policy_id", UUIDText, nullable=False), Column("status_policy_version", Integer, nullable=False), Column("status_policy_hash", HashText, nullable=False), Column("remote_revision", Text), Column("expected_previous_remote_revision", Text), Column("native_status", Text), Column("normalized_status_at_acceptance", EnumText), Column("lifecycle_at_acceptance", EnumText), Column("owned_content", JSONText), Column("owned_content_hash", HashText), Column("observed_at", UTCText(), nullable=False), UniqueConstraint("binding_id", "remote_revision"))
 traceability_edges = owned("traceability_edges", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("edge_type", EnumText, nullable=False), Column("from_kind", EnumText, nullable=False), Column("from_id", UUIDText, nullable=False), Column("from_version", Integer), Column("to_kind", EnumText, nullable=False), Column("to_id", UUIDText, nullable=False), Column("to_version", Integer), Column("created_at", UTCText(), nullable=False), UniqueConstraint("case_id", "edge_type", "from_kind", "from_id", "from_version", "to_kind", "to_id", "to_version"))
-drift_findings = owned("drift_findings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("category", EnumText, nullable=False), Column("affected_binding", JSONText, nullable=False), Column("expected_value", JSONText, nullable=False), Column("observed_value", JSONText, nullable=False), Column("active", Boolean, nullable=False), Column("created_at", UTCText(), nullable=False), Column("resolved_at", UTCText()))
+drift_findings = owned("drift_findings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("category", EnumText, nullable=False), Column("affected_binding", JSONText, nullable=False), Column("expected_value", JSONText, nullable=False), Column("observed_value", JSONText, nullable=False), Column("active", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), Column("resolved_at", UTCText()))
 audit_events = owned("audit_events", Column("event_id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("case_sequence", Integer, nullable=False), Column("command_id", UUIDText, nullable=False), Column("command_name", Text, nullable=False), Column("command_fingerprint", HashText, nullable=False), Column("actor", Text, nullable=False), Column("occurred_at", UTCText(), nullable=False), Column("target_ids", JSONText, nullable=False), Column("before_case_revision", Integer, nullable=False), Column("after_case_revision", Integer, nullable=False), Column("metadata", JSONText, nullable=False), Column("result", JSONText, nullable=False), UniqueConstraint("case_id", "case_sequence"), UniqueConstraint("case_id", "command_id"), CheckConstraint("case_sequence = after_case_revision"))
 
 # Relationally expressible references are composite and case-scoped.  Cyclic
@@ -108,10 +108,72 @@ delegations.append_constraint(CheckConstraint("(artifact_kind IS NULL) = (artifa
 ambiguity_findings.append_constraint(CheckConstraint("(status = 'OPEN' AND resolved_at IS NULL) OR (status = 'RESOLVED' AND resolved_at IS NOT NULL)"))
 technical_decisions.append_constraint(CheckConstraint("(provisional = 1 AND provisional_delegation_id IS NOT NULL) OR (provisional = 0 AND provisional_delegation_id IS NULL)"))
 projection_plan_versions.append_constraint(CheckConstraint("(target = 'JIRA' AND project_key IS NOT NULL AND jira_plan_id IS NULL AND jira_plan_version IS NULL AND jira_plan_hash IS NULL) OR (target = 'GITHUB' AND project_key IS NULL AND jira_plan_id IS NOT NULL AND jira_plan_version IS NOT NULL AND jira_plan_hash IS NOT NULL)"))
-external_operation_attempts.append_constraint(CheckConstraint("(status = 'PENDING' AND completed_at IS NULL) OR (status <> 'PENDING' AND completed_at IS NOT NULL)"))
-remote_snapshots.append_constraint(CheckConstraint("(observation_kind = 'FOUND' AND remote_revision IS NOT NULL AND native_status IS NOT NULL AND owned_content IS NOT NULL AND owned_content_hash IS NOT NULL) OR (observation_kind = 'NOT_FOUND' AND remote_revision IS NULL AND native_status IS NULL AND normalized_status_at_acceptance IS NULL AND lifecycle_at_acceptance IS NULL AND owned_content IS NULL AND owned_content_hash IS NULL)"))
+external_operation_attempts.append_constraint(CheckConstraint("(status = 'PENDING' AND failure_code IS NULL AND result IS NULL AND completed_at IS NULL) OR (status = 'FAILED' AND failure_code IS NOT NULL AND result IS NOT NULL AND completed_at IS NOT NULL) OR (status IN ('UNKNOWN', 'SUCCEEDED') AND failure_code IS NULL AND result IS NOT NULL AND completed_at IS NOT NULL)"))
+remote_snapshots.append_constraint(CheckConstraint("(observation_kind = 'FOUND' AND remote_revision IS NOT NULL AND native_status IS NOT NULL AND normalized_status_at_acceptance IS NOT NULL AND lifecycle_at_acceptance IS NOT NULL AND owned_content IS NOT NULL AND owned_content_hash IS NOT NULL AND ((observation_sequence = 1 AND expected_previous_remote_revision IS NULL) OR (observation_sequence > 1 AND expected_previous_remote_revision IS NOT NULL))) OR (observation_kind = 'NOT_FOUND' AND expected_previous_remote_revision IS NOT NULL AND remote_revision IS NULL AND native_status IS NULL AND normalized_status_at_acceptance IS NULL AND lifecycle_at_acceptance IS NULL AND owned_content IS NULL AND owned_content_hash IS NULL)"))
 drift_findings.append_constraint(CheckConstraint("(active = 1 AND resolved_at IS NULL) OR (active = 0 AND resolved_at IS NOT NULL)"))
 audit_events.append_constraint(CheckConstraint("before_case_revision >= 0 AND before_case_revision <= 9223372036854775807"))
+
+BOOLEAN_COLUMNS = {
+    ("delegations", "later_review_required"),
+    ("spec_requirements", "delivery_required"),
+    ("technical_decisions", "delivery_required"),
+    ("technical_decisions", "provisional"),
+    ("projection_items", "implementation_required"),
+    ("approvals", "later_review_required"),
+    ("drift_findings", "active"),
+}
+for table_name, column_name in BOOLEAN_COLUMNS:
+    metadata.tables[table_name].append_constraint(CheckConstraint(f"{column_name} IN (0, 1)"))
+
+for table in metadata.tables.values():
+    for column in table.columns:
+        if not isinstance(column.type, Integer) or (table.name, column.name) in BOOLEAN_COLUMNS:
+            continue
+        lower = 0 if (table.name, column.name) == ("audit_events", "before_case_revision") else 1
+        bounds = f"{column.name} >= {lower} AND {column.name} <= 9223372036854775807"
+        table.append_constraint(CheckConstraint(f"{column.name} IS NULL OR ({bounds})" if column.nullable else bounds))
+
+def _closed_values(*enum_types: type[Any]) -> tuple[str, ...]:
+    return tuple(item.value for enum_type in enum_types for item in enum_type)
+
+ENUM_COLUMNS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("delegations", "domain"): _closed_values(Domain),
+    ("delegations", "artifact_kind"): _closed_values(ArtifactKind),
+    ("source_artifacts", "type"): _closed_values(SourceArtifactType),
+    ("source_artifacts", "media_type"): ("application/json", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/markdown", "text/plain", "application/octet-stream"),
+    ("ambiguity_findings", "category"): _closed_values(AmbiguityCategory),
+    ("ambiguity_findings", "domain"): _closed_values(Domain),
+    ("ambiguity_findings", "severity"): _closed_values(Severity),
+    ("ambiguity_findings", "status"): _closed_values(FindingStatus),
+    ("spec_package_versions", "state"): _closed_values(PackageState),
+    ("spec_requirements", "domain"): _closed_values(Domain),
+    ("technical_decisions", "domain"): _closed_values(Domain),
+    ("acceptance_checks", "domain"): _closed_values(Domain),
+    ("projection_plans", "target"): _closed_values(PlanTarget),
+    ("projection_plan_versions", "target"): _closed_values(PlanTarget),
+    ("projection_plan_versions", "state"): _closed_values(PlanState),
+    ("projection_items", "kind"): _closed_values(JiraKind, GitHubKind),
+    ("projection_items", "domain"): _closed_values(Domain),
+    ("status_policy_versions", "state"): _closed_values(PolicyState),
+    ("approvals", "artifact_kind"): _closed_values(ArtifactKind),
+    ("approvals", "scope"): _closed_values(ApprovalScope),
+    ("external_operations", "system"): _closed_values(System),
+    ("external_operations", "action"): _closed_values(Action),
+    ("external_operations", "target_normalized_status"): _closed_values(JiraStatus, GitHubStatus),
+    ("external_operations", "status"): _closed_values(OperationStatus),
+    ("external_operation_attempts", "status"): _closed_values(OperationStatus),
+    ("external_bindings", "system"): _closed_values(System),
+    ("remote_snapshots", "observation_kind"): _closed_values(ObservationKind),
+    ("remote_snapshots", "normalized_status_at_acceptance"): _closed_values(JiraStatus, GitHubStatus),
+    ("remote_snapshots", "lifecycle_at_acceptance"): _closed_values(Lifecycle),
+    ("traceability_edges", "edge_type"): _closed_values(TraceEdgeType),
+    ("traceability_edges", "from_kind"): _closed_values(TraceNodeKind),
+    ("traceability_edges", "to_kind"): _closed_values(TraceNodeKind),
+    ("drift_findings", "category"): _closed_values(FindingCategory),
+}
+for (table_name, column_name), values in ENUM_COLUMNS.items():
+    allowed = ", ".join(repr(value) for value in values)
+    metadata.tables[table_name].append_constraint(CheckConstraint(f"{column_name} IN ({allowed})"))
 
 Index("ix_delegations_case_delegate_revoked", delegations.c.case_id, delegations.c.delegate_id, delegations.c.revoked_at)
 Index("ix_ambiguity_case_status_severity", ambiguity_findings.c.case_id, ambiguity_findings.c.status, ambiguity_findings.c.severity)
@@ -138,7 +200,9 @@ def migrate(database_url: str) -> None:
 
 
 class SqlAlchemyStore:
-    def __init__(self, database_url: str) -> None: self.engine = engine_for(database_url)
+    def __init__(self, database_url: str, *, registry: SchemaRegistry | None = None) -> None:
+        self.engine = engine_for(database_url)
+        self.registry = registry or default_registry()
 
     def load_cases(self) -> dict[UUID, CaseState]:
         loaded: dict[UUID, CaseState] = {}
@@ -155,6 +219,7 @@ class SqlAlchemyStore:
         refs = TypeAdapter(list[SourceRef])
         resolutions = TypeAdapter(list[ResolutionRecord])
         identity_type = TypeAdapter(JiraIdentity | GitHubIdentity)
+        finding_value = TypeAdapter(FindingValue)
 
         def artifact_binding(kind: ArtifactKind, root: ArtifactRoot, version: int) -> ArtifactBinding:
             stored = next(item for item in root.versions if item.version == version)
@@ -209,7 +274,22 @@ class SqlAlchemyStore:
                     )
                     for row in connection.execute(select(acceptance_checks).where(acceptance_checks.c.package_id == package["id"], acceptance_checks.c.package_version == version["version"])).mappings()
                 ]
-                payload = SpecPackagePayload(requirements=reqs, technical_decisions=decisions, acceptance_checks=checks)
+                payload = self.registry.validate(
+                    ArtifactKind.SPEC_PACKAGE,
+                    version["content_schema_version"],
+                    version["hash_schema_version"],
+                    {"requirements": reqs, "technical_decisions": decisions, "acceptance_checks": checks},
+                )
+                from .service import WorkflowService
+                helper = object.__new__(WorkflowService)
+                computed_hash = self.registry.hash(
+                    ArtifactKind.SPEC_PACKAGE,
+                    version["content_schema_version"],
+                    version["hash_schema_version"],
+                    helper._normalized_package_payload(payload),
+                )
+                if computed_hash != version["semantic_hash"]:
+                    raise ValueError("persisted spec-package semantic hash mismatch")
                 root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], payload, version["state"]))
             case.package = root
 
@@ -263,19 +343,41 @@ class SqlAlchemyStore:
                         artifact_kind=ArtifactKind.PROJECTION_PLAN, artifact_id=UUID(version["jira_plan_id"]),
                         version=version["jira_plan_version"], semantic_hash=version["jira_plan_hash"],
                     )
-                payload = ProjectionPlanPayload(
-                    package_binding=package_binding, target=target, project_key=version["project_key"], jira_plan_binding=jira_binding, items=items,
+                payload = self.registry.validate(
+                    ArtifactKind.PROJECTION_PLAN,
+                    version["content_schema_version"],
+                    version["hash_schema_version"],
+                    {"package_binding": package_binding, "target": target, "project_key": version["project_key"], "jira_plan_binding": jira_binding, "items": items},
                 )
+                from .service import WorkflowService
+                computed_hash = self.registry.hash(
+                    ArtifactKind.PROJECTION_PLAN,
+                    version["content_schema_version"],
+                    version["hash_schema_version"],
+                    helper._normalized_plan_payload(payload),
+                )
+                if computed_hash != version["semantic_hash"]:
+                    raise ValueError("persisted projection-plan semantic hash mismatch")
                 root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], payload, version["state"]))
                 case.metadata.setdefault("item_hashes", {})[(root.artifact_id, version["version"])] = item_hashes
+                tombstones = {
+                    UUID(entry["item"]["item_id"]): {
+                        "item": ProjectionItem.model_validate_json(json.dumps(entry["item"])),
+                        "prior_plan_version": entry["prior_plan_version"],
+                        "prior_plan_hash": entry["prior_plan_hash"],
+                    }
+                    for entry in json.loads(version["retire_tombstones"])
+                }
+                case.metadata.setdefault("tombstones", {})[
+                    (root.artifact_id, version["version"])
+                ] = tombstones
                 current_items = {item.item_id: item_hashes[item.item_id] for item in items}
-                if previous_items:
+                if previous_items or tombstones:
                     actions: dict[UUID, Action] = {}
                     for item_id, digest in current_items.items():
                         if item_id not in previous_items: actions[item_id] = Action.CREATE
                         elif previous_items[item_id] != digest: actions[item_id] = Action.UPDATE
-                    for item_id in previous_items.keys() - current_items.keys():
-                        if any(binding.item_id == item_id for binding in case.bindings.values()): actions[item_id] = Action.RETIRE
+                    for item_id in tombstones: actions[item_id] = Action.RETIRE
                     case.metadata.setdefault("reconciliation", {})[(root.artifact_id, version["version"])] = actions
                 previous_items = current_items
             case.plans[target] = root
@@ -284,10 +386,24 @@ class SqlAlchemyStore:
         if policy_row:
             root = ArtifactRoot(ArtifactKind.STATUS_POLICY, UUID(policy_row["id"]))
             for version in connection.execute(select(status_policy_versions).where(status_policy_versions.c.policy_id == policy_row["id"]).order_by(status_policy_versions.c.version)).mappings():
-                payload = StatusPolicyPayload(
-                    mappings=TypeAdapter(list[NativeStatusMapping]).validate_json(version["mappings"]),
-                    rules=TypeAdapter(list[StatusRule]).validate_json(version["rules"]),
+                payload = self.registry.validate(
+                    ArtifactKind.STATUS_POLICY,
+                    version["content_schema_version"],
+                    version["hash_schema_version"],
+                    {
+                        "mappings": TypeAdapter(list[NativeStatusMapping]).validate_json(version["mappings"]),
+                        "rules": TypeAdapter(list[StatusRule]).validate_json(version["rules"]),
+                    },
                 )
+                from .service import WorkflowService
+                computed_hash = self.registry.hash(
+                    ArtifactKind.STATUS_POLICY,
+                    version["content_schema_version"],
+                    version["hash_schema_version"],
+                    WorkflowService._normalized_policy_payload(payload),
+                )
+                if computed_hash != version["semantic_hash"]:
+                    raise ValueError("persisted status-policy semantic hash mismatch")
                 root.versions.append(ArtifactVersion(version["version"], version["semantic_hash"], version["content_schema_version"], version["hash_schema_version"], payload, version["state"]))
             case.policy = root
 
@@ -349,21 +465,22 @@ class SqlAlchemyStore:
             operation = OperationState(
                 UUID(row["id"]), intent, row["idempotency_key"], OperationStatus(row["status"]), row["current_attempt"],
                 row["created_at"], row["updated_at"], attempt["failure_code"], confirmation, row["confirmed_snapshot_sequence"], None,
+                attempt["started_at"],
             )
             case.operations[operation.id] = operation
 
         for row in connection.execute(select(drift_findings).where(drift_findings.c.case_id == cid)).mappings():
             case.metadata.setdefault("findings", {})[UUID(row["id"])] = {
-                "category": FindingCategory(row["category"]), "affected": json.loads(row["affected_binding"]),
-                "expected": json.loads(row["expected_value"]), "observed": json.loads(row["observed_value"]),
+                "category": FindingCategory(row["category"]), "affected": finding_value.validate_json(row["affected_binding"]),
+                "expected": finding_value.validate_json(row["expected_value"]), "observed": finding_value.validate_json(row["observed_value"]),
                 "active": bool(row["active"]), "created_at": row["created_at"], "resolved_at": row["resolved_at"],
             }
 
         for row in connection.execute(select(traceability_edges).where(traceability_edges.c.case_id == cid)).mappings():
             edge = TraceEdge(
-                id=UUID(row["id"]), edge_type=row["edge_type"],
-                from_endpoint=TraceEndpoint(kind=row["from_kind"], id=UUID(row["from_id"]), version=row["from_version"]),
-                to_endpoint=TraceEndpoint(kind=row["to_kind"], id=UUID(row["to_id"]), version=row["to_version"]),
+                id=UUID(row["id"]), edge_type=TraceEdgeType(row["edge_type"]),
+                from_endpoint=TraceEndpoint(kind=TraceNodeKind(row["from_kind"]), id=UUID(row["from_id"]), version=row["from_version"]),
+                to_endpoint=TraceEndpoint(kind=TraceNodeKind(row["to_kind"]), id=UUID(row["to_id"]), version=row["to_version"]),
             )
             case.metadata.setdefault("trace_edges", {})[edge.id] = edge
 
@@ -439,6 +556,23 @@ class SqlAlchemyStore:
         updates = {key: statement.excluded[key] for key in values if key not in primary_keys}
         connection.execute(statement.on_conflict_do_update(index_elements=primary_keys, set_=updates))
 
+    @staticmethod
+    def _insert_once(connection, table: Table, **values: Any) -> None:
+        primary_keys = [column.name for column in table.primary_key.columns]
+        criteria = [table.c[key] == values[key] for key in primary_keys]
+        if connection.execute(select(*[table.c[key] for key in primary_keys]).where(*criteria)).first() is None:
+            connection.execute(insert(table).values(**values))
+
+    @staticmethod
+    def _insert_version_or_update_state(connection, table: Table, **values: Any) -> None:
+        primary_keys = [column.name for column in table.primary_key.columns]
+        criteria = [table.c[key] == values[key] for key in primary_keys]
+        existing = connection.execute(select(table.c.state).where(*criteria)).scalar_one_or_none()
+        if existing is None:
+            connection.execute(insert(table).values(**values))
+        elif existing != values["state"]:
+            connection.execute(update(table).where(*criteria).values(state=values["state"]))
+
     def _save_domain(self, connection, case: CaseState) -> None:
         cid = str(case.id)
         dump = lambda value: canonical_json(value).decode("utf-8")
@@ -451,18 +585,29 @@ class SqlAlchemyStore:
         if case.package:
             self._replace(connection, spec_packages, id=str(case.package.artifact_id), case_id=cid, current_version=case.package.current.version, created_at=case.created_at)
             for version in case.package.versions:
-                self._replace(connection, spec_package_versions, package_id=str(case.package.artifact_id), version=version.version, case_id=cid, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, state=version.state, created_at=case.created_at)
+                self._insert_version_or_update_state(connection, spec_package_versions, package_id=str(case.package.artifact_id), version=version.version, case_id=cid, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, state=version.state, created_at=case.created_at)
                 for unit in version.payload.requirements:
-                    self._replace(connection, spec_requirements, package_id=str(case.package.artifact_id), package_version=version.version, unit_id=str(unit.unit_id), case_id=cid, statement=unit.statement, domain=unit.domain.value, delivery_required=unit.delivery_required, source_refs=dump([ref.model_dump(mode="python") for ref in unit.source_refs]))
+                    self._insert_once(connection, spec_requirements, package_id=str(case.package.artifact_id), package_version=version.version, unit_id=str(unit.unit_id), case_id=cid, statement=unit.statement, domain=unit.domain.value, delivery_required=unit.delivery_required, source_refs=dump([ref.model_dump(mode="python") for ref in unit.source_refs]))
                 for unit in version.payload.technical_decisions:
-                    self._replace(connection, technical_decisions, package_id=str(case.package.artifact_id), package_version=version.version, unit_id=str(unit.unit_id), case_id=cid, statement=unit.statement, domain=unit.domain.value, delivery_required=unit.delivery_required, provisional=unit.provisional, provisional_delegation_id=str(unit.provisional_delegation_id) if unit.provisional_delegation_id else None, source_refs=dump([ref.model_dump(mode="python") for ref in unit.source_refs]))
+                    self._insert_once(connection, technical_decisions, package_id=str(case.package.artifact_id), package_version=version.version, unit_id=str(unit.unit_id), case_id=cid, statement=unit.statement, domain=unit.domain.value, delivery_required=unit.delivery_required, provisional=unit.provisional, provisional_delegation_id=str(unit.provisional_delegation_id) if unit.provisional_delegation_id else None, source_refs=dump([ref.model_dump(mode="python") for ref in unit.source_refs]))
                 for check in version.payload.acceptance_checks:
-                    self._replace(connection, acceptance_checks, package_id=str(case.package.artifact_id), package_version=version.version, check_id=str(check.check_id), case_id=cid, statement=check.statement, domain=check.domain.value, related_unit_ids=dump(check.related_unit_ids), source_refs=dump([ref.model_dump(mode="python") for ref in check.source_refs]))
+                    self._insert_once(connection, acceptance_checks, package_id=str(case.package.artifact_id), package_version=version.version, check_id=str(check.check_id), case_id=cid, statement=check.statement, domain=check.domain.value, related_unit_ids=dump(check.related_unit_ids), source_refs=dump([ref.model_dump(mode="python") for ref in check.source_refs]))
         for target, root in case.plans.items():
             self._replace(connection, projection_plans, id=str(root.artifact_id), case_id=cid, target=target.value, current_version=root.current.version, created_at=case.created_at)
             for version in root.versions:
                 payload = version.payload; jira = payload.jira_plan_binding
-                self._replace(connection, projection_plan_versions, plan_id=str(root.artifact_id), version=version.version, case_id=cid, target=target.value, project_key=payload.project_key, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, package_id=str(payload.package_binding.artifact_id), package_version=payload.package_binding.version, package_hash=payload.package_binding.semantic_hash, jira_plan_id=str(jira.artifact_id) if jira else None, jira_plan_version=jira.version if jira else None, jira_plan_hash=jira.semantic_hash if jira else None, retire_tombstones="[]", state=version.state, created_at=case.created_at)
+                tombstones = case.metadata.get("tombstones", {}).get(
+                    (root.artifact_id, version.version), {}
+                )
+                serialized_tombstones = [
+                    {
+                        "item": entry["item"].model_dump(mode="python"),
+                        "prior_plan_version": entry["prior_plan_version"],
+                        "prior_plan_hash": entry["prior_plan_hash"],
+                    }
+                    for _, entry in sorted(tombstones.items(), key=lambda pair: pair[0].bytes)
+                ]
+                self._insert_version_or_update_state(connection, projection_plan_versions, plan_id=str(root.artifact_id), version=version.version, case_id=cid, target=target.value, project_key=payload.project_key, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, package_id=str(payload.package_binding.artifact_id), package_version=payload.package_binding.version, package_hash=payload.package_binding.semantic_hash, jira_plan_id=str(jira.artifact_id) if jira else None, jira_plan_version=jira.version if jira else None, jira_plan_hash=jira.semantic_hash if jira else None, retire_tombstones=dump(serialized_tombstones), state=version.state, created_at=case.created_at)
                 hashes = case.metadata.get("item_hashes", {}).get((root.artifact_id, version.version), {})
                 remaining = {item.item_id: item for item in payload.items}
                 ordered_items = []
@@ -485,20 +630,20 @@ class SqlAlchemyStore:
                         emitted.add(plan_item.item_id)
                         remaining.pop(plan_item.item_id)
                 for plan_item in ordered_items:
-                    self._replace(connection, projection_items, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), case_id=cid, generation_key=plan_item.body.generation_key, kind=plan_item.kind.value, domain=plan_item.domain.value, title=plan_item.title, body=dump(plan_item.body.model_dump(mode="python")), parent_item_id=str(plan_item.parent_item_id) if plan_item.parent_item_id else None, implementation_required=plan_item.implementation_required, repository=plan_item.repository, primary_jira_item_id=str(plan_item.primary_jira_item_id) if plan_item.primary_jira_item_id else None, item_semantic_hash=hashes.get(plan_item.item_id, "0" * 64))
+                    self._insert_once(connection, projection_items, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), case_id=cid, generation_key=plan_item.body.generation_key, kind=plan_item.kind.value, domain=plan_item.domain.value, title=plan_item.title, body=dump(plan_item.body.model_dump(mode="python")), parent_item_id=str(plan_item.parent_item_id) if plan_item.parent_item_id else None, implementation_required=plan_item.implementation_required, repository=plan_item.repository, primary_jira_item_id=str(plan_item.primary_jira_item_id) if plan_item.primary_jira_item_id else None, item_semantic_hash=hashes.get(plan_item.item_id, "0" * 64))
                 for plan_item in ordered_items:
-                    for source in plan_item.source_unit_ids: self._replace(connection, projection_item_sources, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), source_unit_id=str(source), case_id=cid)
-                    for dependency in plan_item.dependency_item_ids: self._replace(connection, projection_dependencies, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), depends_on_item_id=str(dependency), case_id=cid)
+                    for source in plan_item.source_unit_ids: self._insert_once(connection, projection_item_sources, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), source_unit_id=str(source), case_id=cid)
+                    for dependency in plan_item.dependency_item_ids: self._insert_once(connection, projection_dependencies, plan_id=str(root.artifact_id), plan_version=version.version, item_id=str(plan_item.item_id), depends_on_item_id=str(dependency), case_id=cid)
         if case.policy:
             self._replace(connection, status_policies, id=str(case.policy.artifact_id), case_id=cid, current_version=case.policy.current.version, created_at=case.created_at)
             for version in case.policy.versions:
-                self._replace(connection, status_policy_versions, policy_id=str(case.policy.artifact_id), version=version.version, case_id=cid, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, state=version.state, mappings=dump([item.model_dump(mode="python") for item in version.payload.mappings]), rules=dump([item.model_dump(mode="python") for item in version.payload.rules]), created_at=case.created_at)
+                self._insert_version_or_update_state(connection, status_policy_versions, policy_id=str(case.policy.artifact_id), version=version.version, case_id=cid, semantic_hash=version.semantic_hash, content_schema_version=version.content_schema_version, hash_schema_version=version.hash_schema_version, state=version.state, mappings=dump([item.model_dump(mode="python") for item in version.payload.mappings]), rules=dump([item.model_dump(mode="python") for item in version.payload.rules]), created_at=case.created_at)
         for item in case.approvals:
             self._replace(connection, approvals, id=str(item.id), case_id=cid, artifact_kind=item.artifact_kind, artifact_id=str(item.artifact_id), artifact_version=item.artifact_version, artifact_hash=item.artifact_hash, scope=item.scope.value, actor_id=str(item.actor_id), delegation_id=str(item.delegation_id) if item.delegation_id else None, later_review_required=item.later_review_required, approved_at=item.approved_at)
         for item in case.operations.values():
             intent = item.intent; policy = intent.status_policy_binding
             self._replace(connection, external_operations, id=str(item.id), intent_id=str(intent.intent_id), case_id=cid, system=intent.system.value, plan_id=str(intent.plan_binding.artifact_id), plan_version=intent.plan_binding.version, status_policy_id=str(policy.artifact_id), status_policy_version=policy.version, status_policy_hash=policy.semantic_hash, item_ref=dump(intent.item_ref), action=intent.action.value, idempotency_key=item.idempotency_key, request_owned_content_hash=intent.request_owned_content_hash, fingerprint=intent.fingerprint, target_normalized_status=intent.target_normalized_status.value if intent.target_normalized_status else None, contributing_rule_ids=dump(intent.contributing_rule_ids), status=item.status.value, current_attempt=item.attempt, confirmed_result=dump(item.confirmation.model_dump(mode="python")) if item.confirmation else None, confirmed_snapshot_sequence=item.confirmed_snapshot_sequence, created_at=item.created_at, updated_at=item.updated_at)
-            self._replace(connection, external_operation_attempts, operation_id=str(item.id), attempt=item.attempt, case_id=cid, request=dump(intent.request), expected_remote_revision=intent.expected, status=item.status.value, failure_code=item.failure_code, result=dump(item.last_result.model_dump(mode="python")) if item.last_result else None, started_at=item.created_at, completed_at=item.updated_at if item.status.value != "PENDING" else None)
+            self._replace(connection, external_operation_attempts, operation_id=str(item.id), attempt=item.attempt, case_id=cid, request=dump(intent.request), expected_remote_revision=intent.expected, status=item.status.value, failure_code=item.failure_code, result=dump(item.last_result.model_dump(mode="python")) if item.last_result and item.status != OperationStatus.PENDING else None, started_at=item.attempt_started_at or item.created_at, completed_at=item.updated_at if item.status.value != "PENDING" else None)
         for item in case.bindings.values():
             identity = item.external_identity.model_dump(mode="python"); identity_key = identity.get("key") or identity.get("node_id")
             self._replace(connection, external_bindings, id=str(item.id), case_id=cid, system=item.system.value, projection_plan_id=str(item.plan_id), item_id=str(item.item_id), current_plan_version=item.current_plan_version, generation_key=item.generation_key, external_identity_key=identity_key, external_identity=dump(identity), current_observation_sequence=item.current_observation_sequence, confirmed_at=item.confirmed_at)
@@ -512,13 +657,8 @@ class SqlAlchemyStore:
                         (mapping.normalized_status for mapping in case.policy.current.payload.mappings if mapping.system == snapshot.system and mapping.native_status == snapshot.native_status),
                         JiraStatus.UNKNOWN if snapshot.system == System.JIRA else GitHubStatus.UNKNOWN,
                     )
-                    labels = snapshot.owned_content.get("labels", [])
-                    if "specops-retired" in labels and ((snapshot.system == System.JIRA and normalized == JiraStatus.CANCELLED) or (snapshot.system == System.GITHUB and normalized == GitHubStatus.CLOSED)):
-                        lifecycle = Lifecycle.RETIRED
-                    elif "specops-retired" not in labels and normalized.value != "UNKNOWN":
-                        lifecycle = Lifecycle.ACTIVE
-                    else:
-                        lifecycle = Lifecycle.UNKNOWN
+                    from .service import WorkflowService
+                    lifecycle = WorkflowService._lifecycle(snapshot.system, normalized, snapshot.owned_content)
                     owned_hash = sha256(snapshot.owned_content)
                 self._replace(connection, remote_snapshots, binding_id=str(item.id), observation_sequence=sequence, observation_kind=snapshot.observation_kind.value, case_id=cid, operation_id=None, status_policy_id=str(policy.artifact_id), status_policy_version=policy.version, status_policy_hash=policy.semantic_hash, remote_revision=snapshot.remote_revision, expected_previous_remote_revision=snapshot.expected_previous_remote_revision, native_status=snapshot.native_status, normalized_status_at_acceptance=normalized.value if normalized else None, lifecycle_at_acceptance=lifecycle.value if lifecycle else None, owned_content=dump(snapshot.owned_content) if snapshot.owned_content else None, owned_content_hash=owned_hash, observed_at=item.confirmed_at)
         for edge in case.metadata.get("trace_edges", {}).values():
@@ -543,3 +683,40 @@ class SqlAlchemyStore:
         with self.engine.connect() as connection:
             rows = connection.execute(select(audit_events).where(audit_events.c.case_id == str(case_id)).order_by(audit_events.c.case_sequence)).mappings().all()
         return [AuditEvent(event_id=UUID(row["event_id"]), case_id=case_id, case_sequence=row["case_sequence"], command_id=UUID(row["command_id"]), command_name=row["command_name"], command_fingerprint=row["command_fingerprint"], actor=row["actor"] if row["actor"] == "SYSTEM" else UUID(row["actor"]), occurred_at=row["occurred_at"], target_ids=[UUID(value) for value in json.loads(row["target_ids"])], before_case_revision=row["before_case_revision"], after_case_revision=row["after_case_revision"], metadata=json.loads(row["metadata"]), result=json.loads(row["result"])) for row in rows]
+
+    def list_operation_attempts(self, case_id: UUID) -> list[OperationAttemptRecord]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    external_operation_attempts,
+                    external_operations.c.intent_id,
+                    external_operations.c.system,
+                    external_operations.c.action,
+                    external_operations.c.idempotency_key,
+                )
+                .join(
+                    external_operations,
+                    (external_operations.c.id == external_operation_attempts.c.operation_id)
+                    & (external_operations.c.case_id == external_operation_attempts.c.case_id),
+                )
+                .where(external_operation_attempts.c.case_id == str(case_id))
+                .order_by(external_operation_attempts.c.operation_id, external_operation_attempts.c.attempt)
+            ).mappings().all()
+        return [
+            OperationAttemptRecord(
+                operation_id=UUID(row["operation_id"]),
+                attempt=row["attempt"],
+                intent_id=UUID(row["intent_id"]),
+                system=System(row["system"]),
+                action=Action(row["action"]),
+                idempotency_key=row["idempotency_key"],
+                request=json.loads(row["request"]),
+                expected_remote_revision=row["expected_remote_revision"],
+                status=OperationStatus(row["status"]),
+                failure_code=row["failure_code"],
+                result=OperationResult.model_validate_json(row["result"]) if row["result"] else None,
+                started_at=row["started_at"],
+                completed_at=row["completed_at"],
+            )
+            for row in rows
+        ]

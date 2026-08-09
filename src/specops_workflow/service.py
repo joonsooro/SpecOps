@@ -51,7 +51,7 @@ class WorkflowService:
         database_url = database_url or os.environ.get("SPECOPS_DATABASE_URL")
         if database_url is not None:
             from .persistence import SqlAlchemyStore
-            self._store = SqlAlchemyStore(database_url)
+            self._store = SqlAlchemyStore(database_url, registry=self.registry)
         self._cases: dict[UUID, CaseState] = self._store.load_cases() if self._store else {}
         self._command_case: dict[UUID, UUID] = {
             command_id: case.id
@@ -80,7 +80,7 @@ class WorkflowService:
         prior = case.command_results.get(command.command_id)
         if prior:
             if prior[0] != fingerprint: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return case, ReplayResult(result=prior[1].model_dump(mode="json", exclude_none=False)), fingerprint
+            return case, ReplayResult(stored_result=prior[1]), fingerprint
         if command.expected_case_revision != case.revision: raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
         return copy.deepcopy(case), None, fingerprint
 
@@ -95,8 +95,9 @@ class WorkflowService:
     def _persist_result(self, case: CaseState, name: str, command: BaseModel, fingerprint: str, result: BaseModel) -> None:
         # Persist the complete deterministic current trace after every mutation.
         # Historical version-scoped rows remain append-only in the relational store.
+        self._refresh_core_findings(case)
         edges = self._trace_edges(case)
-        if len(edges) > 200_000 or len(case.metadata.get("findings", {})) > 200_000:
+        if len(edges) > 200_000 or len(self._active_findings(case)) > 200_000:
             code = ErrorCode.INVALID_PROJECTION_PLAN if name in {"create_projection_plan", "revise_projection_plan"} else ErrorCode.INVALID_TRANSITION
             raise DomainError(code)
         case.metadata["trace_edges"] = {edge.id: edge for edge in edges}
@@ -117,12 +118,30 @@ class WorkflowService:
         direct = self._authority_scope(case, actor)
         if direct is not None and (scope is None or scope == direct): return None
         candidates = [item for item in case.delegations.values() if item.delegate_id == actor]
+        if not candidates and any(
+            item.delegate_id == actor and command_name in item.command_names
+            for other_case in self._cases.values()
+            if other_case.id != case.id
+            for item in other_case.delegations.values()
+        ):
+            raise DomainError(ErrorCode.DELEGATION_SCOPE_MISMATCH)
         now = self._now()
         active = [item for item in candidates if item.revoked_at is None and item.valid_from <= now <= item.valid_until]
         if candidates and not active: raise DomainError(ErrorCode.DELEGATION_NOT_ACTIVE)
+        expected_kind = {
+            "create_spec_package": ArtifactKind.SPEC_PACKAGE.value,
+            "revise_spec_package": ArtifactKind.SPEC_PACKAGE.value,
+            "mark_spec_package_ready": ArtifactKind.SPEC_PACKAGE.value,
+            "approve_spec_package": ArtifactKind.SPEC_PACKAGE.value,
+            "create_projection_plan": ArtifactKind.PROJECTION_PLAN.value,
+            "revise_projection_plan": ArtifactKind.PROJECTION_PLAN.value,
+            "approve_projection_plan": ArtifactKind.PROJECTION_PLAN.value,
+            "approve_status_policy": ArtifactKind.STATUS_POLICY.value,
+        }.get(command_name)
         for item in active:
             if command_name not in item.command_names: continue
             if scope is not None and item.domain.value != scope.value: continue
+            if item.artifact_kind is not None and item.artifact_kind != expected_kind: continue
             if item.artifact_id is not None and item.artifact_id != artifact_id: continue
             return item
         if active: raise DomainError(ErrorCode.DELEGATION_SCOPE_MISMATCH)
@@ -134,7 +153,7 @@ class WorkflowService:
             if owner != command.case_id: raise DomainError(ErrorCode.CROSS_CASE_REFERENCE)
             prior = self._cases[owner].command_results[command.command_id]
             if prior[0] != self._fingerprint("create_case", command): raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            return ReplayResult(result=prior[1].model_dump(mode="json", exclude_none=False))  # type: ignore[return-value]
+            return ReplayResult(stored_result=prior[1])  # type: ignore[return-value]
         if command.acting_actor_id != command.pm_actor_id: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
         if command.pm_actor_id == command.dev_lead_actor_id: raise DomainError(ErrorCode.AUTHORITY_SLOT_OCCUPIED)
         if command.case_id in self._cases: raise DomainError(ErrorCode.AUTHORITY_SLOT_OCCUPIED)
@@ -215,13 +234,21 @@ class WorkflowService:
         if replay: return replay  # type: ignore[return-value]
         finding = case.ambiguities.get(command.finding_id)
         if finding is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
-        actor_scope = self._authority_scope(case, command.acting_actor_id) if command.acting_actor_id != "SYSTEM" else None
         scopes = self._required_scopes(finding.domain)
+        actor_scope = self._authority_scope(case, command.acting_actor_id) if command.acting_actor_id != "SYSTEM" else None
+        delegation = None
         if actor_scope not in scopes:
-            active = [d for d in case.delegations.values() if d.delegate_id == command.acting_actor_id and "resolve_ambiguity_finding" in d.command_names]
-            if not active: raise DomainError(ErrorCode.AUTHORITY_REQUIRED)
-            actor_scope = ApprovalScope(active[0].domain.value)
-        delegation = self._authorize(case, command.acting_actor_id, "resolve_ambiguity_finding", scope=actor_scope)
+            candidates = [
+                d for d in case.delegations.values()
+                if d.delegate_id == command.acting_actor_id
+                and "resolve_ambiguity_finding" in d.command_names
+                and d.domain.value in {scope.value for scope in scopes}
+            ]
+            if not candidates:
+                self._authorize(case, command.acting_actor_id, "resolve_ambiguity_finding", scope=next(iter(scopes)))
+                raise DomainError(ErrorCode.DELEGATION_SCOPE_MISMATCH)
+            actor_scope = ApprovalScope(candidates[0].domain.value)
+            delegation = self._authorize(case, command.acting_actor_id, "resolve_ambiguity_finding", scope=actor_scope)
         prior = next((r for r in finding.resolutions if r.scope == actor_scope), None)
         now = self._now()
         if prior:
@@ -291,7 +318,7 @@ class WorkflowService:
         self._validate_package_shape(case, command.payload, ready=False, package_id=command.package_id)
         digest = self.registry.hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
         root = ArtifactRoot(ArtifactKind.SPEC_PACKAGE, command.package_id)
-        root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PackageState.DRAFT.value))
+        root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PackageState.DRAFT.value))
         case.package = root
         return self._finish(case, "create_spec_package", command, fp, SpecPackageResult, binding=root.binding, state=PackageState.DRAFT)  # type: ignore[return-value]
 
@@ -306,10 +333,10 @@ class WorkflowService:
         prior_package_binding = case.package.binding
         self._validate_package_shape(case, command.payload, ready=False, package_id=case.package.artifact_id)
         digest = self.registry.hash(ArtifactKind.SPEC_PACKAGE, command.content_schema_version, command.hash_schema_version, self._normalized_package_payload(command.payload))
-        case.package.revise(ArtifactVersion(case.package.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PackageState.DRAFT.value))
+        case.package.revise(ArtifactVersion(case.package.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PackageState.DRAFT.value))
         for plan in case.plans.values():
             current = plan.current; plan.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.STALE.value)
-            self._finding(case, FindingCategory.STALE_BINDING, [prior_package_binding.model_dump(mode="json"), case.package.binding.model_dump(mode="json")], case.package.binding.model_dump(mode="json"), prior_package_binding.model_dump(mode="json"))
+            self._finding(case, FindingCategory.STALE_BINDING, [prior_package_binding.model_dump(mode="json"), case.package.binding.model_dump(mode="json")], BindingValue(value=prior_package_binding), BindingValue(value=case.package.binding), BindingValue(value=prior_package_binding))
         return self._finish(case, "revise_spec_package", command, fp, SpecPackageResult, binding=case.package.binding, state=PackageState.DRAFT)  # type: ignore[return-value]
 
     def mark_spec_package_ready(self, command: MarkSpecPackageReadyCommand) -> SpecPackageResult:
@@ -330,10 +357,12 @@ class WorkflowService:
         if case.package is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         case.package.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
         current = case.package.current
-        if current.state not in {PackageState.READY.value, PackageState.APPROVED.value}: raise DomainError(ErrorCode.INVALID_TRANSITION)
-        delegation = self._authorize(case, command.acting_actor_id, "approve_spec_package", scope=command.scope, artifact_id=case.package.artifact_id)
         if any(item.artifact_id == case.package.artifact_id and item.artifact_version == current.version and item.artifact_hash == current.semantic_hash and item.scope == command.scope and item.actor_id == command.acting_actor_id for item in case.approvals):
             raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
+        if any(item.status == FindingStatus.OPEN and item.severity == Severity.BLOCKING.value for item in case.ambiguities.values()):
+            raise DomainError(ErrorCode.BLOCKING_FINDING)
+        if current.state not in {PackageState.READY.value, PackageState.APPROVED.value}: raise DomainError(ErrorCode.INVALID_TRANSITION)
+        delegation = self._authorize(case, command.acting_actor_id, "approve_spec_package", scope=command.scope, artifact_id=case.package.artifact_id)
         approval = ApprovalState(self.ids.new(), ArtifactKind.SPEC_PACKAGE.value, case.package.artifact_id, current.version, current.semantic_hash, command.scope, command.acting_actor_id, delegation.id if delegation else None, delegation.delegator_id if delegation else None, delegation.later_review_required if delegation else False, self._now())
         case.approvals.append(approval)
         scopes = {item.scope for item in case.approvals if item.artifact_id == case.package.artifact_id and item.artifact_version == current.version and item.artifact_hash == current.semantic_hash}
@@ -351,7 +380,13 @@ class WorkflowService:
 
     @staticmethod
     def _item_hash(target: PlanTarget, project_key: str | None, item: ProjectionItem) -> str:
-        return sha256({"schema": "projection-item-v1", "target": target.value, "project_key": project_key, "item": item.model_dump(mode="python", exclude_none=False)})
+        value = item.model_dump(mode="python", exclude_none=False)
+        value["source_unit_ids"] = sorted(value["source_unit_ids"], key=lambda unit: unit.bytes)
+        value["dependency_item_ids"] = sorted(value["dependency_item_ids"], key=lambda unit: unit.bytes)
+        value["body"]["source_unit_ids"] = sorted(value["body"]["source_unit_ids"], key=lambda unit: unit.bytes)
+        value["body"]["dependency_item_ids"] = sorted(value["body"]["dependency_item_ids"], key=lambda unit: unit.bytes)
+        value["body"]["acceptance_checks"] = sorted(value["body"]["acceptance_checks"], key=lambda row: row["check_id"].bytes)
+        return sha256({"schema": "projection-item-v1", "target": target.value, "project_key": project_key, "item": value})
 
     def _validate_plan(self, case: CaseState, payload: ProjectionPlanPayload) -> dict[UUID, str]:
         if case.package is None or case.package.current.state != PackageState.APPROVED.value: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
@@ -396,8 +431,19 @@ class WorkflowService:
                 jira_items = {value.item_id: value for value in jira_root.current.payload.items}
                 primary = jira_items.get(item.primary_jira_item_id)
                 if primary is None or not primary.implementation_required or set(primary.source_unit_ids) != set(item.source_unit_ids): raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
+                primary_binding = next(
+                    (
+                        value for value in case.bindings.values()
+                        if value.system == System.JIRA
+                        and value.plan_id == jira_root.artifact_id
+                        and value.item_id == item.primary_jira_item_id
+                    ),
+                    None,
+                )
                 binding = case.metadata.get("external_bindings", {}).get(item.primary_jira_item_id)
                 jira_key = binding.get("key") if isinstance(binding, dict) else None
+                if primary_binding is None or primary_binding.current_plan_version != jira_root.current.version:
+                    raise DomainError(ErrorCode.STALE_ARTIFACT_BINDING)
                 if jira_key is None or item.body.jira_key != jira_key or re.fullmatch(r"[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,17}", jira_key) is None: raise DomainError(ErrorCode.INVALID_PROJECTION_PLAN)
             render_structured_body(item.body, {}, jira_key=item.body.jira_key, sizing=True)
             hashes[item.item_id] = self._item_hash(payload.target, payload.project_key, item)
@@ -445,7 +491,7 @@ class WorkflowService:
         hashes = self._validate_plan(case, command.payload)
         digest = self.registry.hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
         root = ArtifactRoot(ArtifactKind.PROJECTION_PLAN, command.plan_id)
-        root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PlanState.READY.value))
+        root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PlanState.READY.value))
         case.plans[command.payload.target] = root
         case.metadata.setdefault("item_hashes", {})[(command.plan_id, 1)] = hashes
         return self._finish(case, "create_projection_plan", command, fp, ProjectionPlanResult, binding=root.binding, target=command.payload.target, state=PlanState.READY, derived_intent_ids=[])  # type: ignore[return-value]
@@ -465,15 +511,31 @@ class WorkflowService:
         digest = self.registry.hash(ArtifactKind.PROJECTION_PLAN, command.content_schema_version, command.hash_schema_version, self._normalized_plan_payload(command.payload))
         prior_items = {item.item_id: item for item in root.current.payload.items}; new_items = {item.item_id: item for item in command.payload.items}
         prior_hashes = case.metadata["item_hashes"][(root.artifact_id, root.current.version)]
-        reconciliation = {}
+        prior_tombstones = case.metadata.get("tombstones", {}).get(
+            (root.artifact_id, root.current.version), {}
+        )
+        tombstones = copy.deepcopy(prior_tombstones)
+        for item_id in set(tombstones) & set(new_items):
+            tombstones.pop(item_id)
+        reconciliation = {item_id: Action.RETIRE for item_id in tombstones}
         for item_id in set(prior_items) | set(new_items):
             if item_id not in prior_items: reconciliation[item_id] = Action.CREATE
-            elif item_id not in new_items: reconciliation[item_id] = Action.RETIRE if item_id in case.metadata.get("external_bindings", {}) else None
+            elif item_id not in new_items:
+                if item_id in case.metadata.get("external_bindings", {}):
+                    reconciliation[item_id] = Action.RETIRE
+                    tombstones[item_id] = {
+                        "item": copy.deepcopy(prior_items[item_id]),
+                        "prior_plan_version": root.current.version,
+                        "prior_plan_hash": root.current.semantic_hash,
+                    }
+                else:
+                    reconciliation[item_id] = None
             elif prior_hashes[item_id] == new_hashes[item_id]: reconciliation[item_id] = None
             else: reconciliation[item_id] = Action.UPDATE
-        root.revise(ArtifactVersion(root.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PlanState.READY.value))
+        root.revise(ArtifactVersion(root.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PlanState.READY.value))
         case.metadata.setdefault("item_hashes", {})[(root.artifact_id, root.current.version)] = new_hashes
         case.metadata.setdefault("reconciliation", {})[(root.artifact_id, root.current.version)] = reconciliation
+        case.metadata.setdefault("tombstones", {})[(root.artifact_id, root.current.version)] = tombstones
         case.metadata["intents"] = {
             intent_id: intent
             for intent_id, intent in case.metadata.get("intents", {}).items()
@@ -483,7 +545,7 @@ class WorkflowService:
             self._resolve_finding(case, FindingCategory.STALE_BINDING, [prior_package_binding.model_dump(mode="json"), case.package.binding.model_dump(mode="json")])
         if command.payload.target == PlanTarget.JIRA and PlanTarget.GITHUB in case.plans:
             gh = case.plans[PlanTarget.GITHUB]; current = gh.current; gh.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.STALE.value)
-            self._finding(case, FindingCategory.STALE_BINDING, [prior_plan_binding.model_dump(mode="json"), root.binding.model_dump(mode="json")], root.binding.model_dump(mode="json"), prior_plan_binding.model_dump(mode="json"))
+            self._finding(case, FindingCategory.STALE_BINDING, [prior_plan_binding.model_dump(mode="json"), root.binding.model_dump(mode="json")], BindingValue(value=prior_plan_binding), BindingValue(value=root.binding), BindingValue(value=prior_plan_binding))
         return self._finish(case, "revise_projection_plan", command, fp, ProjectionPlanResult, binding=root.binding, target=command.payload.target, state=PlanState.READY, derived_intent_ids=[])  # type: ignore[return-value]
 
     def approve_projection_plan(self, command: ApproveProjectionPlanCommand) -> ApprovalResult:
@@ -492,16 +554,26 @@ class WorkflowService:
         root = next((plan for plan in case.plans.values() if plan.artifact_id == command.expected_artifact_id), None)
         if root is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         root.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
-        if root.current.state not in {PlanState.READY.value, PlanState.APPROVED.value}: raise DomainError(ErrorCode.INVALID_TRANSITION)
         payload: ProjectionPlanPayload = root.current.payload
         required = {ApprovalScope.TECHNICAL} if payload.target == PlanTarget.GITHUB else ({ApprovalScope.BUSINESS} if any(item.domain in {Domain.BUSINESS, Domain.CROSS_DOMAIN} for item in payload.items) else set()) | ({ApprovalScope.TECHNICAL} if any(item.domain in {Domain.TECHNICAL, Domain.CROSS_DOMAIN} for item in payload.items) else set())
         if command.scope not in required: raise DomainError(ErrorCode.APPROVAL_BINDING_MISMATCH)
-        delegation = self._authorize(case, command.acting_actor_id, "approve_projection_plan", scope=command.scope, artifact_id=root.artifact_id)
         if any(item.artifact_id == root.artifact_id and item.artifact_version == root.current.version and item.artifact_hash == root.current.semantic_hash and item.scope == command.scope and item.actor_id == command.acting_actor_id for item in case.approvals): raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
+        pending_direct_review = any(
+            item.artifact_id == root.artifact_id
+            and item.artifact_version == root.current.version
+            and item.artifact_hash == root.current.semantic_hash
+            and item.scope == command.scope
+            and item.delegator_id == command.acting_actor_id
+            and item.later_review_required
+            for item in case.approvals
+        )
+        if root.current.state not in {PlanState.READY.value, PlanState.APPROVED.value} and not pending_direct_review:
+            raise DomainError(ErrorCode.INVALID_TRANSITION)
+        delegation = self._authorize(case, command.acting_actor_id, "approve_projection_plan", scope=command.scope, artifact_id=root.artifact_id)
         approval = ApprovalState(self.ids.new(), ArtifactKind.PROJECTION_PLAN.value, root.artifact_id, root.current.version, root.current.semantic_hash, command.scope, command.acting_actor_id, delegation.id if delegation else None, delegation.delegator_id if delegation else None, delegation.later_review_required if delegation else False, self._now())
         case.approvals.append(approval)
         scopes = {item.scope for item in case.approvals if item.artifact_id == root.artifact_id and item.artifact_version == root.current.version and item.artifact_hash == root.current.semantic_hash}
-        if required.issubset(scopes):
+        if required.issubset(scopes) and root.current.state in {PlanState.READY.value, PlanState.APPROVED.value}:
             current = root.current; root.versions[-1] = ArtifactVersion(current.version, current.semantic_hash, current.content_schema_version, current.hash_schema_version, current.payload, PlanState.APPROVED.value)
             if case.policy is not None and case.policy.current.state == PolicyState.APPROVED.value:
                 self._derive_content_intents(case)
@@ -538,28 +610,49 @@ class WorkflowService:
         case, replay, fp = self._begin("start_external_operation", command)
         if replay: return replay  # type: ignore[return-value]
         self._authorize(case, command.acting_actor_id, "start_external_operation")
+        existing_operation = case.operations.get(command.operation_id)
+        if existing_operation is not None and existing_operation.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN}:
+            raise DomainError(ErrorCode.OPERATION_RETRY_BLOCKED)
+        active = self._active_findings(case)
+        if any(value["category"] == FindingCategory.UNMAPPED_REMOTE_STATUS for value in active.values()):
+            raise DomainError(ErrorCode.UNMAPPED_REMOTE_STATUS)
+        if any(value["category"] != FindingCategory.STATUS_SYNC_REQUIRED for value in active.values()):
+            raise DomainError(ErrorCode.BLOCKING_FINDING)
         intent: OperationIntent | None = case.metadata.get("intents", {}).get(command.intent_id)
         if intent is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        global_idempotent = next(
+            (
+                operation
+                for stored_case in [case, *(value for value in self._cases.values() if value.id != case.id)]
+                for operation in stored_case.operations.values()
+                if operation.idempotency_key == command.idempotency_key
+            ),
+            None,
+        )
+        if global_idempotent is not None and (
+            global_idempotent.id != command.operation_id
+            or global_idempotent.intent.intent_id != command.intent_id
+            or global_idempotent.intent.fingerprint != intent.fingerprint
+        ):
+            raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
         idempotent = next((item for item in case.operations.values() if item.idempotency_key == command.idempotency_key), None)
         by_intent = next((item for item in case.operations.values() if item.intent.intent_id == command.intent_id), None)
         operation = case.operations.get(command.operation_id)
         if idempotent is not None and idempotent.id != command.operation_id: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if by_intent is not None and by_intent.id != command.operation_id: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        if operation is None:
-            active = self._active_findings(case)
-            if any(value["category"] == FindingCategory.UNMAPPED_REMOTE_STATUS for value in active.values()):
-                raise DomainError(ErrorCode.UNMAPPED_REMOTE_STATUS)
-            if any(value["category"] != FindingCategory.STATUS_SYNC_REQUIRED for value in active.values()):
-                raise DomainError(ErrorCode.BLOCKING_FINDING)
         now = self._now()
         if operation is None:
-            operation = OperationState(command.operation_id, intent, command.idempotency_key, OperationStatus.PENDING, 1, now, now)
+            operation = OperationState(command.operation_id, intent, command.idempotency_key, OperationStatus.PENDING, 1, now, now, attempt_started_at=now)
             case.operations[operation.id] = operation
         else:
             if operation.intent.intent_id != command.intent_id or operation.idempotency_key != command.idempotency_key or operation.intent.fingerprint != intent.fingerprint: raise DomainError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if operation.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN}: raise DomainError(ErrorCode.OPERATION_RETRY_BLOCKED)
-            if operation.status == OperationStatus.SUCCEEDED and operation.last_result is not None: return operation.last_result
-            operation.status = OperationStatus.PENDING; operation.attempt += 1; operation.failure_code = None; operation.updated_at = now
+            if operation.status == OperationStatus.SUCCEEDED and operation.last_result is not None:
+                case.command_results[command.command_id] = (fp, operation.last_result)
+                self._cases[case.id] = case
+                self._command_case[command.command_id] = case.id
+                return ReplayResult(stored_result=operation.last_result)  # type: ignore[return-value]
+            operation.status = OperationStatus.PENDING; operation.attempt += 1; operation.failure_code = None; operation.updated_at = now; operation.attempt_started_at = now
         if intent.action != Action.TRANSITION_STATUS:
             self._set_plan_state(case, intent.plan_binding.artifact_id, PlanState.APPLYING)
         case.revision += 1
@@ -578,8 +671,18 @@ class WorkflowService:
     def _matching_observation(self, case: CaseState, operation: OperationState, observation: RemoteObservation) -> BindingState:
         intent = operation.intent
         if observation.observation_kind != ObservationKind.FOUND: raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
+        item_id = UUID(str(intent.item_ref["item_id"]))
+        existing = next((item for item in case.bindings.values() if item.system == intent.system and item.plan_id == intent.plan_binding.artifact_id and item.item_id == item_id), None)
+        if existing is not None:
+            latest = next((snap for snap in reversed(existing.snapshots) if snap.remote_revision is not None), None)
+            expected = latest.remote_revision if latest else None
+            if observation.expected_previous_remote_revision != expected: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
         if observation.system != intent.system or observation.generation_key != intent.request.get("generation_key") or observation.package_binding != intent.package_binding or observation.plan_binding != intent.plan_binding or observation.jira_plan_binding != intent.jira_plan_binding or observation.status_policy_binding != intent.status_policy_binding:
             raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
+        if observation.system == System.GITHUB:
+            jira_root = case.plans.get(PlanTarget.JIRA)
+            if jira_root is None or observation.jira_plan_binding != jira_root.binding:
+                raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
         if sha256(observation.owned_content) != intent.request_owned_content_hash: raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
         recomputed = sha256({"schema": "operation-request-v1", "case_id": case.id, "system": intent.system, "action": intent.action, "generation_key": observation.generation_key, "item_ref": intent.item_ref, "package_binding": intent.package_binding, "plan_binding": intent.plan_binding, "status_policy_binding": intent.status_policy_binding, "request_owned_content_hash": intent.request_owned_content_hash, "external_identity": intent.existing, "expected_remote_revision": intent.expected, "target_normalized_status": intent.target_normalized_status, "contributing_rule_ids": intent.contributing_rule_ids})
         if recomputed != intent.fingerprint:
@@ -593,8 +696,6 @@ class WorkflowService:
         if intent.action == Action.TRANSITION_STATUS and normalized != intent.target_normalized_status:
             raise DomainError(ErrorCode.UNKNOWN_EXTERNAL_RESULT)
         identity_key = self._identity_key(intent.system, observation.external_identity)
-        item_id = UUID(str(intent.item_ref["item_id"]))
-        existing = next((item for item in case.bindings.values() if item.system == intent.system and item.plan_id == intent.plan_binding.artifact_id and item.item_id == item_id), None)
         if (
             intent.action == Action.CREATE
             and existing is not None
@@ -604,9 +705,6 @@ class WorkflowService:
         if intent.action != Action.CREATE and existing is None: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
         if existing is not None:
             if self._identity_key(intent.system, existing.external_identity) != identity_key: raise DomainError(ErrorCode.UNCONFIRMED_EXTERNAL_ID)
-            latest = next((snap for snap in reversed(existing.snapshots) if snap.remote_revision is not None), None)
-            expected = latest.remote_revision if latest else None
-            if observation.expected_previous_remote_revision != expected: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
             if any(snap.remote_revision == observation.remote_revision for snap in existing.snapshots): raise DomainError(ErrorCode.INVALID_TRANSITION)
             return existing
         if observation.expected_previous_remote_revision is not None: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
@@ -643,7 +741,7 @@ class WorkflowService:
                 operation.status = OperationStatus.SUCCEEDED; operation.confirmation = command.outcome.read_back; operation.confirmed_snapshot_sequence = binding.current_observation_sequence
         components = [operation.id, operation.attempt]
         if operation.status == OperationStatus.UNKNOWN:
-            self._finding(case, FindingCategory.UNKNOWN_EXTERNAL_RESULT, components, "matching confirmed read-back", "UNKNOWN")
+            self._finding(case, FindingCategory.UNKNOWN_EXTERNAL_RESULT, components, EntityValue(entity_kind=EntityKind.EXTERNAL_OPERATION, id=operation.id), OperationStateValue(value=OperationStatus.SUCCEEDED), OperationStateValue(value=OperationStatus.UNKNOWN))
         else:
             self._resolve_finding(case, FindingCategory.UNKNOWN_EXTERNAL_RESULT, components)
         operation.updated_at = now
@@ -676,7 +774,7 @@ class WorkflowService:
             expected = latest.remote_revision if latest else None
             if observation.expected_previous_remote_revision != expected: raise DomainError(ErrorCode.REMOTE_VERSION_MISMATCH)
             binding.snapshots.append(observation); binding.current_observation_sequence += 1
-            self._finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id], "FOUND", "NOT_FOUND")
+            self._finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id], EntityValue(entity_kind=EntityKind.EXTERNAL_BINDING, id=binding.id), ExternalValue(value=binding.external_identity), MissingValue())
             operation.status = OperationStatus.FAILED; operation.failure_code = "REMOTE_NOT_FOUND"
         else:
             binding = self._store_found(case, operation, command.observation)
@@ -711,8 +809,15 @@ class WorkflowService:
         value = payload.model_dump(mode="python", exclude_none=False)
         value["mappings"] = sorted(value["mappings"], key=lambda row: UUID(str(row["mapping_id"])).bytes)
         value["rules"] = sorted(value["rules"], key=lambda row: UUID(str(row["rule_id"])).bytes)
+        condition_order = {kind: index for index, kind in enumerate(ConditionKind)}
+        jira_order = {status: index for index, status in enumerate(JiraStatus)}
+        github_order = {status: index for index, status in enumerate(GitHubStatus)}
         for rule in value["rules"]:
             rule["item_ids"] = sorted(rule["item_ids"], key=lambda item: UUID(str(item)).bytes)
+            for condition in rule["all_of"]:
+                condition["jira_states"] = sorted(condition["jira_states"], key=jira_order.__getitem__)
+                condition["github_states"] = sorted(condition["github_states"], key=github_order.__getitem__)
+            rule["all_of"] = sorted(rule["all_of"], key=lambda condition: condition_order[condition["kind"]])
         return value
 
     def create_status_policy(self, command: CreateStatusPolicyCommand) -> StatusPolicyResult:
@@ -722,7 +827,7 @@ class WorkflowService:
         if case.policy is not None: raise DomainError(ErrorCode.INVALID_TRANSITION)
         self._validate_policy(case, command.payload)
         digest = self.registry.hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
-        root = ArtifactRoot(ArtifactKind.STATUS_POLICY, command.policy_id); root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PolicyState.READY.value)); case.policy = root
+        root = ArtifactRoot(ArtifactKind.STATUS_POLICY, command.policy_id); root.versions.append(ArtifactVersion(1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PolicyState.READY.value)); case.policy = root
         return self._finish(case, "create_status_policy", command, fp, StatusPolicyResult, binding=root.binding, state=PolicyState.READY)  # type: ignore[return-value]
 
     def revise_status_policy(self, command: ReviseStatusPolicyCommand) -> StatusPolicyResult:
@@ -733,7 +838,7 @@ class WorkflowService:
         if any(item.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN} for item in case.operations.values()): raise DomainError(ErrorCode.INVALID_TRANSITION)
         case.policy.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash); self._validate_policy(case, command.payload)
         digest = self.registry.hash(ArtifactKind.STATUS_POLICY, command.content_schema_version, command.hash_schema_version, self._normalized_policy_payload(command.payload))
-        case.policy.revise(ArtifactVersion(case.policy.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, command.payload, PolicyState.READY.value))
+        case.policy.revise(ArtifactVersion(case.policy.current.version + 1, digest, command.content_schema_version, command.hash_schema_version, copy.deepcopy(command.payload), PolicyState.READY.value))
         case.metadata["intents"] = {}
         return self._finish(case, "revise_status_policy", command, fp, StatusPolicyResult, binding=case.policy.binding, state=PolicyState.READY)  # type: ignore[return-value]
 
@@ -742,9 +847,9 @@ class WorkflowService:
         if replay: return replay  # type: ignore[return-value]
         if case.policy is None: raise DomainError(ErrorCode.RECORD_NOT_FOUND)
         case.policy.assert_binding(command.expected_artifact_id, command.expected_artifact_version, command.expected_artifact_hash)
+        if any(item.artifact_id == case.policy.artifact_id and item.artifact_version == case.policy.current.version and item.artifact_hash == case.policy.current.semantic_hash and item.scope == command.scope and item.actor_id == command.acting_actor_id for item in case.approvals): raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
         if case.policy.current.state not in {PolicyState.READY.value, PolicyState.APPROVED.value}: raise DomainError(ErrorCode.INVALID_TRANSITION)
         delegation = self._authorize(case, command.acting_actor_id, "approve_status_policy", scope=command.scope, artifact_id=case.policy.artifact_id)
-        if any(item.artifact_id == case.policy.artifact_id and item.artifact_version == case.policy.current.version and item.artifact_hash == case.policy.current.semantic_hash and item.scope == command.scope and item.actor_id == command.acting_actor_id for item in case.approvals): raise DomainError(ErrorCode.APPROVAL_ALREADY_EXISTS)
         approval = ApprovalState(self.ids.new(), ArtifactKind.STATUS_POLICY.value, case.policy.artifact_id, case.policy.current.version, case.policy.current.semantic_hash, command.scope, command.acting_actor_id, delegation.id if delegation else None, delegation.delegator_id if delegation else None, delegation.later_review_required if delegation else False, self._now()); case.approvals.append(approval)
         scopes = {item.scope for item in case.approvals if item.artifact_id == case.policy.artifact_id and item.artifact_version == case.policy.current.version and item.artifact_hash == case.policy.current.semantic_hash}
         if {ApprovalScope.BUSINESS, ApprovalScope.TECHNICAL}.issubset(scopes):
@@ -758,11 +863,14 @@ class WorkflowService:
         for target, root in case.plans.items():
             if root.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}: continue
             current_items = {item.item_id: item for item in root.current.payload.items}
-            prior_items = {item.item_id: item for item in root.versions[-2].payload.items} if len(root.versions) > 1 else {}
+            tombstones = case.metadata.get("tombstones", {}).get(
+                (root.artifact_id, root.current.version), {}
+            )
             reconciliation = case.metadata.get("reconciliation", {}).get((root.artifact_id, root.current.version), {})
-            candidate_ids = set(current_items) | {item_id for item_id, action in reconciliation.items() if action == Action.RETIRE}
+            candidate_ids = set(current_items) | set(tombstones)
             for item_id in sorted(candidate_ids, key=lambda value: value.bytes):
-                item = current_items.get(item_id) or prior_items.get(item_id)
+                tombstone = tombstones.get(item_id)
+                item = current_items.get(item_id) or (tombstone["item"] if tombstone else None)
                 if item is None:
                     continue
                 binding = next((value for value in case.bindings.values() if value.plan_id == root.artifact_id and value.item_id == item_id), None)
@@ -824,8 +932,7 @@ class WorkflowService:
                     jira_binding = jira_root.binding
                 owned_hash = sha256(request)
                 if action == Action.RETIRE:
-                    prior = root.versions[-2]
-                    item_ref = {"kind": "TOMBSTONE", "item_id": item.item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash, "prior_plan_id": root.artifact_id, "prior_plan_version": prior.version, "prior_plan_hash": prior.semantic_hash, "stable_binding_id": binding.id}
+                    item_ref = {"kind": "TOMBSTONE", "item_id": item.item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash, "prior_plan_id": root.artifact_id, "prior_plan_version": tombstone["prior_plan_version"], "prior_plan_hash": tombstone["prior_plan_hash"], "stable_binding_id": binding.id}
                 else:
                     item_ref = {"kind": "CURRENT", "item_id": item.item_id, "plan_id": root.artifact_id, "plan_version": root.current.version, "plan_hash": root.current.semantic_hash}
                 fingerprint = sha256({"schema": "operation-request-v1", "case_id": case.id, "system": system, "action": action, "generation_key": generation, "item_ref": item_ref, "package_binding": case.package.binding, "plan_binding": root.binding, "status_policy_binding": case.policy.binding, "request_owned_content_hash": owned_hash, "external_identity": existing, "expected_remote_revision": expected_revision, "target_normalized_status": None, "contributing_rule_ids": []})
@@ -838,7 +945,11 @@ class WorkflowService:
         """Derive deterministic status-sync findings and TRANSITION_STATUS intents."""
         if case.policy is None or case.policy.current.state != PolicyState.APPROVED.value or case.package is None:
             return
-        intents = dict(case.metadata.get("intents", {}))
+        intents = {
+            intent_id: intent
+            for intent_id, intent in case.metadata.get("intents", {}).items()
+            if intent.action != Action.TRANSITION_STATUS
+        }
         policy_binding = case.policy.binding
         for target, root in case.plans.items():
             if root.current.state not in {PlanState.APPROVED.value, PlanState.APPLYING.value, PlanState.APPLIED.value}:
@@ -893,18 +1004,23 @@ class WorkflowService:
                 binding = next(value for value in case.bindings.values() if value.plan_id == root.artifact_id and value.item_id == item_id)
                 latest = next(snapshot for snapshot in reversed(binding.snapshots) if snapshot.observation_kind == ObservationKind.FOUND)
                 normalized = self._mapping_for(case, system, latest.native_status)
+                if normalized is None:
+                    continue
                 distinct = {target for target, _ in targets}
                 rule_ids = sorted({rule_id for _, rule_id in targets}, key=lambda value: value.bytes)
                 if len(distinct) > 1:
                     components = [policy_binding.model_dump(mode="json"), StatusConflictSubtype.MULTIPLE_TARGETS.value, system.value, item_id, rule_ids]
-                    self._finding(case, FindingCategory.STATUS_CONFLICT, components, "one target", sorted(value.value for value in distinct))
+                    ordered_statuses = sorted(distinct, key=lambda value: list(JiraStatus if system == System.JIRA else GitHubStatus).index(value))
+                    self._finding(case, FindingCategory.STATUS_CONFLICT, components, EntityValue(entity_kind=EntityKind.PROJECTION_ITEM, id=item_id), MissingValue(), StatusSetValue(system=system, values=ordered_statuses))
                     continue
                 target_status = next(iter(distinct))
                 components = [policy_binding.model_dump(mode="json"), system.value, item_id, binding.id, target_status.value]
                 if normalized == target_status:
                     self._resolve_finding(case, FindingCategory.STATUS_SYNC_REQUIRED, components)
                     continue
-                self._finding(case, FindingCategory.STATUS_SYNC_REQUIRED, components, target_status.value, normalized.value if normalized else None)
+                self._finding(case, FindingCategory.STATUS_SYNC_REQUIRED, components, EntityValue(entity_kind=EntityKind.PROJECTION_ITEM, id=item_id), StatusValue(system=system, value=target_status), StatusValue(system=system, value=normalized))
+                if self._blocker_findings(case):
+                    continue
                 plan_binding = root.binding
                 request = latest.owned_content
                 request_hash = sha256(request)
@@ -922,22 +1038,56 @@ class WorkflowService:
     @staticmethod
     def _lifecycle(system: System, normalized: JiraStatus | GitHubStatus | None, owned: dict[str, Any] | None) -> Lifecycle:
         labels = (owned or {}).get("labels", [])
-        if "specops-retired" in labels and ((system == System.JIRA and normalized == JiraStatus.CANCELLED) or (system == System.GITHUB and normalized == GitHubStatus.CLOSED)): return Lifecycle.RETIRED
-        if "specops-retired" not in labels and normalized is not None and normalized.value != "UNKNOWN": return Lifecycle.ACTIVE
+        if labels == ["specops", "specops-retired"] and ((system == System.JIRA and normalized == JiraStatus.CANCELLED) or (system == System.GITHUB and normalized == GitHubStatus.CLOSED)): return Lifecycle.RETIRED
+        if labels == ["specops"] and normalized is not None and normalized.value != "UNKNOWN": return Lifecycle.ACTIVE
         return Lifecycle.UNKNOWN
 
-    def _finding(self, case: CaseState, category: FindingCategory, components: list[Any], expected: Any, observed: Any) -> UUID:
+    def _finding(self, case: CaseState, category: FindingCategory, components: list[Any], affected: FindingValue, expected: FindingValue, observed: FindingValue) -> UUID:
         name = {"case_id": case.id, "category": category.value, "components": components, "schema": "drift-finding-v1"}
         finding_id = uuid5(DRIFT_NAMESPACE, canonical_json(name).decode("utf-8"))
         existing = case.metadata.setdefault("findings", {}).get(finding_id)
         created_at = existing["created_at"] if existing else self._now()
-        case.metadata["findings"][finding_id] = {"category": category, "expected": expected, "observed": observed, "active": True, "created_at": created_at, "resolved_at": None, "affected": {"components": canonical_data(components)}}
+        case.metadata["findings"][finding_id] = {"category": category, "expected": expected, "observed": observed, "active": True, "created_at": created_at, "resolved_at": None, "affected": affected}
         return finding_id
 
     def _resolve_finding(self, case: CaseState, category: FindingCategory, components: list[Any]) -> None:
         finding_id = uuid5(DRIFT_NAMESPACE, canonical_json({"case_id": case.id, "category": category.value, "components": components, "schema": "drift-finding-v1"}).decode("utf-8"))
         item = case.metadata.get("findings", {}).get(finding_id)
         if item and item["active"]: item["active"] = False; item["resolved_at"] = self._now()
+
+    def _refresh_core_findings(self, case: CaseState) -> None:
+        for ambiguity in case.ambiguities.values():
+            components = [ambiguity.id]
+            if ambiguity.status == FindingStatus.OPEN and ambiguity.severity == Severity.BLOCKING.value:
+                self._finding(case, FindingCategory.AMBIGUITY_UNRESOLVED, components, EntityValue(entity_kind=EntityKind.AMBIGUITY_FINDING, id=ambiguity.id), FindingStateValue(value=FindingStatus.RESOLVED), FindingStateValue(value=FindingStatus.OPEN))
+            else:
+                self._resolve_finding(case, FindingCategory.AMBIGUITY_UNRESOLVED, components)
+        for approval in case.approvals:
+            components = [approval.id]
+            direct = any(
+                item.artifact_id == approval.artifact_id
+                and item.artifact_version == approval.artifact_version
+                and item.artifact_hash == approval.artifact_hash
+                and item.scope == approval.scope
+                and item.actor_id == approval.delegator_id
+                for item in case.approvals
+            )
+            if approval.later_review_required and not direct:
+                binding = ArtifactBinding(artifact_kind=ArtifactKind(approval.artifact_kind), artifact_id=approval.artifact_id, version=approval.artifact_version, semantic_hash=approval.artifact_hash)
+                delegated_value = ApprovalValue(binding=binding, scope=approval.scope, actor_id=approval.actor_id, delegation_id=approval.delegation_id)
+                expected_value = ApprovalValue(binding=binding, scope=approval.scope, actor_id=approval.delegator_id, delegation_id=None)
+                self._finding(case, FindingCategory.LATER_REVIEW_REQUIRED, components, delegated_value, expected_value, delegated_value)
+            else:
+                self._resolve_finding(case, FindingCategory.LATER_REVIEW_REQUIRED, components)
+        for ambiguity in case.ambiguities.values():
+            for resolution in ambiguity.resolutions:
+                components = [resolution.resolution_id]
+                if resolution.later_review_required and resolution.reviewed_at is None:
+                    observed = ResolutionReviewValue(finding_id=ambiguity.id, scope=resolution.scope, delegation_id=resolution.delegation_id, reviewed=False)
+                    expected = observed.model_copy(update={"reviewed": True})
+                    self._finding(case, FindingCategory.LATER_REVIEW_REQUIRED, components, observed, expected, observed)
+                else:
+                    self._resolve_finding(case, FindingCategory.LATER_REVIEW_REQUIRED, components)
 
     def submit_remote_snapshot(self, command: SubmitRemoteSnapshotCommand) -> SnapshotResult:
         case, replay, fp = self._begin("submit_remote_snapshot", command)
@@ -967,20 +1117,31 @@ class WorkflowService:
         binding.snapshots.append(observation); binding.current_observation_sequence += 1
         active: list[UUID] = []
         if observation.observation_kind == ObservationKind.NOT_FOUND:
-            active.append(self._finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id], "FOUND", "NOT_FOUND"))
+            active.append(self._finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id], EntityValue(entity_kind=EntityKind.EXTERNAL_BINDING, id=binding.id), ExternalValue(value=binding.external_identity), MissingValue()))
         else:
             self._resolve_finding(case, FindingCategory.MISSING_REMOTE_ITEM, [binding.id])
             normalized = self._mapping_for(case, observation.system, observation.native_status)
             unmapped_components = [case.policy.binding.model_dump(mode="json"), binding.id, observation.native_status]
-            if normalized is None: active.append(self._finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, unmapped_components, "mapped status", observation.native_status))
+            if normalized is None: active.append(self._finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, unmapped_components, EntityValue(entity_kind=EntityKind.EXTERNAL_BINDING, id=binding.id), NativeMappingKeyValue(system=observation.system, native_status=observation.native_status), MissingValue()))
             else: self._resolve_finding(case, FindingCategory.UNMAPPED_REMOTE_STATUS, unmapped_components)
             lifecycle = self._lifecycle(observation.system, normalized, observation.owned_content)
             lifecycle_components = [case.policy.binding.model_dump(mode="json"), StatusConflictSubtype.INVALID_LIFECYCLE.value, observation.system.value, binding.item_id, []]
-            if lifecycle == Lifecycle.UNKNOWN: active.append(self._finding(case, FindingCategory.STATUS_CONFLICT, lifecycle_components, "valid lifecycle", "UNKNOWN"))
+            expected_lifecycle = Lifecycle.RETIRED if all(item.item_id != binding.item_id for item in plan.current.payload.items) else Lifecycle.ACTIVE
+            if lifecycle == Lifecycle.UNKNOWN: active.append(self._finding(case, FindingCategory.STATUS_CONFLICT, lifecycle_components, EntityValue(entity_kind=EntityKind.EXTERNAL_BINDING, id=binding.id), LifecycleValue(value=expected_lifecycle), LifecycleValue(value=lifecycle)))
             else: self._resolve_finding(case, FindingCategory.STATUS_CONFLICT, lifecycle_components)
-            desired = next((intent for intent in case.metadata.get("intents", {}).values() if UUID(str(intent.item_ref["item_id"])) == binding.item_id), None)
+            desired_candidates = [
+                intent
+                for intent in [
+                    *case.metadata.get("intents", {}).values(),
+                    *(operation.intent for operation in case.operations.values()),
+                ]
+                if UUID(str(intent.item_ref["item_id"])) == binding.item_id
+                and intent.action != Action.TRANSITION_STATUS
+                and intent.plan_binding == observation.plan_binding
+            ]
+            desired = desired_candidates[-1] if desired_candidates else None
             if desired is not None and sha256(observation.owned_content) != desired.request_owned_content_hash:
-                active.append(self._finding(case, FindingCategory.CONTENT_DRIFT, [observation.plan_binding.model_dump(mode="json"), binding.item_id, binding.id], desired.request_owned_content_hash, sha256(observation.owned_content)))
+                active.append(self._finding(case, FindingCategory.CONTENT_DRIFT, [observation.plan_binding.model_dump(mode="json"), binding.item_id, binding.id], EntityValue(entity_kind=EntityKind.EXTERNAL_BINDING, id=binding.id), ContentValue(value=desired.request_owned_content_hash), ContentValue(value=sha256(observation.owned_content))))
             elif desired is not None:
                 self._resolve_finding(case, FindingCategory.CONTENT_DRIFT, [observation.plan_binding.model_dump(mode="json"), binding.item_id, binding.id])
         self._derive_content_intents(case)
@@ -996,6 +1157,13 @@ class WorkflowService:
 
     def _active_findings(self, case: CaseState) -> dict[UUID, dict[str, Any]]:
         return {key: value for key, value in case.metadata.get("findings", {}).items() if value.get("active")}
+
+    def _blocker_findings(self, case: CaseState) -> dict[UUID, dict[str, Any]]:
+        return {
+            key: value
+            for key, value in self._active_findings(case).items()
+            if value.get("category") != FindingCategory.STATUS_SYNC_REQUIRED
+        }
 
     def _pending_later_review(self, case: CaseState) -> list[UUID]:
         pending: list[UUID] = []
@@ -1023,55 +1191,117 @@ class WorkflowService:
 
     def _trace_edges(self, case: CaseState) -> list[TraceEdge]:
         if case.package is None: return []
-        relations: list[tuple[str, TraceEndpoint, TraceEndpoint]] = []
+        relations: list[tuple[TraceEdgeType, TraceEndpoint, TraceEndpoint]] = []
         payload: SpecPackagePayload = case.package.current.payload
-        for item in [*payload.requirements, *payload.technical_decisions]:
-            unit = TraceEndpoint(kind="PACKAGE_UNIT", id=item.unit_id, version=case.package.current.version)
-            relations.append(("PACKAGE_CONTAINS", TraceEndpoint(kind="SPEC_PACKAGE", id=case.package.artifact_id, version=case.package.current.version), unit))
-            for ref in item.source_refs: relations.append(("SOURCE_SUPPORTS", TraceEndpoint(kind="SOURCE_ARTIFACT", id=ref.artifact_id, version=ref.version), unit))
+        package_endpoint = TraceEndpoint(kind=TraceNodeKind.SPEC_PACKAGE, id=case.package.artifact_id, version=case.package.current.version)
+        unit_kinds = {
+            **{item.unit_id: TraceNodeKind.REQUIREMENT for item in payload.requirements},
+            **{item.unit_id: TraceNodeKind.TECHNICAL_DECISION for item in payload.technical_decisions},
+        }
+        for item, node_kind in [
+            *((item, TraceNodeKind.REQUIREMENT) for item in payload.requirements),
+            *((item, TraceNodeKind.TECHNICAL_DECISION) for item in payload.technical_decisions),
+        ]:
+            unit = TraceEndpoint(kind=node_kind, id=item.unit_id, version=case.package.current.version)
+            relations.append((TraceEdgeType.PACKAGE_TO_UNIT, package_endpoint, unit))
+            for ref in item.source_refs:
+                relations.append((TraceEdgeType.SOURCE_TO_UNIT, TraceEndpoint(kind=TraceNodeKind.SOURCE_ARTIFACT, id=ref.artifact_id, version=ref.version), unit))
         for check in payload.acceptance_checks:
-            endpoint = TraceEndpoint(kind="ACCEPTANCE_CHECK", id=check.check_id, version=case.package.current.version)
-            relations.append(("PACKAGE_CONTAINS", TraceEndpoint(kind="SPEC_PACKAGE", id=case.package.artifact_id, version=case.package.current.version), endpoint))
-            for ref in check.source_refs: relations.append(("SOURCE_SUPPORTS", TraceEndpoint(kind="SOURCE_ARTIFACT", id=ref.artifact_id, version=ref.version), endpoint))
+            endpoint = TraceEndpoint(kind=TraceNodeKind.ACCEPTANCE_CHECK, id=check.check_id, version=case.package.current.version)
+            relations.append((TraceEdgeType.PACKAGE_TO_UNIT, package_endpoint, endpoint))
+            for ref in check.source_refs:
+                relations.append((TraceEdgeType.SOURCE_TO_UNIT, TraceEndpoint(kind=TraceNodeKind.SOURCE_ARTIFACT, id=ref.artifact_id, version=ref.version), endpoint))
         jira = case.plans.get(PlanTarget.JIRA)
         if jira:
+            plan_endpoint = TraceEndpoint(kind=TraceNodeKind.PROJECTION_PLAN, id=jira.artifact_id, version=jira.current.version)
             for item in jira.current.payload.items:
-                target = TraceEndpoint(kind="JIRA_ITEM", id=item.item_id, version=jira.current.version)
-                for source in item.source_unit_ids: relations.append(("UNIT_PROJECTS_TO", TraceEndpoint(kind="PACKAGE_UNIT", id=source, version=case.package.current.version), target))
-                relations.append(("ITEM_BINDS_PLAN", target, TraceEndpoint(kind="PROJECTION_PLAN", id=jira.artifact_id, version=jira.current.version)))
+                target = TraceEndpoint(kind=TraceNodeKind.PROJECTION_ITEM, id=item.item_id, version=jira.current.version)
+                for source in item.source_unit_ids:
+                    relations.append((TraceEdgeType.UNIT_TO_JIRA_ITEM, TraceEndpoint(kind=unit_kinds[source], id=source, version=case.package.current.version), target))
+                if item.parent_item_id is not None:
+                    relations.append((TraceEdgeType.JIRA_PARENT, TraceEndpoint(kind=TraceNodeKind.PROJECTION_ITEM, id=item.parent_item_id, version=jira.current.version), target))
+                for dependency_id in item.dependency_item_ids:
+                    relations.append((TraceEdgeType.JIRA_DEPENDENCY, TraceEndpoint(kind=TraceNodeKind.PROJECTION_ITEM, id=dependency_id, version=jira.current.version), target))
+                relations.append((TraceEdgeType.ITEM_TO_PACKAGE, target, package_endpoint))
+                relations.append((TraceEdgeType.ITEM_TO_PLAN, target, plan_endpoint))
+                binding = next((value for value in case.bindings.values() if value.system == System.JIRA and value.plan_id == jira.artifact_id and value.item_id == item.item_id), None)
+                if binding is not None:
+                    relations.append((TraceEdgeType.JIRA_ITEM_TO_BINDING, target, TraceEndpoint(kind=TraceNodeKind.EXTERNAL_BINDING, id=binding.id)))
         github = case.plans.get(PlanTarget.GITHUB)
         if github and jira:
+            plan_endpoint = TraceEndpoint(kind=TraceNodeKind.PROJECTION_PLAN, id=github.artifact_id, version=github.current.version)
             for item in github.current.payload.items:
-                relations.append(("JIRA_MAPS_GITHUB", TraceEndpoint(kind="JIRA_ITEM", id=item.primary_jira_item_id, version=jira.current.version), TraceEndpoint(kind="GITHUB_ITEM", id=item.item_id, version=github.current.version)))
-        edges = []
+                target = TraceEndpoint(kind=TraceNodeKind.PROJECTION_ITEM, id=item.item_id, version=github.current.version)
+                jira_binding = next((value for value in case.bindings.values() if value.system == System.JIRA and value.plan_id == jira.artifact_id and value.item_id == item.primary_jira_item_id), None)
+                if jira_binding is not None:
+                    relations.append((TraceEdgeType.JIRA_BINDING_TO_GITHUB_ITEM, TraceEndpoint(kind=TraceNodeKind.EXTERNAL_BINDING, id=jira_binding.id), target))
+                github_binding = next((value for value in case.bindings.values() if value.system == System.GITHUB and value.plan_id == github.artifact_id and value.item_id == item.item_id), None)
+                if github_binding is not None:
+                    relations.append((TraceEdgeType.GITHUB_ITEM_TO_BINDING, target, TraceEndpoint(kind=TraceNodeKind.EXTERNAL_BINDING, id=github_binding.id)))
+                relations.append((TraceEdgeType.ITEM_TO_PACKAGE, target, package_endpoint))
+                relations.append((TraceEdgeType.ITEM_TO_PLAN, target, plan_endpoint))
+        edges: dict[UUID, TraceEdge] = {}
         for kind, source, target in relations:
             name = {"case_id": case.id, "edge_type": kind, "from": source.model_dump(mode="python", exclude_none=False), "schema": "trace-edge-v1", "to": target.model_dump(mode="python", exclude_none=False)}
-            edges.append(TraceEdge(id=uuid5(TRACE_NAMESPACE, canonical_json(name).decode("utf-8")), edge_type=kind, from_endpoint=source, to_endpoint=target))
-        return sorted(edges, key=lambda item: item.id.bytes)
+            edge = TraceEdge(id=uuid5(TRACE_NAMESPACE, canonical_json(name).decode("utf-8")), edge_type=kind, from_endpoint=source, to_endpoint=target)
+            edges[edge.id] = edge
+        return sorted(edges.values(), key=lambda item: item.id.bytes)
+
+    def _trace_complete(self, case: CaseState, edges: list[TraceEdge]) -> bool:
+        if case.package is None or PlanTarget.JIRA not in case.plans:
+            return False
+        jira = case.plans[PlanTarget.JIRA]
+        edge_types = {(edge.edge_type, edge.from_endpoint.id, edge.to_endpoint.id) for edge in edges}
+        delivery_units = {
+            item.unit_id
+            for item in [*case.package.current.payload.requirements, *case.package.current.payload.technical_decisions]
+            if item.delivery_required
+        }
+        projected_units = {source for edge_type, source, _ in edge_types if edge_type == TraceEdgeType.UNIT_TO_JIRA_ITEM}
+        if not delivery_units.issubset(projected_units):
+            return False
+        for item in jira.current.payload.items:
+            binding = next((value for value in case.bindings.values() if value.system == System.JIRA and value.plan_id == jira.artifact_id and value.item_id == item.item_id), None)
+            if binding is None or (TraceEdgeType.JIRA_ITEM_TO_BINDING, item.item_id, binding.id) not in edge_types:
+                return False
+        implementation_items = {item.item_id for item in jira.current.payload.items if item.implementation_required}
+        if implementation_items:
+            github = case.plans.get(PlanTarget.GITHUB)
+            if github is None:
+                return False
+            if {item.primary_jira_item_id for item in github.current.payload.items} != implementation_items:
+                return False
+            for item in github.current.payload.items:
+                jira_binding = next((value for value in case.bindings.values() if value.system == System.JIRA and value.plan_id == jira.artifact_id and value.item_id == item.primary_jira_item_id), None)
+                github_binding = next((value for value in case.bindings.values() if value.system == System.GITHUB and value.plan_id == github.artifact_id and value.item_id == item.item_id), None)
+                if jira_binding is None or github_binding is None:
+                    return False
+                if (TraceEdgeType.JIRA_BINDING_TO_GITHUB_ITEM, jira_binding.id, item.item_id) not in edge_types or (TraceEdgeType.GITHUB_ITEM_TO_BINDING, item.item_id, github_binding.id) not in edge_types:
+                    return False
+        return True
 
     def get_workflow_view(self, query: QueryOne) -> WorkflowView:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
-        stage = self._setup_stage(case); blockers = sorted(self._active_findings(case), key=lambda item: item.bytes); pending = self._pending_later_review(case)
-        return WorkflowView(case_id=case.id, revision=case.revision, current_package=case.package.binding if case.package else None, current_jira_plan=case.plans[PlanTarget.JIRA].binding if PlanTarget.JIRA in case.plans else None, current_github_plan=case.plans[PlanTarget.GITHUB].binding if PlanTarget.GITHUB in case.plans else None, current_status_policy=case.policy.binding if case.policy else None, setup_stage=stage, foundation_ready=stage == SetupStage.LINKED and not blockers and not pending, workflow_health=WorkflowHealth.BLOCKED if blockers else WorkflowHealth.HEALTHY, blocker_ids=blockers, pending_later_review_ids=pending)
+        stage = self._setup_stage(case); blockers = sorted(self._blocker_findings(case), key=lambda item: item.bytes); pending = self._pending_later_review(case)
+        trace_complete = self._trace_complete(case, self._trace_edges(case))
+        return WorkflowView(case_id=case.id, revision=case.revision, current_package=case.package.binding if case.package else None, current_jira_plan=case.plans[PlanTarget.JIRA].binding if PlanTarget.JIRA in case.plans else None, current_github_plan=case.plans[PlanTarget.GITHUB].binding if PlanTarget.GITHUB in case.plans else None, current_status_policy=case.policy.binding if case.policy else None, setup_stage=stage, foundation_ready=stage == SetupStage.LINKED and trace_complete and not blockers and not pending, workflow_health=WorkflowHealth.BLOCKED if blockers else WorkflowHealth.HEALTHY, blocker_ids=blockers, pending_later_review_ids=pending)
 
     def get_traceability_map(self, query: QueryOne) -> TraceabilityMap:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id); edges = self._trace_edges(case)
-        return TraceabilityMap(case_id=case.id, complete=not any(item["category"] == FindingCategory.TRACEABILITY_GAP for item in self._active_findings(case).values()), edges=edges)
+        return TraceabilityMap(case_id=case.id, complete=self._trace_complete(case, edges) and not any(item["category"] == FindingCategory.TRACEABILITY_GAP for item in self._active_findings(case).values()), edges=edges)
 
     def get_delivery_view(self, query: QueryOne) -> DeliveryView:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id); items: list[DeliveryItem] = []
         for target, root in case.plans.items():
             visible_items = list(root.current.payload.items)
-            if len(root.versions) > 1:
-                reconciliation = case.metadata.get("reconciliation", {}).get(
-                    (root.artifact_id, root.current.version), {}
-                )
+            tombstones = case.metadata.get("tombstones", {}).get(
+                (root.artifact_id, root.current.version), {}
+            )
+            if tombstones:
                 current_ids = {item.item_id for item in visible_items}
-                for prior_item in root.versions[-2].payload.items:
-                    if (
-                        prior_item.item_id in current_ids
-                        or reconciliation.get(prior_item.item_id) != Action.RETIRE
-                    ):
+                for item_id, tombstone in tombstones.items():
+                    prior_item = tombstone["item"]
+                    if item_id in current_ids:
                         continue
                     prior_binding = next(
                         (
@@ -1115,10 +1345,22 @@ class WorkflowService:
                 items.append(DeliveryItem(system=System(target.value), plan_id=root.artifact_id, plan_version=root.current.version, item_id=plan_item.item_id, external_identity=binding.external_identity if binding else None, normalized_status=normalized, lifecycle_state=lifecycle, remote_revision=latest.remote_revision if latest else None, pending_intent_ids=sorted(pending, key=lambda item: item.bytes)))
         items.sort(key=lambda item: (0 if item.system == System.JIRA else 1, item.item_id.bytes))
         if any(item.normalized_status.value == "UNKNOWN" or item.lifecycle_state == Lifecycle.UNKNOWN for item in items): state = DeliveryState.UNKNOWN
-        elif self._active_findings(case) or any(item.system == System.JIRA and item.normalized_status in {JiraStatus.BLOCKED, JiraStatus.CANCELLED} for item in items): state = DeliveryState.BLOCKED
+        elif self._blocker_findings(case) or any(item.system == System.JIRA and item.normalized_status in {JiraStatus.BLOCKED, JiraStatus.CANCELLED} for item in items): state = DeliveryState.BLOCKED
         else:
             jira_impl = {item.item_id for item in case.plans.get(PlanTarget.JIRA).current.payload.items if item.implementation_required} if PlanTarget.JIRA in case.plans else set()
-            done = bool(jira_impl) and all(item.normalized_status == JiraStatus.DONE for item in items if item.item_id in jira_impl)
+            github_by_jira = {
+                item.primary_jira_item_id: item.item_id
+                for item in case.plans.get(PlanTarget.GITHUB).current.payload.items
+            } if PlanTarget.GITHUB in case.plans else {}
+            delivery_by_id = {(item.system, item.item_id): item for item in items}
+            done = bool(jira_impl) and all(
+                delivery_by_id.get((System.JIRA, item_id)) is not None
+                and delivery_by_id[(System.JIRA, item_id)].normalized_status == JiraStatus.DONE
+                and github_by_jira.get(item_id) is not None
+                and delivery_by_id.get((System.GITHUB, github_by_jira[item_id])) is not None
+                and delivery_by_id[(System.GITHUB, github_by_jira[item_id])].normalized_status == GitHubStatus.CLOSED
+                for item_id in jira_impl
+            )
             state = DeliveryState.DONE if done and self.get_workflow_view(query).foundation_ready else DeliveryState.IN_PROGRESS if any(item.normalized_status.value in {"IN_PROGRESS", "DONE", "CLOSED"} for item in items) else DeliveryState.NOT_STARTED
         return DeliveryView(delivery_state=state, delivery_complete=state == DeliveryState.DONE, items=items)
 
@@ -1132,8 +1374,67 @@ class WorkflowService:
 
     def list_pending_operation_intents(self, query: UUIDListQuery) -> IntentPage:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        if self._blocker_findings(case):
+            return IntentPage(items=[], next_cursor=None)
         values = [item for item in case.metadata.get("intents", {}).values() if (query.after_cursor is None or item.intent_id.bytes > query.after_cursor.bytes) and not any(op.intent.intent_id == item.intent_id and op.status in {OperationStatus.PENDING, OperationStatus.UNKNOWN, OperationStatus.SUCCEEDED} for op in case.operations.values())]
         values.sort(key=lambda item: item.intent_id.bytes); page = values[:query.limit]; return IntentPage(items=page, next_cursor=page[-1].intent_id if len(values) > query.limit else None)
+
+    def list_approval_records(self, query: UUIDListQuery) -> ApprovalPage:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        values = [
+            ApprovalRecord(
+                approval_id=item.id,
+                artifact_binding=ArtifactBinding(
+                    artifact_kind=ArtifactKind(item.artifact_kind),
+                    artifact_id=item.artifact_id,
+                    version=item.artifact_version,
+                    semantic_hash=item.artifact_hash,
+                ),
+                scope=item.scope,
+                actor_id=item.actor_id,
+                delegation_id=item.delegation_id,
+                delegator_id=item.delegator_id,
+                later_review_required=item.later_review_required,
+                approved_at=item.approved_at,
+            )
+            for item in case.approvals
+            if query.after_cursor is None or item.id.bytes > query.after_cursor.bytes
+        ]
+        values.sort(key=lambda item: item.approval_id.bytes)
+        page = values[:query.limit]
+        return ApprovalPage(items=page, next_cursor=page[-1].approval_id if len(values) > query.limit else None)
+
+    def list_external_operation_attempts(self, query: OperationAttemptQuery) -> OperationAttemptPage:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        if self._store is not None:
+            values = self._store.list_operation_attempts(case.id)
+        else:
+            values = [
+                OperationAttemptRecord(
+                    operation_id=item.id,
+                    attempt=item.attempt,
+                    intent_id=item.intent.intent_id,
+                    system=item.intent.system,
+                    action=item.intent.action,
+                    idempotency_key=item.idempotency_key,
+                    request=item.intent.request,
+                    expected_remote_revision=item.intent.expected,
+                    status=item.status,
+                    failure_code=item.failure_code,
+                    result=item.last_result,
+                    started_at=item.attempt_started_at or item.created_at,
+                    completed_at=item.updated_at if item.status != OperationStatus.PENDING else None,
+                )
+                for item in case.operations.values()
+            ]
+        if query.after_cursor is not None:
+            cursor_id, cursor_attempt = query.after_cursor.rsplit(":", 1)
+            cursor = (UUID(cursor_id).bytes, int(cursor_attempt))
+            values = [item for item in values if (item.operation_id.bytes, item.attempt) > cursor]
+        values.sort(key=lambda item: (item.operation_id.bytes, item.attempt))
+        page = values[:query.limit]
+        next_cursor = f"{page[-1].operation_id}:{page[-1].attempt}" if len(values) > query.limit else None
+        return OperationAttemptPage(items=page, next_cursor=next_cursor)
 
     def list_audit_events(self, query: AuditQuery) -> AuditPage:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)

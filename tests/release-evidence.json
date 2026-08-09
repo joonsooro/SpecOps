@@ -1,0 +1,505 @@
+{
+  "authorization_evidence": {
+    "add_participant": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "approve_artifact": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "create_case": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "create_or_revise_status_policy": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "draft_package_or_projection": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "external_callback": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "grant_or_revoke_delegation": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "read_model": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "register_source_or_record_ambiguity": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "resolve_ambiguity": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ]
+  },
+  "derived_metrics": {
+    "accepted_rejecting_fixtures": {
+      "nodeid": "tests/test_feature_12_release_bar.py::test_all_22_stable_error_codes_have_executable_rejecting_fixtures",
+      "value": 0
+    },
+    "duplicate_bindings": {
+      "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+      "value": 0
+    },
+    "duplicate_operations": {
+      "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+      "value": 0
+    }
+  },
+  "ev_evidence": {
+    "EV-001": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-002": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_release_manifest_and_canonical_schema_snapshot_are_exact",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_all_22_stable_error_codes_have_executable_rejecting_fixtures",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-003": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_found_and_not_found_restart_is_publicly_equal",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_typed_approval_and_attempt_reads_survive_real_process_restart",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-004": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_domain_failure_rolls_back_every_table_and_public_read",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-005": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-006": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-007": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-008": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-009": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-010": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-011": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-012": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_authority_delegation_later_review_and_ambiguity_history",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-013": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_immutable_revisions_reverts_and_golden_hashes",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-014": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_immutable_revisions_reverts_and_golden_hashes",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-015": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_immutable_revisions_reverts_and_golden_hashes",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-016": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_immutable_revisions_reverts_and_golden_hashes",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-017": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_immutable_revisions_reverts_and_golden_hashes",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-018": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_source_trust_validates_shapes_without_reading_paths",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-019": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_projection_hierarchy_cycle_leaf_and_revision_contracts",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-020": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_projection_hierarchy_cycle_leaf_and_revision_contracts",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-021": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-022": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_projection_hierarchy_cycle_leaf_and_revision_contracts",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-023": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-024": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_projection_hierarchy_cycle_leaf_and_revision_contracts",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_jira_revision_emits_exact_new_changed_removed_matrix",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-025": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-026": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-027": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-028": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-029": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-030": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-031": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-032": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-033": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-034": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_unknown_update_reconciles_not_found_to_failed_without_new_binding",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-035": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-036": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-037": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_policy_intents_and_snapshot_drift_are_deterministic",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_status_sync_resolves_on_equality_and_conflicting_targets_block_intent",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-038": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_policy_intents_and_snapshot_drift_are_deterministic",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-039": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_jira_revision_emits_exact_new_changed_removed_matrix",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_policy_intents_and_snapshot_drift_are_deterministic",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_retirement_tombstone_blocks_until_found_proves_retired",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-040": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_trace_overflow_rejects_without_truncation_write_or_audit",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-041": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_clean_public_workflow_reaches_linked_with_exact_audit",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_jira_revision_emits_exact_new_changed_removed_matrix",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-042": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_fresh_migration_matches_metadata_and_append_only_contract",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-043": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_release_manifest_and_canonical_schema_snapshot_are_exact",
+        "outcome": "PASSED"
+      },
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_identity_and_changed_fingerprint_conflicts_are_executed",
+        "outcome": "PASSED"
+      }
+    ],
+    "EV-044": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_typed_approval_and_attempt_reads_survive_real_process_restart",
+        "outcome": "PASSED"
+      }
+    ]
+  },
+  "inventory": [
+    "EV-001",
+    "EV-002",
+    "EV-003",
+    "EV-004",
+    "EV-005",
+    "EV-006",
+    "EV-007",
+    "EV-008",
+    "EV-009",
+    "EV-010",
+    "EV-011",
+    "EV-012",
+    "EV-013",
+    "EV-014",
+    "EV-015",
+    "EV-016",
+    "EV-017",
+    "EV-018",
+    "EV-019",
+    "EV-020",
+    "EV-021",
+    "EV-022",
+    "EV-023",
+    "EV-024",
+    "EV-025",
+    "EV-026",
+    "EV-027",
+    "EV-028",
+    "EV-029",
+    "EV-030",
+    "EV-031",
+    "EV-032",
+    "EV-033",
+    "EV-034",
+    "EV-035",
+    "EV-036",
+    "EV-037",
+    "EV-038",
+    "EV-039",
+    "EV-040",
+    "EV-041",
+    "EV-042",
+    "EV-043",
+    "EV-044"
+  ],
+  "operation_evidence": {
+    "failed_changed_fingerprint_conflict": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_identity_and_changed_fingerprint_conflicts_are_executed",
+        "outcome": "PASSED"
+      }
+    ],
+    "failed_exact_retry": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "first_attempt_pending": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "idempotency_key_conflict": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "intent_id_conflict": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_identity_and_changed_fingerprint_conflicts_are_executed",
+        "outcome": "PASSED"
+      }
+    ],
+    "operation_id_conflict": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_identity_and_changed_fingerprint_conflicts_are_executed",
+        "outcome": "PASSED"
+      }
+    ],
+    "pending_retry_blocked": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "succeeded_exact_command_replay": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "succeeded_readback_reconcile": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "unknown_reconcile_found": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ],
+    "unknown_reconcile_not_found": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_unknown_update_reconciles_not_found_to_failed_without_new_binding",
+        "outcome": "PASSED"
+      }
+    ],
+    "unknown_retry_blocked": [
+      {
+        "nodeid": "tests/test_feature_12_release_bar.py::test_operation_retry_unknown_reconcile_and_replay_branches",
+        "outcome": "PASSED"
+      }
+    ]
+  },
+  "passed": true
+}

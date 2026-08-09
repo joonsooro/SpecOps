@@ -45,7 +45,7 @@ class BindingState:
 class OperationState:
     id: UUID; intent: OperationIntent; idempotency_key: str; status: OperationStatus; attempt: int
     created_at: datetime; updated_at: datetime; failure_code: str | None = None; confirmation: RemoteObservation | None = None
-    confirmed_snapshot_sequence: int | None = None; last_result: OperationResult | None = None
+    confirmed_snapshot_sequence: int | None = None; last_result: OperationResult | None = None; attempt_started_at: datetime | None = None
 
 
 @dataclass

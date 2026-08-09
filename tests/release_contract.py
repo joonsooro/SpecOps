@@ -7,6 +7,7 @@ from specops_workflow.errors import ErrorCode
 from specops_workflow.models import (
     AddParticipantCommand,
     AmbiguityFindingResult,
+    ApprovalPage,
     ApprovalResult,
     ApproveProjectionPlanCommand,
     ApproveSpecPackageCommand,
@@ -24,6 +25,7 @@ from specops_workflow.models import (
     IntentPage,
     MarkSpecPackageReadyCommand,
     OperationResult,
+    OperationAttemptPage,
     ParticipantResult,
     ProjectionPlanResult,
     RecordAmbiguityFindingCommand,
@@ -47,7 +49,7 @@ from specops_workflow.models import (
 )
 
 
-EV_IDS = tuple(f"EV-{number:03d}" for number in range(1, 43))
+EV_IDS = tuple(f"EV-{number:03d}" for number in range(1, 45))
 
 COMMAND_MODELS = (
     CreateCaseCommand,
@@ -94,6 +96,8 @@ READ_MODELS = (
     FindingPage,
     AuditPage,
     IntentPage,
+    ApprovalPage,
+    OperationAttemptPage,
 )
 
 PUBLIC_SCHEMA_MODELS = (*COMMAND_MODELS, *MUTATION_RESULT_MODELS, *READ_MODELS, ReplayResult)
@@ -126,6 +130,12 @@ OPERATION_BRANCHES = (
     "intent_id_conflict",
 )
 
+RELEASE_METRICS = (
+    "accepted_rejecting_fixtures",
+    "duplicate_operations",
+    "duplicate_bindings",
+)
+
 
 def schema_snapshot() -> dict[str, Any]:
     return {
@@ -145,7 +155,5 @@ def release_manifest() -> dict[str, Any]:
         "rejecting_fixtures": {item.value: f"reject_{item.value.lower()}" for item in ErrorCode},
         "authorization_counterparts": list(AUTHORIZATION_ROWS),
         "operation_branches": list(OPERATION_BRANCHES),
-        "accepted_rejecting_fixtures": 0,
-        "duplicate_operations": 0,
-        "duplicate_bindings": 0,
+        "runtime_metrics": list(RELEASE_METRICS),
     }

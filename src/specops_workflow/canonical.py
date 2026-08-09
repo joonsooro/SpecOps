@@ -73,10 +73,13 @@ class SchemaRegistry:
         if key in self._recipes: raise ValueError(f"recipe already registered: {key}")
         self._recipes[key] = recipe
 
-    def hash(self, kind: ArtifactKind, content_version: int, hash_version: int, payload: Any) -> str:
+    def validate(self, kind: ArtifactKind, content_version: int, hash_version: int, payload: Any) -> Any:
         recipe = self._recipes.get((kind, content_version, hash_version))
         if recipe is None: raise DomainError(ErrorCode.INVALID_TRANSITION, "unregistered content/hash recipe")
-        validated = recipe.validator(payload)
+        return recipe.validator(payload)
+
+    def hash(self, kind: ArtifactKind, content_version: int, hash_version: int, payload: Any) -> str:
+        validated = self.validate(kind, content_version, hash_version, payload)
         if isinstance(validated, BaseModel): validated = validated.model_dump(mode="python", exclude_none=False)
         return artifact_hash(kind, content_version, hash_version, validated)
 
@@ -89,4 +92,3 @@ def default_registry() -> SchemaRegistry:
     registry.register(HashRecipe(ArtifactKind.STATUS_POLICY, 1, 1, StatusPolicyPayload.model_validate))
     registry.register(HashRecipe(ArtifactKind.STATUS_POLICY, 1, 2, StatusPolicyPayload.model_validate))
     return registry
-

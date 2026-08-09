@@ -55,7 +55,8 @@ def test_expected_revision_and_command_replay_are_deterministic():
     first = service.add_participant(command)
     replay = service.add_participant(command)
     assert isinstance(replay, ReplayResult)
-    assert replay.result == first.model_dump(mode="json", exclude_none=False)
+    assert replay.kind == "REPLAY" and replay.mutated is False
+    assert replay.stored_result == first
     changed = command.model_copy(update={"actor_id": uuid4()})
     with pytest.raises(DomainError) as caught: service.add_participant(changed)
     assert caught.value.code == ErrorCode.IDEMPOTENCY_CONFLICT

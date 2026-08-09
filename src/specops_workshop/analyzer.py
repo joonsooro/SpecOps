@@ -240,6 +240,14 @@ class GroundingChecker(Protocol):
     def supports(self, claim: str, evidence_refs: tuple[SourceRef, ...]) -> bool: ...
 
 
+class AnalyzerProviderAvailabilityError(RuntimeError):
+    """Provider-neutral transport/availability failure."""
+
+
+class AnalyzerProviderSchemaError(RuntimeError):
+    """Provider-neutral strict response schema failure."""
+
+
 def proposal_id(session_id: UUID, entity_kind: str, proposal_key: str) -> UUID:
     return uuid5(PROPOSAL_NAMESPACE, f"{session_id}:{entity_kind}:{proposal_key}")
 

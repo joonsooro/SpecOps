@@ -25,6 +25,7 @@ from specops_workshop.analyzer import (
 from specops_workshop.api import DEMO_SESSION_ID, create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
 from specops_workshop.contracts import ProposalStatus
+from specops_workshop.contracts import AnalyzerFailureKind
 from specops_workshop.gate import WorkshopGate
 from specops_workshop.sources import SourceCatalog, SourceName
 
@@ -337,10 +338,15 @@ def test_ar_ev_005_invalid_provider_semantics_fail_whole_result_before_proposal(
     )
     before = workflow_view(app)
 
-    with pytest.raises((RuntimeError, ValueError, ValidationError)):
-        asyncio.run(app.state.gate.analyze_final_turn(DEMO_SESSION_ID, 1))
+    result = asyncio.run(app.state.gate.analyze_final_turn(DEMO_SESSION_ID, 1))
 
-    assert len(analyzer.requests) == 1
+    assert len(analyzer.requests) == 2
+    assert result.complete_package_proposal is None
+    assert result.finding_proposals == []
+    assert app.state.gate.latest_recovery(DEMO_SESSION_ID).failure_kind in {
+        AnalyzerFailureKind.ALIAS_VALIDATION,
+        AnalyzerFailureKind.PROVIDER_SCHEMA,
+    }
     assert app.state.workshop_store.pending_proposal(DEMO_SESSION_ID) is None
     assert workflow_view(app).revision == before.revision
     assert workflow_view(app).current_package is None
@@ -365,10 +371,10 @@ def test_ar_ev_005_stale_or_cross_case_snapshot_fails_before_proposal(
     )
     before = workflow_view(app)
 
-    with pytest.raises(ValueError, match="stale|cross-case"):
-        asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
+    result = asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
 
-    assert len(analyzer.requests) == 1
+    assert len(analyzer.requests) == 0
+    assert result.complete_package_proposal is None
     assert app.state.workshop_store.pending_proposal(DEMO_SESSION_ID) is None
     assert workflow_view(app).revision == before.revision
 

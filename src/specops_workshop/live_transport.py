@@ -234,6 +234,12 @@ class LiveTransport:
                             + finished.handoff.model_dump_json()
                         )
                 elif proposal is not None and proposal.next_question:
+                    recovery = self.gate.latest_recovery(self.session_id)
+                    if recovery is not None:
+                        await websocket.send_json({
+                            "type": "ANALYZER_RECOVERY",
+                            **recovery.model_dump(mode="json"),
+                        })
                     await session.send_text(
                         "Speak exactly this governed question and add nothing: "
                         + proposal.next_question
@@ -409,6 +415,13 @@ class LiveTransport:
                         "HANDOFF_READY. Summarize only these committed handoff facts: "
                         + finished.handoff.model_dump_json()
                     )
+                elif self.gate is not None and proposal.next_question:
+                    recovery = self.gate.latest_recovery(self.session_id)
+                    if recovery is not None:
+                        await websocket.send_json({
+                            "type": "ANALYZER_RECOVERY",
+                            **recovery.model_dump(mode="json"),
+                        })
                 next_sequence += 1
             elif event.type == VoiceEventType.OUTPUT_TRANSCRIPT:
                 if self._generation_blocked and not self._confirmation_prompt_active:
@@ -470,6 +483,13 @@ class LiveTransport:
                         "type": "FINISH_COMPLETE",
                         "handoff": finished.handoff.model_dump(mode="json"),
                     })
+                elif proposal is not None and proposal.next_question:
+                    recovery = self.gate.latest_recovery(self.session_id)
+                    if recovery is not None:
+                        await websocket.send_json({
+                            "type": "ANALYZER_RECOVERY",
+                            **recovery.model_dump(mode="json"),
+                        })
             elif value.get("type") == "FINISH":
                 if self.finish_coordinator is None:
                     await websocket.send_json({"type": "ERROR", "code": "FINISH_UNAVAILABLE"})

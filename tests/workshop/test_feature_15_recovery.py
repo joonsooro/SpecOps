@@ -134,7 +134,7 @@ def test_workshop_schema_has_no_audio_or_canonical_governance_storage(tmp_path):
     inspector = inspect(store.engine)
     table_names = set(inspector.get_table_names())
     assert table_names == {
-        "agent_interruptions", "analyzer_requests", "foundation_outbox", "latency_spans",
+        "agent_interruptions", "analyzer_checkpoints", "analyzer_requests", "foundation_outbox", "latency_spans",
         "package_proposals", "transcript_snapshots", "workshop_sessions",
     }
     columns = {

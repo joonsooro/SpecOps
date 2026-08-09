@@ -346,6 +346,13 @@ def _tokens(value: str) -> frozenset[str]:
     )
 
 
+def evidence_turn_fingerprint(final_turn: str) -> str:
+    normalized = _normalized(final_turn)
+    if not normalized:
+        raise ValueError("final PM turn must not be empty")
+    return sha256(normalized.encode("utf-8")).hexdigest()
+
+
 class DeterministicEvidenceRetriever:
     def __init__(
         self,
@@ -430,7 +437,7 @@ class DeterministicEvidenceRetriever:
             )
         return CandidateEvidenceSet(
             retrieval_policy_version=RETRIEVAL_POLICY_VERSION,
-            final_turn_fingerprint=sha256(normalized_turn.encode("utf-8")).hexdigest(),
+            final_turn_fingerprint=evidence_turn_fingerprint(final_turn),
             candidates=ranked,
             selected_aliases=selected,
             outcome=outcome,

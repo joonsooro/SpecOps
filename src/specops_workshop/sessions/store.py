@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import Column, Integer, MetaData, Table, Text, UniqueConstraint, create_engine, event, insert, select, update
+from sqlalchemy import Column, Integer, MetaData, Table, Text, UniqueConstraint, create_engine, event, insert, literal_column, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 
 from specops_workflow.models import SourceRef
 
 from ..contracts import (
+    AnalyzerCheckpoint,
+    AnalyzerCheckpointStage,
+    AnalyzerCheckpointStatus,
+    AnalyzerFailureKind,
+    AnalyzerRecoveryAction,
     CallState,
     ConversationPhase,
     FoundationOutbox,
@@ -87,6 +93,24 @@ analyzer_requests = Table(
     Column("effort", Text, nullable=False),
     Column("status", Text, nullable=False),
     Column("attempt_count", Integer, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+)
+analyzer_checkpoints = Table(
+    "analyzer_checkpoints", metadata,
+    Column("request_id", Text, primary_key=True),
+    Column("session_id", Text, nullable=False),
+    Column("turn_sequence", Integer, nullable=False),
+    Column("request_fingerprint", Text, nullable=False),
+    Column("source_fingerprint", Text, nullable=False),
+    Column("retrieval_fingerprint", Text, nullable=False),
+    Column("selected_aliases_json", Text, nullable=False),
+    Column("stage", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("failure_kind", Text),
+    Column("recovery_action", Text),
+    Column("proposal_ref", Text),
+    Column("provider_call_count", Integer, nullable=False),
     Column("created_at", Text, nullable=False),
     Column("updated_at", Text, nullable=False),
 )
@@ -381,6 +405,45 @@ class WorkshopStore:
                     analyzer_requests.c.request_id == str(request_id)
                 ).values(**values))
 
+    def analyzer_checkpoint(self, request_id: UUID) -> AnalyzerCheckpoint | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(analyzer_checkpoints).where(
+                analyzer_checkpoints.c.request_id == str(request_id)
+            )).mappings().one_or_none()
+        return None if row is None else self._analyzer_checkpoint(row)
+
+    def latest_analyzer_checkpoint(
+        self, session_id: UUID
+    ) -> AnalyzerCheckpoint | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(analyzer_checkpoints)
+                .where(analyzer_checkpoints.c.session_id == str(session_id))
+                .order_by(
+                    analyzer_checkpoints.c.updated_at.desc(),
+                    literal_column("rowid").desc(),
+                )
+                .limit(1)
+            ).mappings().one_or_none()
+        return None if row is None else self._analyzer_checkpoint(row)
+
+    def save_analyzer_checkpoint(
+        self, value: AnalyzerCheckpoint
+    ) -> AnalyzerCheckpoint:
+        values = self._analyzer_checkpoint_values(value)
+        with self.engine.begin() as connection:
+            existing = connection.execute(select(analyzer_checkpoints).where(
+                analyzer_checkpoints.c.request_id == str(value.request_id)
+            )).mappings().one_or_none()
+            if existing is None:
+                connection.execute(insert(analyzer_checkpoints).values(**values))
+            else:
+                self._assert_checkpoint_update(existing, value)
+                connection.execute(update(analyzer_checkpoints).where(
+                    analyzer_checkpoints.c.request_id == str(value.request_id)
+                ).values(**values))
+        return value
+
     def start_latency_span(self, value: LatencySpan) -> LatencySpan:
         if value.ended_at is not None or value.duration_ms is not None or value.outcome is not None:
             raise ValueError("a new latency span must be open")
@@ -521,11 +584,93 @@ class WorkshopStore:
             ))
         return value
 
+    def save_validated_proposal_checkpoint(
+        self,
+        proposal: PackageProposalRecord,
+        checkpoint: AnalyzerCheckpoint,
+        *,
+        commit_guard: Callable[[], None] | None = None,
+    ) -> PackageProposalRecord:
+        if (
+            checkpoint.stage != AnalyzerCheckpointStage.PENDING_MATERIALIZED
+            or checkpoint.proposal_ref != proposal.proposal_ref
+            or checkpoint.session_id != proposal.session_id
+        ):
+            raise ValueError("atomic proposal checkpoint identity mismatch")
+        checkpoint_values = self._analyzer_checkpoint_values(checkpoint)
+        with self.engine.begin() as connection:
+            if commit_guard is not None:
+                commit_guard()
+            existing_checkpoint = connection.execute(
+                select(analyzer_checkpoints).where(
+                    analyzer_checkpoints.c.request_id == str(checkpoint.request_id)
+                )
+            ).mappings().one_or_none()
+            if existing_checkpoint is not None:
+                self._assert_checkpoint_update(existing_checkpoint, checkpoint)
+            existing_proposal = connection.execute(
+                select(package_proposals).where(
+                    package_proposals.c.proposal_ref == proposal.proposal_ref
+                )
+            ).mappings().one_or_none()
+            if existing_proposal is None:
+                prior = connection.execute(select(package_proposals).where(
+                    package_proposals.c.session_id == str(proposal.session_id),
+                    package_proposals.c.status == ProposalStatus.PENDING.value,
+                )).mappings().one_or_none()
+                if prior is not None:
+                    connection.execute(update(package_proposals).where(
+                        package_proposals.c.proposal_ref == prior["proposal_ref"]
+                    ).values(
+                        status=ProposalStatus.SUPERSEDED.value,
+                        updated_at=_instant(proposal.created_at),
+                    ))
+                connection.execute(insert(package_proposals).values(
+                    proposal_ref=proposal.proposal_ref,
+                    session_id=str(proposal.session_id),
+                    version=proposal.version,
+                    base_foundation_revision=proposal.base_foundation_revision,
+                    analyzer_result_json=proposal.analyzer_result_json,
+                    status=proposal.status.value,
+                    created_at=_instant(proposal.created_at),
+                    updated_at=_instant(proposal.updated_at),
+                ))
+            elif self._proposal(existing_proposal) != proposal:
+                raise ValueError("proposal checkpoint content conflict")
+            if existing_checkpoint is None:
+                connection.execute(
+                    insert(analyzer_checkpoints).values(**checkpoint_values)
+                )
+            else:
+                connection.execute(update(analyzer_checkpoints).where(
+                    analyzer_checkpoints.c.request_id == str(checkpoint.request_id)
+                ).values(**checkpoint_values))
+            connection.execute(update(sessions).where(
+                sessions.c.session_id == str(proposal.session_id)
+            ).values(
+                pending_proposal_ref=(
+                    proposal.proposal_ref
+                    if proposal.status == ProposalStatus.PENDING
+                    else None
+                ),
+                updated_at=_instant(proposal.updated_at),
+            ))
+            if commit_guard is not None:
+                commit_guard()
+        return proposal
+
     def pending_proposal(self, session_id: UUID) -> PackageProposalRecord | None:
         with self.engine.connect() as connection:
             row = connection.execute(select(package_proposals).where(
                 package_proposals.c.session_id == str(session_id),
                 package_proposals.c.status == ProposalStatus.PENDING.value,
+            )).mappings().one_or_none()
+        return None if row is None else self._proposal(row)
+
+    def proposal(self, proposal_ref: str) -> PackageProposalRecord | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(select(package_proposals).where(
+                package_proposals.c.proposal_ref == proposal_ref
             )).mappings().one_or_none()
         return None if row is None else self._proposal(row)
 
@@ -584,6 +729,56 @@ class WorkshopStore:
         return result
 
     @staticmethod
+    def _analyzer_checkpoint_values(
+        value: AnalyzerCheckpoint,
+    ) -> dict[str, object]:
+        return {
+            "request_id": str(value.request_id),
+            "session_id": str(value.session_id),
+            "turn_sequence": value.turn_sequence,
+            "request_fingerprint": value.request_fingerprint,
+            "source_fingerprint": value.source_fingerprint,
+            "retrieval_fingerprint": value.retrieval_fingerprint,
+            "selected_aliases_json": json.dumps(
+                value.selected_aliases, separators=(",", ":")
+            ),
+            "stage": value.stage.value,
+            "status": value.status.value,
+            "failure_kind": (
+                None if value.failure_kind is None else value.failure_kind.value
+            ),
+            "recovery_action": (
+                None if value.recovery_action is None else value.recovery_action.value
+            ),
+            "proposal_ref": value.proposal_ref,
+            "provider_call_count": value.provider_call_count,
+            "created_at": _instant(value.created_at),
+            "updated_at": _instant(value.updated_at),
+        }
+
+    @staticmethod
+    def _assert_checkpoint_update(existing, value: AnalyzerCheckpoint) -> None:
+        immutable = {
+            "session_id": str(value.session_id),
+            "turn_sequence": value.turn_sequence,
+            "request_fingerprint": value.request_fingerprint,
+            "source_fingerprint": value.source_fingerprint,
+            "retrieval_fingerprint": value.retrieval_fingerprint,
+            "selected_aliases_json": json.dumps(
+                value.selected_aliases, separators=(",", ":")
+            ),
+        }
+        if any(existing[key] != expected for key, expected in immutable.items()):
+            raise ValueError("analyzer checkpoint identity conflict")
+        if (
+            existing["stage"] == AnalyzerCheckpointStage.PENDING_MATERIALIZED.value
+            and value.stage != AnalyzerCheckpointStage.PENDING_MATERIALIZED
+        ):
+            raise ValueError("analyzer checkpoint cannot regress")
+        if value.provider_call_count < existing["provider_call_count"]:
+            raise ValueError("analyzer provider call count cannot regress")
+
+    @staticmethod
     def _session(row) -> WorkshopSession:
         return WorkshopSession(
             session_id=UUID(row["session_id"]), case_id=UUID(row["case_id"]), pm_actor_id=UUID(row["pm_actor_id"]),
@@ -621,6 +816,34 @@ class WorkshopStore:
             proposal_ref=row["proposal_ref"], session_id=UUID(row["session_id"]), version=row["version"],
             base_foundation_revision=row["base_foundation_revision"], analyzer_result_json=row["analyzer_result_json"],
             status=ProposalStatus(row["status"]), created_at=_parse_instant(row["created_at"]),
+            updated_at=_parse_instant(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _analyzer_checkpoint(row) -> AnalyzerCheckpoint:
+        return AnalyzerCheckpoint(
+            request_id=UUID(row["request_id"]),
+            session_id=UUID(row["session_id"]),
+            turn_sequence=row["turn_sequence"],
+            request_fingerprint=row["request_fingerprint"],
+            source_fingerprint=row["source_fingerprint"],
+            retrieval_fingerprint=row["retrieval_fingerprint"],
+            selected_aliases=tuple(json.loads(row["selected_aliases_json"])),
+            stage=AnalyzerCheckpointStage(row["stage"]),
+            status=AnalyzerCheckpointStatus(row["status"]),
+            failure_kind=(
+                None
+                if row["failure_kind"] is None
+                else AnalyzerFailureKind(row["failure_kind"])
+            ),
+            recovery_action=(
+                None
+                if row["recovery_action"] is None
+                else AnalyzerRecoveryAction(row["recovery_action"])
+            ),
+            proposal_ref=row["proposal_ref"],
+            provider_call_count=row["provider_call_count"],
+            created_at=_parse_instant(row["created_at"]),
             updated_at=_parse_instant(row["updated_at"]),
         )
 

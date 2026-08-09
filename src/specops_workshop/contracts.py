@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -45,6 +45,33 @@ class OutboxStatus(StrEnum):
     REJECTED = "REJECTED"
 class ProposalStatus(StrEnum):
     PENDING = "PENDING"; SUPERSEDED = "SUPERSEDED"; REJECTED = "REJECTED"; COMMITTED = "COMMITTED"
+
+
+class AnalyzerCheckpointStage(StrEnum):
+    RETRIEVAL_VALIDATED = "RETRIEVAL_VALIDATED"
+    PENDING_MATERIALIZED = "PENDING_MATERIALIZED"
+
+
+class AnalyzerCheckpointStatus(StrEnum):
+    VALIDATED = "VALIDATED"
+    RECOVERY = "RECOVERY"
+
+
+class AnalyzerFailureKind(StrEnum):
+    PROVIDER_AVAILABILITY = "PROVIDER_AVAILABILITY"
+    PROVIDER_SCHEMA = "PROVIDER_SCHEMA"
+    ALIAS_VALIDATION = "ALIAS_VALIDATION"
+    GROUNDING = "GROUNDING"
+    GOVERNANCE = "GOVERNANCE"
+    DEADLINE = "DEADLINE"
+
+
+class AnalyzerRecoveryAction(StrEnum):
+    CLARIFY = "CLARIFY"
+    REQUEUE = "REQUEUE"
+    RETRY_TEXT = "RETRY_TEXT"
+    LOCK = "LOCK"
+    TEXT_FALLBACK = "TEXT_FALLBACK"
 
 
 class WorkshopSession(WorkshopModel):
@@ -114,6 +141,57 @@ class PackageProposalRecord(WorkshopModel):
     status: ProposalStatus
     created_at: datetime
     updated_at: datetime
+
+
+Fingerprint = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+CheckpointAlias = Annotated[
+    str, Field(pattern=r"^[a-z][a-z0-9-]{0,63}:[a-z][a-z0-9-]{0,63}$")
+]
+
+
+class AnalyzerCheckpoint(WorkshopModel):
+    request_id: UUID
+    session_id: UUID
+    turn_sequence: int = Field(ge=1)
+    request_fingerprint: Fingerprint
+    source_fingerprint: Fingerprint
+    retrieval_fingerprint: Fingerprint
+    selected_aliases: tuple[CheckpointAlias, ...] = Field(max_length=5)
+    stage: AnalyzerCheckpointStage
+    status: AnalyzerCheckpointStatus
+    failure_kind: AnalyzerFailureKind | None = None
+    recovery_action: AnalyzerRecoveryAction | None = None
+    proposal_ref: str | None = Field(default=None, max_length=240)
+    provider_call_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+    def model_post_init(self, _context) -> None:
+        if len(self.selected_aliases) != len(set(self.selected_aliases)):
+            raise ValueError("checkpoint aliases must be unique")
+        if self.stage == AnalyzerCheckpointStage.PENDING_MATERIALIZED:
+            if (
+                self.status != AnalyzerCheckpointStatus.VALIDATED
+                or self.proposal_ref is None
+                or self.failure_kind is not None
+                or self.recovery_action is not None
+            ):
+                raise ValueError("materialized checkpoint requires only a proposal reference")
+        elif self.proposal_ref is not None:
+            raise ValueError("retrieval checkpoint cannot reference a proposal")
+        if self.status == AnalyzerCheckpointStatus.RECOVERY:
+            if self.failure_kind is None or self.recovery_action is None:
+                raise ValueError("recovery checkpoint requires typed failure and action")
+        elif self.failure_kind is not None or self.recovery_action is not None:
+            raise ValueError("validated checkpoint cannot carry recovery fields")
+
+
+class AnalyzerRecoveryView(WorkshopModel):
+    failure_kind: AnalyzerFailureKind
+    recovery_action: AnalyzerRecoveryAction
+    checkpoint_stage: AnalyzerCheckpointStage
+    can_retry: bool
+    guidance: str = Field(min_length=1, max_length=240)
 
 
 class FinalTurnInput(WorkshopModel):

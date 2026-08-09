@@ -165,6 +165,12 @@ def create_app(
     async def recover_session() -> RecoveryView:
         return app.state.coordinator.recover(app.state.session_id)
 
+    @app.get("/api/analyzer/recovery")
+    async def analyzer_recovery():
+        if app.state.gate is None:
+            return None
+        return app.state.gate.latest_recovery(app.state.session_id)
+
     @app.post("/api/session/final-turn")
     async def final_turn(value: FinalTurnInput):
         committed = app.state.coordinator.commit_final_turn(

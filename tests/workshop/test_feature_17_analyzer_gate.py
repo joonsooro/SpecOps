@@ -21,7 +21,11 @@ from specops_workshop.analyzer import (
 )
 from specops_workshop.api import DEMO_SESSION_ID, create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
-from specops_workshop.contracts import ConversationPhase, ProposalStatus
+from specops_workshop.contracts import (
+    AnalyzerFailureKind,
+    ConversationPhase,
+    ProposalStatus,
+)
 from specops_workshop.gate import WorkshopGate
 from specops_workshop.gate import RegisteredEvidenceGrounding
 from specops_workshop.providers.openai_responses import TerraResponsesProvider
@@ -164,8 +168,9 @@ def test_ungrounded_or_wrong_phase_output_creates_no_proposal_or_foundation_muta
     app.state.coordinator.commit_final_turn(DEMO_SESSION_ID, turn_sequence=1, text="Resolve D-02 timezone configuration.", provider_request_id="pm-final-2")
     gate = direct_gate(app, AnalyzerFixture(semantic_draft), GroundingFixture(False))
     revision = app.state.workflow.get_workflow_view(QueryOne(case_id=app.state.bootstrap.case_id, acting_actor_id=app.state.bootstrap.pm_actor_id)).revision
-    with pytest.raises(ValueError, match="not grounded"):
-        asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
+    recovered = asyncio.run(gate.analyze_final_turn(DEMO_SESSION_ID, 1))
+    assert recovered.complete_package_proposal is None
+    assert gate.latest_recovery(DEMO_SESSION_ID).failure_kind == AnalyzerFailureKind.GROUNDING
     assert app.state.workshop_store.pending_proposal(DEMO_SESSION_ID) is None
     assert app.state.workflow.get_workflow_view(QueryOne(case_id=app.state.bootstrap.case_id, acting_actor_id=app.state.bootstrap.pm_actor_id)).revision == revision
     with pytest.raises(ValueError, match="HANDOFF_READY"):

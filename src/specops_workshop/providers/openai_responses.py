@@ -8,13 +8,18 @@ from uuid import uuid4
 
 from openai import AsyncOpenAI
 
-from ..analyzer import SemanticAnalyzerRequest, SemanticTurnDraft, SpecAnalyzerProvider
+from ..analyzer import (
+    AnalyzerProviderAvailabilityError,
+    AnalyzerProviderSchemaError,
+    SemanticAnalyzerRequest,
+    SemanticTurnDraft,
+    SpecAnalyzerProvider,
+)
 from ..config import TERRA_MODEL
 from ..privacy_egress import TerraPrivacyEgressGateway, assert_identity_free_schema
 
 
 TERRA_REQUEST_TIMEOUT_SECONDS = 30.0
-TERRA_PROMPT_CACHE_KEY = "specops-workshop-terra-alias-semantic-v2"
 TERRA_SEMANTIC_MAX_OUTPUT_TOKENS = 8192
 TerraRequestStage = Literal["ANALYSIS"]
 
@@ -47,7 +52,7 @@ class TerraRequestDiagnostic:
         }
 
 
-class TerraProviderRequestError(RuntimeError):
+class TerraProviderRequestError(AnalyzerProviderAvailabilityError):
     def __init__(
         self,
         *,
@@ -124,7 +129,9 @@ class TerraResponsesProvider(SpecAnalyzerProvider):
             return SemanticTurnDraft.model_validate_json(response.output_text)
         except Exception as exc:
             self._record_output_failure("SEMANTIC_VALIDATION", exc)
-            raise
+            raise AnalyzerProviderSchemaError(
+                "provider response failed strict semantic validation"
+            ) from exc
 
     def _record_output_failure(self, stage_name: str, exc: Exception) -> None:
         previous = self._request_diagnostics[-1] if self._request_diagnostics else None
@@ -150,8 +157,6 @@ class TerraResponsesProvider(SpecAnalyzerProvider):
             "reasoning": {"effort": request.effort},
             "store": False,
             "extra_headers": {"X-Client-Request-Id": client_request_id},
-            "prompt_cache_key": TERRA_PROMPT_CACHE_KEY,
-            "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
             "input": [{"role": "user", "content": list(content)}],
             "text": {
                 "format": {

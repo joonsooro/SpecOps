@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import time
+from collections.abc import Awaitable, Callable
 from uuid import UUID, uuid5
 
 from specops_workflow.enums import AmbiguityCategory, ApprovalScope, Domain, Severity
@@ -22,6 +25,8 @@ from specops_workflow.models import LineRange
 
 from .analyzer import (
     AcceptanceCheckProposal,
+    AnalyzerProviderAvailabilityError,
+    AnalyzerProviderSchemaError,
     AnalyzerTurnResult,
     CommittedPackageSemantics,
     CommittedSemanticContext,
@@ -43,13 +48,30 @@ from .analyzer import (
     proposal_id,
     validate_phase,
 )
-from .contracts import PackageProposalRecord, ProposalStatus
+from .analyzer_runtime import (
+    AnalyzerDeadlineExceeded,
+    AnalyzerSessionDeadline,
+    analyzer_request_fingerprint,
+    retrieval_checkpoint_fingerprint,
+    source_snapshot_fingerprint,
+)
+from .contracts import (
+    AnalyzerCheckpoint,
+    AnalyzerCheckpointStage,
+    AnalyzerCheckpointStatus,
+    AnalyzerFailureKind,
+    AnalyzerRecoveryAction,
+    AnalyzerRecoveryView,
+    PackageProposalRecord,
+    ProposalStatus,
+)
 from .evidence import (
     AliasMaterializer,
     DeterministicEvidenceRetriever,
     EvidenceIndex,
     RegisteredMarkdownSnapshot,
     RetrievalOutcome,
+    evidence_turn_fingerprint,
 )
 from .orchestration import WorkshopCoordinator
 from .sessions import WorkshopStore
@@ -132,6 +154,8 @@ class WorkshopGate:
         dev_lead_actor_id: UUID,
         telemetry=None,
         default_effort: str = "medium",
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.store = store; self.foundation = foundation; self.analyzer = analyzer; self.grounding = grounding; self.clock = clock
         self.evidence_index = evidence_index
@@ -140,6 +164,8 @@ class WorkshopGate:
         self.dev_lead_actor_id = dev_lead_actor_id
         self.telemetry = telemetry
         self.default_effort = default_effort
+        self.monotonic = monotonic
+        self.sleep = sleep
         self.coordinator = WorkshopCoordinator(
             store, foundation, clock=clock, telemetry=telemetry
         )
@@ -153,40 +179,243 @@ class WorkshopGate:
         purpose: str = "TURN",
         edit_instruction: str | None = None,
     ) -> AnalyzerTurnResult:
+        deadline = AnalyzerSessionDeadline.start(
+            monotonic=self.monotonic,
+            sleep=self.sleep,
+        )
         resolved_effort = self.default_effort if effort is None else effort
         if resolved_effort != "medium":
             raise ValueError("Workshop analyzer reasoning effort is pinned to medium")
         session = self.store.get_session(session_id)
-        snapshots = {value.turn_sequence: value for value in self.store.latest_snapshots(session_id)}
+        snapshots = {
+            value.turn_sequence: value
+            for value in self.store.latest_snapshots(session_id)
+        }
         final = snapshots.get(turn_sequence)
         if final is None:
             raise ValueError("only persisted provider-final PM evidence may be analyzed")
-        edit_identity = canonical_sha256(edit_instruction or "")
-        request_id = uuid5(GATE_NAMESPACE, f"{session_id}:analyze:{turn_sequence}:{final.version}:{resolved_effort}:{purpose}:{edit_identity}")
-        candidates = DeterministicEvidenceRetriever(self.evidence_index).retrieve(
-            final.normalized_text
+
+        committed_context = self._semantic_committed_context(session)
+        source_fingerprint = source_snapshot_fingerprint(self.evidence_index)
+        final_turn_fingerprint = evidence_turn_fingerprint(final.normalized_text)
+        request_fingerprint = analyzer_request_fingerprint(
+            source_fingerprint=source_fingerprint,
+            final_turn_fingerprint=final_turn_fingerprint,
+            committed_semantics_fingerprint=canonical_sha256(committed_context),
+            edit_instruction_fingerprint=canonical_sha256(edit_instruction or ""),
+            purpose=purpose,
+            phase=session.conversation_phase.value,
         )
-        if candidates.outcome == RetrievalOutcome.NEEDS_CLARIFICATION:
-            return AnalyzerTurnResult(
-                schema_version=1,
-                turn_source_ref=final.final_source_ref,
-                finding_proposals=[],
-                complete_package_proposal=None,
-                control_intent=ControlIntent.NONE,
-                control_target=None,
-                target_proposal_ref=None,
-                edit_instruction=None,
-                acknowledgement="Clarification needed",
-                next_question=candidates.clarification,
+        request_id = uuid5(
+            GATE_NAMESPACE,
+            f"{session_id}:analyze:{turn_sequence}:{request_fingerprint}",
+        )
+        span_id = None
+        if self.telemetry is not None:
+            span_id = self.telemetry.start(
+                session_id=session_id,
+                stage=TelemetryStage.ANALYZER,
+                operation_id=str(request_id),
             )
+
+        checkpoint = self.store.analyzer_checkpoint(request_id)
+        selected_aliases: tuple[str, ...] | None = None
+        retrieval_fingerprint: str | None = None
+        if checkpoint is not None:
+            if (
+                checkpoint.session_id != session_id
+                or checkpoint.turn_sequence != turn_sequence
+                or checkpoint.request_fingerprint != request_fingerprint
+                or checkpoint.source_fingerprint != source_fingerprint
+            ):
+                return self._recover(
+                    final_source_ref=final.final_source_ref,
+                    checkpoint=None,
+                    failure_kind=AnalyzerFailureKind.GOVERNANCE,
+                    recovery_action=AnalyzerRecoveryAction.LOCK,
+                    guidance="Resolve the analyzer checkpoint conflict before retrying?",
+                    span_id=span_id,
+                )
+            selected_aliases = checkpoint.selected_aliases
+            retrieval_fingerprint = retrieval_checkpoint_fingerprint(
+                source_fingerprint=source_fingerprint,
+                final_turn_fingerprint=final_turn_fingerprint,
+                selected_aliases=selected_aliases,
+            )
+            if retrieval_fingerprint != checkpoint.retrieval_fingerprint:
+                return self._recover(
+                    final_source_ref=final.final_source_ref,
+                    checkpoint=checkpoint,
+                    failure_kind=AnalyzerFailureKind.ALIAS_VALIDATION,
+                    recovery_action=AnalyzerRecoveryAction.CLARIFY,
+                    guidance="Clarify the selected agenda decision before retrying this turn?",
+                    span_id=span_id,
+                )
+            if checkpoint.stage == AnalyzerCheckpointStage.PENDING_MATERIALIZED:
+                record = (
+                    None
+                    if checkpoint.proposal_ref is None
+                    else self.store.proposal(checkpoint.proposal_ref)
+                )
+                if record is None or record.session_id != session_id:
+                    return self._recover(
+                        final_source_ref=final.final_source_ref,
+                        checkpoint=None,
+                        failure_kind=AnalyzerFailureKind.GOVERNANCE,
+                        recovery_action=AnalyzerRecoveryAction.LOCK,
+                        guidance="Resolve the missing validated proposal before retrying?",
+                        span_id=span_id,
+                    )
+                if record.status != ProposalStatus.PENDING:
+                    if span_id is not None:
+                        self.telemetry.finish(span_id, outcome=SpanOutcome.OK)
+                    return AnalyzerTurnResult(
+                        schema_version=1,
+                        turn_source_ref=final.final_source_ref,
+                        finding_proposals=[],
+                        complete_package_proposal=None,
+                        control_intent=ControlIntent.NONE,
+                        control_target=None,
+                        target_proposal_ref=None,
+                        edit_instruction=None,
+                        acknowledgement="Proposal already resolved",
+                        next_question=None,
+                    )
+                if (
+                    record.base_foundation_revision
+                    != session.expected_foundation_revision
+                    or session.pending_proposal_ref != record.proposal_ref
+                ):
+                    return self._recover(
+                        final_source_ref=final.final_source_ref,
+                        checkpoint=None,
+                        failure_kind=AnalyzerFailureKind.GOVERNANCE,
+                        recovery_action=AnalyzerRecoveryAction.LOCK,
+                        guidance="Resolve the governance blocker before retrying this turn?",
+                        span_id=span_id,
+                    )
+                resumed = AnalyzerTurnResult.model_validate_json(
+                    record.analyzer_result_json
+                )
+                validate_phase(resumed, session.conversation_phase)
+                self._validate_grounding(resumed)
+                self._validate_identities(session_id, resumed)
+                if span_id is not None:
+                    self.telemetry.finish(span_id, outcome=SpanOutcome.OK)
+                return resumed
+
+        if selected_aliases is None:
+            try:
+                deadline.ensure_hard_budget()
+                candidates = DeterministicEvidenceRetriever(
+                    self.evidence_index
+                ).retrieve(final.normalized_text)
+                selected_aliases = candidates.selected_aliases
+                retrieval_fingerprint = retrieval_checkpoint_fingerprint(
+                    source_fingerprint=source_fingerprint,
+                    final_turn_fingerprint=candidates.final_turn_fingerprint,
+                    selected_aliases=selected_aliases,
+                )
+                if candidates.outcome == RetrievalOutcome.NEEDS_CLARIFICATION:
+                    checkpoint = self._new_checkpoint(
+                        request_id=request_id,
+                        session_id=session_id,
+                        turn_sequence=turn_sequence,
+                        request_fingerprint=request_fingerprint,
+                        source_fingerprint=source_fingerprint,
+                        retrieval_fingerprint=retrieval_fingerprint,
+                        selected_aliases=(),
+                    )
+                    return self._recover(
+                        final_source_ref=final.final_source_ref,
+                        checkpoint=checkpoint,
+                        failure_kind=AnalyzerFailureKind.ALIAS_VALIDATION,
+                        recovery_action=AnalyzerRecoveryAction.CLARIFY,
+                        guidance=candidates.clarification
+                        or "Which agenda decision should ground this turn?",
+                        span_id=span_id,
+                    )
+                AliasMaterializer(self.evidence_index).materialize(
+                    case_id=session.case_id,
+                    requested_aliases=selected_aliases,
+                    selected_aliases=selected_aliases,
+                    current_snapshots=self.evidence_snapshots,
+                )
+                deadline.ensure_hard_budget()
+            except AnalyzerDeadlineExceeded:
+                return self._recover(
+                    final_source_ref=final.final_source_ref,
+                    checkpoint=None,
+                    failure_kind=AnalyzerFailureKind.DEADLINE,
+                    recovery_action=AnalyzerRecoveryAction.TEXT_FALLBACK,
+                    guidance="Continue by text now, or retry this turn later?",
+                    span_id=span_id,
+                )
+            except ValueError:
+                return self._recover(
+                    final_source_ref=final.final_source_ref,
+                    checkpoint=None,
+                    failure_kind=AnalyzerFailureKind.ALIAS_VALIDATION,
+                    recovery_action=AnalyzerRecoveryAction.CLARIFY,
+                    guidance=(
+                        "Clarify the selected agenda decision before retrying this turn?"
+                    ),
+                    span_id=span_id,
+                )
+            checkpoint = self._new_checkpoint(
+                request_id=request_id,
+                session_id=session_id,
+                turn_sequence=turn_sequence,
+                request_fingerprint=request_fingerprint,
+                source_fingerprint=source_fingerprint,
+                retrieval_fingerprint=retrieval_fingerprint,
+                selected_aliases=selected_aliases,
+            )
+            self.store.save_analyzer_checkpoint(checkpoint)
+        else:
+            try:
+                AliasMaterializer(self.evidence_index).materialize(
+                    case_id=session.case_id,
+                    requested_aliases=selected_aliases,
+                    selected_aliases=selected_aliases,
+                    current_snapshots=self.evidence_snapshots,
+                )
+            except ValueError:
+                return self._recover(
+                    final_source_ref=final.final_source_ref,
+                    checkpoint=checkpoint,
+                    failure_kind=AnalyzerFailureKind.ALIAS_VALIDATION,
+                    recovery_action=AnalyzerRecoveryAction.CLARIFY,
+                    guidance="Clarify the selected agenda decision before retrying this turn?",
+                    span_id=span_id,
+                )
+
+        if session.revision_locked:
+            return self._recover(
+                final_source_ref=final.final_source_ref,
+                checkpoint=checkpoint,
+                failure_kind=AnalyzerFailureKind.GOVERNANCE,
+                recovery_action=AnalyzerRecoveryAction.LOCK,
+                guidance="Resolve the governance blocker before retrying this turn?",
+                span_id=span_id,
+            )
+        if not deadline.can_start_provider_call():
+            return self._recover(
+                final_source_ref=final.final_source_ref,
+                checkpoint=checkpoint,
+                failure_kind=AnalyzerFailureKind.DEADLINE,
+                recovery_action=AnalyzerRecoveryAction.TEXT_FALLBACK,
+                guidance="Continue by text now, or retry this turn later?",
+                span_id=span_id,
+            )
+
         selected = tuple(
             SelectedSemanticEvidence(
-                alias=value.alias,
-                display_label=value.display_label,
-                text=value.text,
+                alias=alias,
+                display_label=self.evidence_index.unit_for(alias).display_label,
+                text=self.evidence_index.unit_for(alias).text,
             )
-            for value in candidates.candidates
-            if value.alias in candidates.selected_aliases
+            for alias in selected_aliases
         )
         request = SemanticAnalyzerRequest(
             schema_version=1,
@@ -196,102 +425,351 @@ class WorkshopGate:
             final_turn_text=final.normalized_text,
             business_context=self.business_context,
             candidates=selected,
-            committed_context=self._semantic_committed_context(session),
+            committed_context=committed_context,
             edit_instruction=edit_instruction,
-            remaining_budget_ms=25_000,
+            remaining_budget_ms=deadline.remaining_usable_ms,
         )
-        span_id = None
-        if self.telemetry is not None:
-            span_id = self.telemetry.start(
+        prior_provider_calls = (
+            0 if checkpoint is None else checkpoint.provider_call_count
+        )
+        result: AnalyzerTurnResult | None = None
+        calls_this_session = 0
+        last_failure = AnalyzerFailureKind.PROVIDER_AVAILABILITY
+        last_action = AnalyzerRecoveryAction.REQUEUE
+        last_guidance = "Continue by text, or retry this turn when analysis is available?"
+        for attempt in range(1, 3):
+            if not deadline.can_start_provider_call():
+                last_failure = AnalyzerFailureKind.DEADLINE
+                last_action = AnalyzerRecoveryAction.TEXT_FALLBACK
+                last_guidance = "Continue by text now, or retry this turn later?"
+                break
+            calls_this_session += 1
+            total_calls = prior_provider_calls + calls_this_session
+            self.store.record_analyzer_attempt(
+                request_id=request_id,
                 session_id=session_id,
-                stage=TelemetryStage.ANALYZER,
-                operation_id=str(request_id),
+                turn_sequence=turn_sequence,
+                effort=resolved_effort,
+                status="IN_FLIGHT",
+                attempt_count=total_calls,
+                now=self.clock.now(),
             )
-        self.store.record_analyzer_attempt(
-            request_id=request_id,
-            session_id=session_id,
-            turn_sequence=turn_sequence,
-            effort=resolved_effort,
-            status="IN_FLIGHT",
-            attempt_count=1,
-            now=self.clock.now(),
-        )
-        try:
-            draft = await self.analyzer.analyze(request)
-            draft = SemanticTurnDraft.model_validate(
-                draft.model_dump(mode="python")
-            )
-        except Exception as exc:
+            try:
+                raw = await deadline.run_provider(self.analyzer.analyze(request))
+                if not deadline.within_usable_window():
+                    raise AnalyzerDeadlineExceeded("provider cutoff exhausted")
+                draft = SemanticTurnDraft.model_validate(
+                    raw.model_dump(mode="python")
+                )
+            except AnalyzerDeadlineExceeded:
+                last_failure = AnalyzerFailureKind.DEADLINE
+                last_action = AnalyzerRecoveryAction.TEXT_FALLBACK
+                last_guidance = "Continue by text now, or retry this turn later?"
+            except (
+                AnalyzerProviderAvailabilityError,
+                ConnectionError,
+                OSError,
+                TimeoutError,
+            ):
+                last_failure = AnalyzerFailureKind.PROVIDER_AVAILABILITY
+                last_action = AnalyzerRecoveryAction.REQUEUE
+                last_guidance = (
+                    "Continue by text, or retry this turn when analysis is available?"
+                )
+            except (AnalyzerProviderSchemaError, AttributeError, TypeError, ValueError):
+                last_failure = AnalyzerFailureKind.PROVIDER_SCHEMA
+                last_action = AnalyzerRecoveryAction.RETRY_TEXT
+                last_guidance = "Retry this turn with the same selected evidence?"
+            else:
+                try:
+                    result = self._assemble_semantic_result(
+                        session_id=session_id,
+                        final_source_ref=final.final_source_ref,
+                        purpose=purpose,
+                        phase=session.conversation_phase,
+                        selected_aliases=selected_aliases,
+                        draft=draft,
+                    )
+                    validate_phase(result, session.conversation_phase)
+                    self._validate_grounding(result)
+                    if result.complete_package_proposal is not None:
+                        self._validate_identities(session_id, result)
+                    if not deadline.within_usable_window():
+                        raise AnalyzerDeadlineExceeded("usable deadline exhausted")
+                except AnalyzerDeadlineExceeded:
+                    result = None
+                    last_failure = AnalyzerFailureKind.DEADLINE
+                    last_action = AnalyzerRecoveryAction.TEXT_FALLBACK
+                    last_guidance = "Continue by text now, or retry this turn later?"
+                except Exception as exc:
+                    result = None
+                    last_failure = self._classify_local_failure(exc)
+                    last_action, last_guidance = self._recovery_policy(last_failure)
+                else:
+                    break
+            if (
+                attempt == 1
+                and last_failure
+                in {
+                    AnalyzerFailureKind.PROVIDER_AVAILABILITY,
+                    AnalyzerFailureKind.PROVIDER_SCHEMA,
+                    AnalyzerFailureKind.ALIAS_VALIDATION,
+                }
+                and await deadline.wait_for_retry()
+            ):
+                continue
+            break
+
+        if result is None:
             self.store.record_analyzer_attempt(
                 request_id=request_id,
                 session_id=session_id,
                 turn_sequence=turn_sequence,
                 effort=resolved_effort,
                 status="FAILED",
-                attempt_count=1,
+                attempt_count=prior_provider_calls + calls_this_session,
                 now=self.clock.now(),
             )
-            if span_id is not None:
-                self.telemetry.finish(
-                    span_id,
-                    outcome=SpanOutcome.ERROR,
-                    error_code="ANALYZER_UNAVAILABLE",
-                )
-            raise RuntimeError("analyzer semantic call failed") from exc
-        try:
-            result = self._assemble_semantic_result(
-                session_id=session_id,
+            recovery_checkpoint = checkpoint.model_copy(update={
+                "provider_call_count": prior_provider_calls + calls_this_session,
+                "updated_at": self.clock.now(),
+            })
+            return self._recover(
                 final_source_ref=final.final_source_ref,
-                purpose=purpose,
-                phase=session.conversation_phase,
-                selected_aliases=candidates.selected_aliases,
-                draft=draft,
+                checkpoint=recovery_checkpoint,
+                failure_kind=last_failure,
+                recovery_action=last_action,
+                guidance=last_guidance,
+                span_id=span_id,
             )
-            validate_phase(result, session.conversation_phase)
-            self._validate_grounding(result)
-            if result.complete_package_proposal is not None:
-                self._validate_identities(session_id, result)
-        except Exception:
-            self.store.record_analyzer_attempt(
-                request_id=request_id,
+
+        total_calls = prior_provider_calls + calls_this_session
+        if result.complete_package_proposal is not None:
+            latest = self.store.latest_proposal(session_id)
+            version = 1 if latest is None else latest.version + 1
+            proposal_ref = (
+                "workshop-patch-"
+                f"{proposal_id(session_id, 'package', result.complete_package_proposal.proposal_key)}"
+                f"-v{version}"
+            )
+            now = self.clock.now()
+            proposal = PackageProposalRecord(
+                proposal_ref=proposal_ref,
                 session_id=session_id,
-                turn_sequence=turn_sequence,
-                effort=resolved_effort,
-                status="FAILED",
-                attempt_count=1,
-                now=self.clock.now(),
+                version=version,
+                base_foundation_revision=session.expected_foundation_revision,
+                analyzer_result_json=result.model_dump_json(),
+                status=ProposalStatus.PENDING,
+                created_at=now,
+                updated_at=now,
             )
-            if span_id is not None:
-                self.telemetry.finish(
-                    span_id,
-                    outcome=SpanOutcome.ERROR,
-                    error_code="ANALYZER_SEMANTIC_REJECTED",
+            materialized_checkpoint = checkpoint.model_copy(update={
+                "stage": AnalyzerCheckpointStage.PENDING_MATERIALIZED,
+                "status": AnalyzerCheckpointStatus.VALIDATED,
+                "failure_kind": None,
+                "recovery_action": None,
+                "proposal_ref": proposal_ref,
+                "provider_call_count": total_calls,
+                "updated_at": now,
+            })
+            try:
+                self.store.save_validated_proposal_checkpoint(
+                    proposal,
+                    materialized_checkpoint,
+                    commit_guard=deadline.ensure_hard_budget,
                 )
-            raise
+            except AnalyzerDeadlineExceeded:
+                return self._recover(
+                    final_source_ref=final.final_source_ref,
+                    checkpoint=checkpoint.model_copy(update={
+                        "provider_call_count": total_calls,
+                        "updated_at": self.clock.now(),
+                    }),
+                    failure_kind=AnalyzerFailureKind.DEADLINE,
+                    recovery_action=AnalyzerRecoveryAction.TEXT_FALLBACK,
+                    guidance="Continue by text now, or retry this turn later?",
+                    span_id=span_id,
+                )
+            except Exception:
+                return self._recover(
+                    final_source_ref=final.final_source_ref,
+                    checkpoint=checkpoint.model_copy(update={
+                        "provider_call_count": total_calls,
+                        "updated_at": self.clock.now(),
+                    }),
+                    failure_kind=AnalyzerFailureKind.GOVERNANCE,
+                    recovery_action=AnalyzerRecoveryAction.LOCK,
+                    guidance="Resolve the governance blocker before retrying this turn?",
+                    span_id=span_id,
+                )
+        elif result.control_intent in {
+            ControlIntent.CONFIRM,
+            ControlIntent.EDIT,
+            ControlIntent.REJECT,
+        }:
+            self.apply_control(session_id, result, confirmation_context=True)
+
         self.store.record_analyzer_attempt(
             request_id=request_id,
             session_id=session_id,
             turn_sequence=turn_sequence,
             effort=resolved_effort,
             status="CONFIRMED",
-            attempt_count=1,
+            attempt_count=total_calls,
             now=self.clock.now(),
         )
         if span_id is not None:
             self.telemetry.finish(span_id, outcome=SpanOutcome.OK)
-        if result.complete_package_proposal is not None:
-            latest = self.store.latest_proposal(session_id)
-            version = 1 if latest is None else latest.version + 1
-            proposal_ref = f"workshop-patch-{proposal_id(session_id, 'package', result.complete_package_proposal.proposal_key)}-v{version}"
-            self.store.save_proposal(PackageProposalRecord(
-                proposal_ref=proposal_ref, session_id=session_id, version=version,
-                base_foundation_revision=session.expected_foundation_revision,
-                analyzer_result_json=result.model_dump_json(), status=ProposalStatus.PENDING,
-                created_at=self.clock.now(), updated_at=self.clock.now(),
-            ))
-        elif result.control_intent in {ControlIntent.CONFIRM, ControlIntent.EDIT, ControlIntent.REJECT}:
-            self.apply_control(session_id, result, confirmation_context=True)
         return result
+
+    def latest_recovery(self, session_id: UUID) -> AnalyzerRecoveryView | None:
+        checkpoint = self.store.latest_analyzer_checkpoint(session_id)
+        if (
+            checkpoint is None
+            or checkpoint.status != AnalyzerCheckpointStatus.RECOVERY
+            or checkpoint.failure_kind is None
+            or checkpoint.recovery_action is None
+        ):
+            return None
+        _, guidance = self._recovery_policy(checkpoint.failure_kind)
+        return AnalyzerRecoveryView(
+            failure_kind=checkpoint.failure_kind,
+            recovery_action=checkpoint.recovery_action,
+            checkpoint_stage=checkpoint.stage,
+            can_retry=checkpoint.recovery_action != AnalyzerRecoveryAction.LOCK,
+            guidance=guidance,
+        )
+
+    def _new_checkpoint(
+        self,
+        *,
+        request_id: UUID,
+        session_id: UUID,
+        turn_sequence: int,
+        request_fingerprint: str,
+        source_fingerprint: str,
+        retrieval_fingerprint: str,
+        selected_aliases: tuple[str, ...],
+    ) -> AnalyzerCheckpoint:
+        now = self.clock.now()
+        return AnalyzerCheckpoint(
+            request_id=request_id,
+            session_id=session_id,
+            turn_sequence=turn_sequence,
+            request_fingerprint=request_fingerprint,
+            source_fingerprint=source_fingerprint,
+            retrieval_fingerprint=retrieval_fingerprint,
+            selected_aliases=selected_aliases,
+            stage=AnalyzerCheckpointStage.RETRIEVAL_VALIDATED,
+            status=AnalyzerCheckpointStatus.VALIDATED,
+            failure_kind=None,
+            recovery_action=None,
+            proposal_ref=None,
+            provider_call_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+
+    def _recover(
+        self,
+        *,
+        final_source_ref,
+        checkpoint: AnalyzerCheckpoint | None,
+        failure_kind: AnalyzerFailureKind,
+        recovery_action: AnalyzerRecoveryAction,
+        guidance: str,
+        span_id,
+    ) -> AnalyzerTurnResult:
+        if checkpoint is not None:
+            recovery = checkpoint.model_copy(update={
+                "stage": AnalyzerCheckpointStage.RETRIEVAL_VALIDATED,
+                "status": AnalyzerCheckpointStatus.RECOVERY,
+                "failure_kind": failure_kind,
+                "recovery_action": recovery_action,
+                "proposal_ref": None,
+                "updated_at": self.clock.now(),
+            })
+            self.store.save_analyzer_checkpoint(recovery)
+        if span_id is not None:
+            self.telemetry.finish(
+                span_id,
+                outcome=(
+                    SpanOutcome.CANCELLED
+                    if failure_kind == AnalyzerFailureKind.DEADLINE
+                    else SpanOutcome.ERROR
+                ),
+                error_code=f"ANALYZER_{failure_kind.value}",
+            )
+        acknowledgement = {
+            AnalyzerFailureKind.PROVIDER_AVAILABILITY: "Analysis unavailable",
+            AnalyzerFailureKind.PROVIDER_SCHEMA: "Analysis needs repair",
+            AnalyzerFailureKind.ALIAS_VALIDATION: "Evidence validation failed",
+            AnalyzerFailureKind.GROUNDING: "Grounding validation failed",
+            AnalyzerFailureKind.GOVERNANCE: "Governance blocked analysis",
+            AnalyzerFailureKind.DEADLINE: "Analysis deadline reached",
+        }[failure_kind]
+        return AnalyzerTurnResult(
+            schema_version=1,
+            turn_source_ref=final_source_ref,
+            finding_proposals=[],
+            complete_package_proposal=None,
+            control_intent=ControlIntent.NONE,
+            control_target=None,
+            target_proposal_ref=None,
+            edit_instruction=None,
+            acknowledgement=acknowledgement,
+            next_question=guidance,
+        )
+
+    @staticmethod
+    def _classify_local_failure(exc: Exception) -> AnalyzerFailureKind:
+        message = str(exc).casefold()
+        if "ground" in message:
+            return AnalyzerFailureKind.GROUNDING
+        if any(
+            token in message
+            for token in (
+                "alias",
+                "evidence source",
+                "evidence text",
+                "supporting excerpt",
+                "source snapshot",
+                "cross-case",
+            )
+        ):
+            return AnalyzerFailureKind.ALIAS_VALIDATION
+        return AnalyzerFailureKind.GOVERNANCE
+
+    @staticmethod
+    def _recovery_policy(
+        failure_kind: AnalyzerFailureKind,
+    ) -> tuple[AnalyzerRecoveryAction, str]:
+        return {
+            AnalyzerFailureKind.PROVIDER_AVAILABILITY: (
+                AnalyzerRecoveryAction.REQUEUE,
+                "Continue by text, or retry this turn when analysis is available?",
+            ),
+            AnalyzerFailureKind.PROVIDER_SCHEMA: (
+                AnalyzerRecoveryAction.RETRY_TEXT,
+                "Retry this turn with the same selected evidence?",
+            ),
+            AnalyzerFailureKind.ALIAS_VALIDATION: (
+                AnalyzerRecoveryAction.CLARIFY,
+                "Clarify the selected agenda decision before retrying this turn?",
+            ),
+            AnalyzerFailureKind.GROUNDING: (
+                AnalyzerRecoveryAction.CLARIFY,
+                "Clarify the unsupported claim before retrying this turn?",
+            ),
+            AnalyzerFailureKind.GOVERNANCE: (
+                AnalyzerRecoveryAction.LOCK,
+                "Resolve the governance blocker before retrying this turn?",
+            ),
+            AnalyzerFailureKind.DEADLINE: (
+                AnalyzerRecoveryAction.TEXT_FALLBACK,
+                "Continue by text now, or retry this turn later?",
+            ),
+        }[failure_kind]
 
     def apply_control(
         self,

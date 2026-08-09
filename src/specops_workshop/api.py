@@ -9,14 +9,18 @@ from fastapi.staticfiles import StaticFiles
 
 from specops_workflow import SystemClock
 
-from .bootstrap import BootstrapView, bootstrap_foundation
+from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
 from .config import Settings
+from .contracts import FinalTurnInput, RecoveryView
 from .delegation import load_delegation_fixture
+from .orchestration import WorkshopCoordinator
+from .sessions import WorkshopStore
 from .sources import SourceCatalog
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 SPEC_ENG_ROOT = BACKEND_ROOT.parent / "Spec_Eng"
+DEMO_SESSION_ID = stable_id("csv-export-workshop:session")
 
 
 def create_app(
@@ -38,15 +42,35 @@ def create_app(
         fixture,
         clock=runtime_clock,
     )
+    workshop_store = WorkshopStore(runtime_settings.workshop_database_url)
+    coordinator = WorkshopCoordinator(workshop_store, workflow, clock=runtime_clock)
+    coordinator.start_session(DEMO_SESSION_ID, case_id=bootstrap.case_id, pm_actor_id=bootstrap.pm_actor_id)
     app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
     app.state.settings = runtime_settings
     app.state.workflow = workflow
     app.state.bootstrap = bootstrap
     app.state.source_catalog = catalog
+    app.state.workshop_store = workshop_store
+    app.state.coordinator = coordinator
+    app.state.session_id = DEMO_SESSION_ID
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:
         return app.state.bootstrap
+
+    @app.get("/api/session", response_model=RecoveryView)
+    async def recover_session() -> RecoveryView:
+        return app.state.coordinator.recover(app.state.session_id)
+
+    @app.post("/api/session/final-turn")
+    async def final_turn(value: FinalTurnInput):
+        return app.state.coordinator.commit_final_turn(
+            app.state.session_id,
+            turn_sequence=value.turn_sequence,
+            text=value.text,
+            provider_request_id=value.provider_request_id,
+            correction_of_version=value.correction_of_version,
+        )
 
     frontend_dist = BACKEND_ROOT / "frontend" / "dist"
     if frontend_dist.is_dir():

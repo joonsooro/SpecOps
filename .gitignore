@@ -13,3 +13,5 @@ frontend/vite.config.d.ts
 dist/
 build/
 *.egg-info/
+frontend/test-results/
+frontend/playwright-report/

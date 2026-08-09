@@ -8,7 +8,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from specops_workflow import SystemClock
+from specops_workflow.errors import DomainError
+from specops_workflow.models import QueryOne, UUIDListQuery
 
+from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
 from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
 from .config import Settings
 from .contracts import FinalTurnInput, RecoveryView
@@ -19,6 +22,7 @@ from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider
 from .providers import GeminiLiveProvider
 from .providers.openai_responses import TerraResponsesProvider
+from .projections import PendingProposalView, ProposalControlInput, WorkshopProjection
 from .sessions import WorkshopStore
 from .sources import SourceCatalog, SourceName
 
@@ -105,13 +109,74 @@ def create_app(
 
     @app.post("/api/session/final-turn")
     async def final_turn(value: FinalTurnInput):
-        return app.state.coordinator.commit_final_turn(
+        committed = app.state.coordinator.commit_final_turn(
             app.state.session_id,
             turn_sequence=value.turn_sequence,
             text=value.text,
             provider_request_id=value.provider_request_id,
             correction_of_version=value.correction_of_version,
         )
+        if app.state.gate is not None:
+            await app.state.gate.analyze_final_turn(app.state.session_id, value.turn_sequence)
+        return committed
+
+    @app.get("/api/workshop", response_model=WorkshopProjection)
+    async def workshop_projection() -> WorkshopProjection:
+        recovered = app.state.coordinator.recover(app.state.session_id)
+        pending = app.state.workshop_store.pending_proposal(app.state.session_id)
+        proposal = None if pending is None else PendingProposalView(
+            record=pending,
+            result=AnalyzerTurnResult.model_validate_json(pending.analyzer_result_json),
+        )
+        query = QueryOne(case_id=bootstrap.case_id, acting_actor_id=bootstrap.pm_actor_id)
+        try:
+            governance = app.state.workflow.get_spec_package_governance(query)
+        except DomainError:
+            governance = None
+        reviews = app.state.workflow.list_review_requests(UUIDListQuery(
+            case_id=bootstrap.case_id,
+            acting_actor_id=bootstrap.pm_actor_id,
+        )).items
+        return WorkshopProjection(
+            session=recovered.session,
+            final_transcripts=recovered.final_transcripts,
+            pending_proposal=proposal,
+            governance=governance,
+            review_requests=tuple(reviews),
+        )
+
+    @app.post("/api/proposals/control")
+    async def proposal_control(value: ProposalControlInput):
+        if app.state.gate is None:
+            raise HTTPException(status_code=503, detail="Analyzer gate is unavailable")
+        snapshots = app.state.workshop_store.latest_snapshots(app.state.session_id)
+        if not snapshots:
+            raise HTTPException(status_code=409, detail="No final PM evidence is available")
+        control = AnalyzerTurnResult(
+            schema_version=1,
+            turn_source_ref=snapshots[-1].final_source_ref,
+            finding_proposals=[],
+            complete_package_proposal=None,
+            control_intent=ControlIntent(value.intent),
+            control_target=ControlTarget.WORKSHOP_PATCH,
+            target_proposal_ref=value.proposal_ref,
+            edit_instruction=value.edit_instruction,
+            acknowledgement=value.acknowledgement,
+            next_question=None,
+        )
+        try:
+            result = app.state.gate.apply_control(
+                app.state.session_id, control, confirmation_context=True
+            )
+            if value.intent == ControlIntent.EDIT:
+                await app.state.gate.analyze_final_turn(
+                    app.state.session_id,
+                    snapshots[-1].turn_sequence,
+                    edit_instruction=value.edit_instruction,
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {"status": None if result is None else result.status.value}
 
     @app.websocket("/ws/live")
     async def live_socket(websocket: WebSocket) -> None:

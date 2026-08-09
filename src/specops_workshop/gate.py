@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timezone
 from uuid import UUID, uuid5
 
 from specops_workflow.enums import ApprovalScope, Domain
+from specops_workflow.canonical import sha256 as canonical_sha256
 from specops_workflow.models import (
     AcceptanceCheck,
     ApproveSpecPackageItemCommand,
@@ -67,16 +69,25 @@ class WorkshopGate:
         self.store = store; self.foundation = foundation; self.analyzer = analyzer; self.grounding = grounding; self.clock = clock
         self.coordinator = WorkshopCoordinator(store, foundation, clock=clock)
 
-    async def analyze_final_turn(self, session_id: UUID, turn_sequence: int, *, effort: str = "low") -> AnalyzerTurnResult:
+    async def analyze_final_turn(
+        self,
+        session_id: UUID,
+        turn_sequence: int,
+        *,
+        effort: str = "low",
+        edit_instruction: str | None = None,
+    ) -> AnalyzerTurnResult:
         session = self.store.get_session(session_id)
         snapshots = {value.turn_sequence: value for value in self.store.latest_snapshots(session_id)}
         final = snapshots.get(turn_sequence)
         if final is None:
             raise ValueError("only persisted provider-final PM evidence may be analyzed")
-        request_id = uuid5(GATE_NAMESPACE, f"{session_id}:analyze:{turn_sequence}:{final.version}:{effort}")
+        edit_identity = canonical_sha256(edit_instruction or "")
+        request_id = uuid5(GATE_NAMESPACE, f"{session_id}:analyze:{turn_sequence}:{final.version}:{effort}:{edit_identity}")
         request = AnalyzerRequest(
             request_id=request_id, session_id=session_id, effort=effort, phase=session.conversation_phase,
-            final_turn=final, committed_context_json=self._committed_context(session),
+            final_turn=final,
+            committed_context_json=self._committed_context(session, edit_instruction),
         )
         result = None
         for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
@@ -361,9 +372,17 @@ class WorkshopGate:
         if any(not self.grounding.supports(claim, refs) for claim, refs in claims):
             raise ValueError("analyzer proposal is not grounded in its cited evidence")
 
-    def _committed_context(self, session) -> str:
-        try: return self.foundation.get_spec_package_governance(QueryOne(case_id=session.case_id, acting_actor_id=session.pm_actor_id)).model_dump_json()
-        except Exception: return "null"
+    def _committed_context(self, session, edit_instruction: str | None = None) -> str:
+        try:
+            governance = self.foundation.get_spec_package_governance(
+                QueryOne(case_id=session.case_id, acting_actor_id=session.pm_actor_id)
+            ).model_dump(mode="json")
+        except Exception:
+            governance = None
+        return json.dumps({
+            "governance": governance,
+            "edit_instruction": edit_instruction,
+        }, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def _materialize(session_id, proposed):

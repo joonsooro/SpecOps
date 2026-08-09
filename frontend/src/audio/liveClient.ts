@@ -39,6 +39,22 @@ export class LiveAudioClient {
     this.socket?.send(JSON.stringify({ type: "TEXT", text, turn_sequence: turnSequence, provider_request_id: providerRequestId }));
   }
 
+  setMuted(muted: boolean): void {
+    this.stream?.getAudioTracks().forEach((track) => { track.enabled = !muted; });
+  }
+
+  sendControl(intent: "CONFIRM" | "EDIT" | "REJECT", proposalRef: string, editInstruction: string | null = null): void {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify({
+        type: "CONTROL",
+        intent,
+        proposal_ref: proposalRef,
+        edit_instruction: editInstruction,
+        acknowledgement: intent === "CONFIRM" ? "Confirmed" : null,
+      }));
+    }
+  }
+
   end(): void {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: "END" }));
     this.stream?.getTracks().forEach((track) => track.stop());

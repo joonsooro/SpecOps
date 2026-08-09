@@ -1,0 +1,130 @@
+import { expect, test } from "@playwright/test";
+
+const sourceLines = Array.from({ length: 46 }, (_, index) => {
+  const line = index + 1;
+  const content: Record<number, string> = {
+    1: "# Filtered Orders CSV Export — Draft Technical Specification",
+    4: "The export MUST include every order matching the active filter set.",
+    12: "The CSV schema is fixed: Order ID, Customer, Status, Total, Created At, Updated At.",
+    18: "Large exports MUST be generated asynchronously without truncating filtered rows.",
+    27: "Authorization is rechecked when the export is requested and when the file is downloaded.",
+    35: "Failed generation returns a stable error and never exposes a partial file.",
+    43: "All output is UTF-8 with a single header row.",
+  };
+  return [line, content[line] ?? ""];
+});
+
+const sourceRef = {
+  artifact_id: "44444444-4444-4444-8444-444444444444",
+  version: 1,
+  content_hash: "a".repeat(64),
+  location: { kind: "LINE_RANGE", start: 18, end: 18 },
+};
+
+const bootstrap = {
+  case_id: "33333333-3333-4333-8333-333333333333",
+  pm_actor_id: "22222222-2222-4222-8222-222222222222",
+  dev_lead_actor_id: "11111111-1111-4111-8111-111111111111",
+  delegation_id: "55555555-5555-4555-8555-555555555555",
+  delegation_valid_from: "2026-07-23T00:00:00Z",
+  delegation_valid_until: "2026-08-22T23:59:59Z",
+  delegation_command_scope: ["revise_spec_package", "mark_spec_package_item_ready", "approve_spec_package_item"],
+  technical_source_lines: sourceLines,
+};
+
+const workshop = {
+  session: {
+    workshop_state: "ACTIVE",
+    conversation_phase: "WORKSHOP",
+    call_state: "LISTENING",
+    revision_locked: false,
+    revision_lock_reason: null,
+  },
+  final_transcripts: [{
+    turn_sequence: 1,
+    version: 1,
+    normalized_text: "Every filtered row must be exported, even when the result is too large for an immediate download.",
+    correction_of_version: null,
+  }],
+  pending_proposal: {
+    record: { proposal_ref: "workshop-patch-demo-v1", status: "PENDING", version: 1 },
+    result: {
+      acknowledgement: "Drafted grounded package",
+      next_question: "Should this cross-domain package be committed?",
+      complete_package_proposal: {
+        requirements: [{ proposal_key: "all-rows", statement: "Export every order matching the active filter set.", domain: "BUSINESS", source_refs: [sourceRef] }],
+        technical_decisions: [{ proposal_key: "async-export", statement: "Generate large exports asynchronously without truncation.", domain: "TECHNICAL", source_refs: [sourceRef] }],
+        acceptance_checks: [{ proposal_key: "no-truncation", statement: "A large filtered result contains every matching row.", domain: "CROSS_DOMAIN", related_unit_proposal_keys: ["all-rows", "async-export"], source_refs: [sourceRef] }],
+        items: [{ proposal_key: "complete-export", title: "Complete filtered export", requirement_proposal_keys: ["all-rows"], technical_decision_proposal_keys: ["async-export"], acceptance_check_proposal_keys: ["no-truncation"] }],
+      },
+    },
+  },
+  governance: {
+    package_readiness: "PARTIALLY_READY",
+    items: [{
+      binding: { item_id: "66666666-6666-4666-8666-666666666666", item_version: 1, semantic_hash: "b".repeat(64) },
+      title: "CSV schema and encoding",
+      domain: "TECHNICAL",
+      readiness: "READY",
+      review_obligation: "LATER_REVIEW",
+      approval_scopes: ["TECHNICAL"],
+    }],
+  },
+  review_requests: [],
+};
+
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/bootstrap", (route) => route.fulfill({ json: bootstrap }));
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: workshop }));
+  await page.route("**/api/proposals/control", (route) => route.fulfill({ json: { status: "COMMITTED" } }));
+});
+
+test("renders the governed three-panel projection and focuses exact evidence", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "CSV Export Workshop" })).toBeVisible();
+  await expect(page.getByText("Technical authority delegated")).toBeVisible();
+  await expect(page.getByText("Proposed · awaiting PM confirmation")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Confirm" })).toBeEnabled();
+  if (testInfo.project.name === "narrow") {
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({ path: "/private/tmp/specops-feature18-narrow.png", animations: "disabled", fullPage: true });
+  }
+  await page.getByRole("button", { name: "Focus technical source line 18" }).first().click();
+  await expect(page.locator("#line-18")).toBeFocused();
+  await expect(page.locator("#line-18")).toHaveClass(/is-bound/);
+  await expect(page.getByRole("button", { name: /BOUND EVIDENCE · L18/ })).toBeVisible();
+
+  const order = await page.locator("main > section").evaluateAll((sections) => sections.map((section) => section.getAttribute("aria-labelledby")));
+  expect(order).toEqual(["voice-title", "source-title", "package-title"]);
+
+  if (testInfo.project.name === "desktop") {
+    const metrics = await page.locator("main").evaluate((main) => ({
+      columns: getComputedStyle(main).gridTemplateColumns.split(" ").map((value) => Number.parseFloat(value)),
+      heights: Array.from(main.children).map((child) => getComputedStyle(child).height),
+      overflow: Array.from(main.children).map((child) => getComputedStyle(child).overflowY),
+    }));
+    expect(metrics.columns[0] / metrics.columns.reduce((a, b) => a + b, 0)).toBeCloseTo(.32, 1);
+    expect(metrics.columns[1] / metrics.columns.reduce((a, b) => a + b, 0)).toBeCloseTo(.42, 1);
+    expect(metrics.heights).toEqual(["900px", "900px", "900px"]);
+    expect(metrics.overflow).toEqual(["auto", "auto", "auto"]);
+    await page.screenshot({ path: "/private/tmp/specops-feature18-desktop.png", animations: "disabled" });
+  } else {
+    const boxes = await Promise.all(["voice-title", "source-title", "package-title"].map(async (id) => page.locator(`[aria-labelledby="${id}"]`).boundingBox()));
+    expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
+    expect(boxes[1]!.y).toBeLessThan(boxes[2]!.y);
+    await expect(page.getByLabel("Text fallback")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Confirm" })).toBeVisible();
+  }
+});
+
+test("visible controls keep native focus and formulation state", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Edit" }).focus();
+  await expect(page.getByRole("button", { name: "Edit" })).toBeFocused();
+  await page.getByRole("button", { name: "Edit" }).click();
+  await expect(page.getByLabel("Edit instruction")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply edit" })).toBeDisabled();
+  await page.getByLabel("Edit instruction").fill("Keep the fixed six-column order explicit.");
+  await expect(page.getByRole("button", { name: "Apply edit" })).toBeEnabled();
+});

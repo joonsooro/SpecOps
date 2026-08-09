@@ -190,6 +190,12 @@ class LiveTransport:
                     control,
                     confirmation_context=self._generation_blocked,
                 )
+                if intent == ControlIntent.EDIT:
+                    await self.gate.analyze_final_turn(
+                        self.session_id,
+                        snapshots[-1].turn_sequence,
+                        edit_instruction=value.get("edit_instruction"),
+                    )
                 self._generation_blocked = False
                 await websocket.send_json({
                     "type": "CONTROL_APPLIED",

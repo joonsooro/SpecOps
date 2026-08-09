@@ -128,3 +128,68 @@ test("visible controls keep native focus and formulation state", async ({ page }
   await page.getByLabel("Edit instruction").fill("Keep the fixed six-column order explicit.");
   await expect(page.getByRole("button", { name: "Apply edit" })).toBeEnabled();
 });
+
+test("Finish freezes formulation, preserves text, and renders exact handoff facts", async ({ page }) => {
+  let finished = false;
+  const packageBinding = {
+    artifact_kind: "SPEC_PACKAGE",
+    artifact_id: "77777777-7777-4777-8777-777777777777",
+    version: 1,
+    semantic_hash: "c".repeat(64),
+  };
+  const readyBinding = {
+    package_id: packageBinding.artifact_id,
+    package_version: 1,
+    package_hash: packageBinding.semantic_hash,
+    item_id: "66666666-6666-4666-8666-666666666666",
+    item_version: 1,
+    item_hash: "b".repeat(64),
+  };
+  const handoff = {
+    package_binding: packageBinding,
+    ready_item_bindings: [readyBinding],
+    blocked_review_requests: [],
+    later_review_requests: [{
+      review_request_id: "88888888-8888-4888-8888-888888888888",
+      item_binding: readyBinding,
+      kind: "LATER_REVIEW",
+      question: "Dev Lead, do you approve this delegated technical item?",
+      evidence_refs: [sourceRef],
+      attempted_resolution: "Approved under active scoped technical delegation.",
+      reviewer_actor_ids: [bootstrap.dev_lead_actor_id],
+      status: "OPEN",
+      resolution_text: null,
+      resolution_source_refs: [],
+      resolved_by_actor_ids: [],
+      created_at: "2026-08-09T12:00:00Z",
+      resolved_at: null,
+    }],
+    transcript_source_refs: [sourceRef],
+  };
+  const projection = () => ({
+    ...workshop,
+    pending_proposal: null,
+    session: {
+      ...workshop.session,
+      workshop_state: finished ? "COMPLETED" : "ACTIVE",
+      conversation_phase: finished ? "HANDOFF_READY" : "WORKSHOP",
+    },
+    handoff: finished ? handoff : null,
+  });
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: projection() }));
+  await page.route("**/api/finish", (route) => {
+    finished = true;
+    return route.fulfill({ json: { handoff, workshop_state: "COMPLETED", conversation_phase: "HANDOFF_READY" } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /Finish workshop/ }).click();
+  await expect(page.getByText("Workshop formulation is frozen. The handoff summary remains live.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Finish workshop/ })).toBeDisabled();
+  await expect(page.getByText(/READY · 66666666…6666 · v1/)).toBeVisible();
+  await expect(page.getByText(/LATER · 66666666…6666/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Confirm" })).toHaveCount(0);
+  await page.getByLabel("Text fallback").fill("Summarize the committed handoff.");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(page.getByText(/Jira|GitHub/i)).toHaveCount(0);
+});

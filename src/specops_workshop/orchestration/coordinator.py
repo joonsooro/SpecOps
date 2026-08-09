@@ -13,6 +13,7 @@ from specops_workflow.errors import DomainError, ErrorCode
 from specops_workflow.models import (
     AmbiguityFindingResult,
     ApproveSpecPackageItemCommand,
+    CreateReviewRequestCommand,
     CreateSpecPackageV2Command,
     ItemGovernanceResult,
     LineRange,
@@ -21,6 +22,7 @@ from specops_workflow.models import (
     RecordItemAmbiguityFindingCommand,
     RegisterSourceArtifactCommand,
     ReviseSpecPackageV2Command,
+    ReviewRequestResult,
     SourceArtifactIdentity,
     SourceArtifactResult,
     SourceRef,
@@ -46,9 +48,10 @@ FOUNDATION_COMMANDS = {
     "register_source_artifact": (RegisterSourceArtifactCommand, SourceArtifactResult),
     "create_spec_package": (CreateSpecPackageV2Command, SpecPackageResult),
     "revise_spec_package": (ReviseSpecPackageV2Command, SpecPackageResult),
-    "record_item_ambiguity_finding": (RecordItemAmbiguityFindingCommand, AmbiguityFindingResult),
+    "record_ambiguity_finding": (RecordItemAmbiguityFindingCommand, AmbiguityFindingResult),
     "mark_spec_package_item_ready": (MarkSpecPackageItemReadyCommand, ItemGovernanceResult),
     "approve_spec_package_item": (ApproveSpecPackageItemCommand, ItemGovernanceResult),
+    "create_review_request": (CreateReviewRequestCommand, ReviewRequestResult),
 }
 
 

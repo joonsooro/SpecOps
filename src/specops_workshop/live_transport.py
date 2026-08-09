@@ -6,8 +6,10 @@ from collections import deque
 from uuid import UUID
 
 from fastapi import WebSocket, WebSocketDisconnect
+from specops_workflow.errors import DomainError, ErrorCode
+from specops_workflow.models import QueryOne
 
-from .contracts import CallState, ConversationPhase
+from .contracts import CallState, ConversationPhase, ProviderResumeContext
 from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider, LiveVoiceSession, VoiceContext, VoiceEventType
@@ -59,6 +61,7 @@ class LiveTransport:
         session_id: UUID,
         idle_timeout_seconds: float = IDLE_TIMEOUT_SECONDS,
         gate=None,
+        finish_coordinator=None,
     ) -> None:
         self.provider = provider
         self.coordinator = coordinator
@@ -70,17 +73,35 @@ class LiveTransport:
         self._last_input_at = 0.0
         self.gate = gate
         self._generation_blocked = False
+        self.finish_coordinator = finish_coordinator
 
     async def handle(self, websocket: WebSocket) -> None:
         await websocket.accept()
         recovered = self.coordinator.recover(self.session_id)
-        history = tuple(snapshot.normalized_text for snapshot in recovered.final_transcripts)
+        query = QueryOne(
+            case_id=recovered.session.case_id,
+            acting_actor_id=recovered.session.pm_actor_id,
+        )
+        try:
+            committed_package = self.coordinator.foundation.get_spec_package_content(query)
+        except DomainError as exc:
+            if exc.code != ErrorCode.RECORD_NOT_FOUND:
+                raise
+            committed_package = None
+        downstream_handoff = None
+        if recovered.session.conversation_phase == ConversationPhase.HANDOFF_READY:
+            downstream_handoff = self.coordinator.foundation.get_downstream_handoff(query)
         context = VoiceContext(
             system_instruction=(
                 "You are the SpecOps Workshop facilitator. Respect the PM business authority, "
                 "the Dev Lead technical delegation, and only discuss evidence-backed package formulation."
             ),
-            textual_history=history,
+            resume=ProviderResumeContext(
+                conversation_phase=recovered.session.conversation_phase,
+                committed_package=committed_package,
+                downstream_handoff=downstream_handoff,
+                final_transcript_snapshots=self.store.all_snapshots(self.session_id),
+            ),
         )
         session = await self._connect_with_retry(websocket, context)
         if session is None:
@@ -165,8 +186,28 @@ class LiveTransport:
                         "acknowledgement": proposal.acknowledgement,
                         "next_question": proposal.next_question,
                     })
+                elif proposal is not None and proposal.control_intent == ControlIntent.FINISH:
+                    if self.finish_coordinator is None:
+                        await websocket.send_json({"type": "ERROR", "code": "FINISH_UNAVAILABLE"})
+                    else:
+                        finished = await self.finish_coordinator.finish(self.session_id)
+                        await websocket.send_json({"type": "FINISH_COMPLETE", "handoff": finished.handoff.model_dump(mode="json")})
+                        await session.send_text(
+                            "HANDOFF_READY. Summarize only these committed handoff facts: "
+                            + finished.handoff.model_dump_json()
+                        )
                 else:
                     await session.send_text(str(value["text"]))
+            elif kind == "FINISH":
+                if self.finish_coordinator is None:
+                    await websocket.send_json({"type": "ERROR", "code": "FINISH_UNAVAILABLE"})
+                    continue
+                finished = await self.finish_coordinator.finish(self.session_id)
+                await websocket.send_json({"type": "FINISH_COMPLETE", "handoff": finished.handoff.model_dump(mode="json")})
+                await session.send_text(
+                    "HANDOFF_READY. Summarize only these committed handoff facts: "
+                    + finished.handoff.model_dump_json()
+                )
             elif kind == "CONTROL" and self.gate is not None:
                 snapshots = self.store.latest_snapshots(self.session_id)
                 if not snapshots:
@@ -272,6 +313,13 @@ class LiveTransport:
                         "acknowledgement": proposal.acknowledgement,
                         "next_question": proposal.next_question,
                     })
+                elif self.finish_coordinator is not None and proposal.control_intent == ControlIntent.FINISH:
+                    finished = await self.finish_coordinator.finish(self.session_id)
+                    await websocket.send_json({"type": "FINISH_COMPLETE", "handoff": finished.handoff.model_dump(mode="json")})
+                    await session.send_text(
+                        "HANDOFF_READY. Summarize only these committed handoff facts: "
+                        + finished.handoff.model_dump_json()
+                    )
                 next_sequence += 1
             elif event.type == VoiceEventType.OUTPUT_TRANSCRIPT:
                 if self._generation_blocked:
@@ -293,9 +341,31 @@ class LiveTransport:
                     provider_request_id=str(value["provider_request_id"]),
                     correction_of_version=value.get("correction_of_version"),
                 )
+                proposal = None
                 if self.gate is not None:
-                    await self.gate.analyze_final_turn(self.session_id, int(value["turn_sequence"]))
+                    proposal = await self.gate.analyze_final_turn(
+                        self.session_id, int(value["turn_sequence"])
+                    )
                 await websocket.send_json({"type": "FINAL_COMMITTED", "revision": result.receipt.revision})
+                if (
+                    proposal is not None
+                    and proposal.control_intent == ControlIntent.FINISH
+                    and self.finish_coordinator is not None
+                ):
+                    finished = await self.finish_coordinator.finish(self.session_id)
+                    await websocket.send_json({
+                        "type": "FINISH_COMPLETE",
+                        "handoff": finished.handoff.model_dump(mode="json"),
+                    })
+            elif value.get("type") == "FINISH":
+                if self.finish_coordinator is None:
+                    await websocket.send_json({"type": "ERROR", "code": "FINISH_UNAVAILABLE"})
+                    continue
+                finished = await self.finish_coordinator.finish(self.session_id)
+                await websocket.send_json({
+                    "type": "FINISH_COMPLETE",
+                    "handoff": finished.handoff.model_dump(mode="json"),
+                })
             elif value.get("type") == "END":
                 self.store.update_phase(
                     self.session_id, call_state=CallState.ENDED, conversation_phase=ConversationPhase.COMPLETE,

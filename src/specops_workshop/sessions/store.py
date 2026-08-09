@@ -327,14 +327,18 @@ class WorkshopStore:
         return self.get_session(session_id)
 
     def latest_snapshots(self, session_id: UUID) -> tuple[TranscriptSnapshot, ...]:
+        snapshots = self.all_snapshots(session_id)
+        latest: dict[int, TranscriptSnapshot] = {}
+        for snapshot in snapshots:
+            latest[snapshot.turn_sequence] = snapshot
+        return tuple(latest[key] for key in sorted(latest))
+
+    def all_snapshots(self, session_id: UUID) -> tuple[TranscriptSnapshot, ...]:
         with self.engine.connect() as connection:
             rows = list(connection.execute(select(transcript_snapshots).where(
                 transcript_snapshots.c.session_id == str(session_id)
             ).order_by(transcript_snapshots.c.turn_sequence, transcript_snapshots.c.version)).mappings())
-        latest: dict[int, TranscriptSnapshot] = {}
-        for row in rows:
-            latest[row["turn_sequence"]] = self._snapshot(row)
-        return tuple(latest[key] for key in sorted(latest))
+        return tuple(self._snapshot(row) for row in rows)
 
     def record_analyzer_attempt(
         self,

@@ -609,6 +609,16 @@ class SpecPackageItemView(StrictModel):
 class SpecPackageGovernanceView(StrictModel):
     case_id: UUID; package_binding: ArtifactBinding; package_readiness: PackageReadiness
     items: Annotated[list[SpecPackageItemView], Field(min_length=1, max_length=100)]
+class SpecPackageContentView(StrictModel):
+    case_id: UUID
+    package_binding: ArtifactBinding
+    payload: SpecPackagePayloadV2
+class DownstreamHandoff(StrictModel):
+    package_binding: ArtifactBinding
+    ready_item_bindings: Annotated[list[ItemBinding], Field(max_length=100)]
+    blocked_review_requests: Annotated[list[ReviewRequest], Field(max_length=100)]
+    later_review_requests: Annotated[list[ReviewRequest], Field(max_length=100)]
+    transcript_source_refs: Annotated[list[SourceRef], Field(min_length=1, max_length=500)]
 class ReviewRequestPage(StrictModel): items: list[ReviewRequest]; next_cursor: UUID | None = None
 class DeliveryItem(StrictModel):
     system: System; plan_id: UUID; plan_version: BoundedInt; item_id: UUID; external_identity: ExternalIdentity | None = None

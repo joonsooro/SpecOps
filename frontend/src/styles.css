@@ -141,6 +141,9 @@ h3, h4 { font-weight: 650; }
 .empty-package { padding: 1rem 0 1.25rem; border-bottom: 1px solid var(--rule); }
 .empty-package strong { font-size: .75rem; }
 .empty-package p, .handoff-preview p { margin: .35rem 0 0; color: var(--muted); font-size: .68rem; line-height: 1.5; }
+.handoff-manifest { display: grid; gap: .35rem; padding-top: .55rem; }
+.handoff-manifest p { display: flex; justify-content: space-between; gap: .5rem; margin: 0; }
+.handoff-manifest code { display: block; overflow-wrap: anywhere; color: #36514c; font: .56rem/1.4 "SFMono-Regular", Menlo, monospace; }
 .review-queues { display: grid; gap: 1rem; margin-top: 1.4rem; }
 .review-queues section > p { margin: .55rem 0 0; font-size: .67rem; }
 .quiet { color: var(--muted); }

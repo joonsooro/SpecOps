@@ -29,8 +29,15 @@ class GeminiLiveProvider:
         manager = self._client.aio.live.connect(model=self._model, config=config)
         session = await manager.__aenter__()
         wrapped = _GeminiLiveSession(manager, session)
-        if context.textual_history:
-            await wrapped.send_text("Recovered final transcript context:\n" + "\n".join(context.textual_history))
+        resume = context.resume
+        if (
+            resume.committed_package is not None
+            or resume.downstream_handoff is not None
+            or resume.final_transcript_snapshots
+        ):
+            await wrapped.send_text(
+                "AUTHORITATIVE_RESUME_CONTEXT\n" + resume.model_dump_json()
+            )
         return wrapped
 
 

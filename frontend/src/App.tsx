@@ -71,6 +71,13 @@ type WorkshopProjection = {
     items: GovernanceItem[];
   } | null;
   review_requests: { review_request_id: string; kind: string; question: string; status: string }[];
+  handoff: null | {
+    package_binding: { artifact_id: string; version: number; semantic_hash: string };
+    ready_item_bindings: { item_id: string; item_version: number; item_hash: string }[];
+    blocked_review_requests: { review_request_id: string; question: string; item_binding: { item_id: string } }[];
+    later_review_requests: { review_request_id: string; question: string; item_binding: { item_id: string } }[];
+    transcript_source_refs: SourceRef[];
+  };
 };
 
 const formatDate = (value: string) => new Intl.DateTimeFormat("en-GB", {
@@ -141,7 +148,7 @@ export function App() {
     if (event.type === "CALL_STATE") setCallState(String(event.state));
     if (event.type === "TRANSCRIPT_PARTIAL") setPartial(String(event.text ?? ""));
     if (event.type === "TRANSCRIPT_FINAL") { setPartial(""); void refresh(); }
-    if (event.type === "FINAL_COMMITTED" || event.type === "PROPOSAL_PENDING" || event.type === "CONTROL_APPLIED") void refresh();
+    if (event.type === "FINAL_COMMITTED" || event.type === "PROPOSAL_PENDING" || event.type === "CONTROL_APPLIED" || event.type === "FINISH_COMPLETE") void refresh();
     if (event.type === "PROPOSAL_PENDING") setNotice("Proposal ready. Confirm, edit, or reject before the conversation advances.");
     if (event.type === "INTERRUPTED") setNotice("Agent playback stopped");
     if (event.type === "ERROR") setFailure(`Voice control failed: ${String(event.code)}`);
@@ -234,6 +241,22 @@ export function App() {
     }
   };
 
+  const finishWorkshop = async () => {
+    setFailure(null);
+    setNotice("Running final governance audit…");
+    try {
+      const response = await fetch("/api/finish", { method: "POST" });
+      if (!response.ok) {
+        const body = await response.json() as { detail?: string };
+        throw new Error(body.detail ?? "Finish refused");
+      }
+      await refresh();
+      setNotice("Workshop formulation is frozen. The handoff summary remains live.");
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : "Finish was refused by the final audit.");
+    }
+  };
+
   const proposed = workshop?.pending_proposal?.result.complete_package_proposal;
   const blocked = workshop?.governance?.items.filter((item) => item.review_obligation === "DECISION_REQUIRED") ?? [];
   const later = workshop?.governance?.items.filter((item) => item.review_obligation === "LATER_REVIEW") ?? [];
@@ -294,7 +317,7 @@ export function App() {
           <label htmlFor="fallback-text">Text fallback</label>
           <div>
             <textarea id="fallback-text" value={text} onChange={(event) => setText(event.target.value)} placeholder="Add a final PM decision…" rows={2} />
-            <button type="submit" disabled={!text.trim() || !canFormulate}>Send</button>
+            <button type="submit" disabled={!text.trim() || phase === "COMPLETE" || !!workshop?.session.revision_locked}>Send</button>
           </div>
           <small>Use after a voice or device disconnect. Final text follows the same evidence gate.</small>
         </form>
@@ -409,9 +432,18 @@ export function App() {
 
         <div className="handoff-preview">
           <div className="section-rule"><h3>Downstream handoff</h3><span>READ ONLY</span></div>
-          <p>{phase === "HANDOFF_READY" ? "Exact package bindings and review requests are ready for downstream consumers." : "Finish the workshop to freeze formulation and expose the exact handoff manifest."}</p>
+          {workshop?.handoff ? <div className="handoff-manifest">
+            <p><strong>Package</strong><code>{shortId(workshop.handoff.package_binding.artifact_id)} · v{workshop.handoff.package_binding.version}</code></p>
+            <p><strong>Ready bindings</strong><span>{workshop.handoff.ready_item_bindings.length}</span></p>
+            {workshop.handoff.ready_item_bindings.map((binding) => <code key={binding.item_id}>READY · {shortId(binding.item_id)} · v{binding.item_version}</code>)}
+            <p><strong>Blocked decisions</strong><span>{workshop.handoff.blocked_review_requests.length}</span></p>
+            {workshop.handoff.blocked_review_requests.map((request) => <code key={request.review_request_id}>BLOCKED · {shortId(request.item_binding.item_id)}</code>)}
+            <p><strong>Later review</strong><span>{workshop.handoff.later_review_requests.length}</span></p>
+            {workshop.handoff.later_review_requests.map((request) => <code key={request.review_request_id}>LATER · {shortId(request.item_binding.item_id)}</code>)}
+            <p><strong>Transcript refs</strong><span>{workshop.handoff.transcript_source_refs.length}</span></p>
+          </div> : <p>Finish the workshop to freeze formulation and expose the exact handoff manifest.</p>}
         </div>
-        <button className="finish-button" type="button" disabled={!workshop?.governance || !!workshop?.pending_proposal || phase !== "WORKSHOP"}>Finish workshop <span aria-hidden="true">→</span></button>
+        <button className="finish-button" type="button" onClick={finishWorkshop} disabled={!workshop?.governance || !!workshop?.pending_proposal || phase !== "WORKSHOP"}>Finish workshop <span aria-hidden="true">→</span></button>
       </section>
     </main>
   );

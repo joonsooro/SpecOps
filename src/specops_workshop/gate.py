@@ -227,7 +227,7 @@ class WorkshopGate:
             recorded = self._commit(
                 session_id,
                 f"{pending.proposal_ref}:finding:{finding_id}",
-                "record_item_ambiguity_finding",
+                "record_ambiguity_finding",
                 finding_command,
             )
             revision = self._stored(recorded).receipt.revision

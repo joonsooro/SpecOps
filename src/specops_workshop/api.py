@@ -17,6 +17,7 @@ from .config import Settings
 from .contracts import FinalTurnInput, RecoveryView
 from .delegation import load_delegation_fixture
 from .gate import RegisteredEvidenceGrounding, WorkshopGate
+from .finish import FinishCoordinator, FinishResult
 from .live_transport import LiveTransport
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider
@@ -83,9 +84,13 @@ def create_app(
             store=workshop_store, session_id=DEMO_SESSION_ID,
         )
         gate = WorkshopGate(workshop_store, workflow, resolved_analyzer, grounding, clock=runtime_clock)
+    finish_coordinator = None if gate is None else FinishCoordinator(
+        workshop_store, workflow, gate, clock=runtime_clock
+    )
     live_transport = LiveTransport(
         voice_provider, coordinator, workshop_store,
         session_id=DEMO_SESSION_ID, idle_timeout_seconds=idle_timeout_seconds, gate=gate,
+        finish_coordinator=finish_coordinator,
     )
     app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
     app.state.settings = runtime_settings
@@ -98,6 +103,7 @@ def create_app(
     app.state.live_provider = voice_provider
     app.state.live_transport = live_transport
     app.state.gate = gate
+    app.state.finish_coordinator = finish_coordinator
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:
@@ -137,13 +143,26 @@ def create_app(
             case_id=bootstrap.case_id,
             acting_actor_id=bootstrap.pm_actor_id,
         )).items
+        handoff = None
+        if recovered.session.conversation_phase.value == "HANDOFF_READY":
+            handoff = app.state.workflow.get_downstream_handoff(query)
         return WorkshopProjection(
             session=recovered.session,
             final_transcripts=recovered.final_transcripts,
             pending_proposal=proposal,
             governance=governance,
             review_requests=tuple(reviews),
+            handoff=handoff,
         )
+
+    @app.post("/api/finish", response_model=FinishResult)
+    async def finish_workshop() -> FinishResult:
+        if app.state.finish_coordinator is None:
+            raise HTTPException(status_code=503, detail="Final audit is unavailable")
+        try:
+            return await app.state.finish_coordinator.finish(app.state.session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
 
     @app.post("/api/proposals/control")
     async def proposal_control(value: ProposalControlInput):

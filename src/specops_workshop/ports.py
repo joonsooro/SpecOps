@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import AsyncIterator, Protocol
 
+from .contracts import ProviderResumeContext
+
 
 class VoiceEventType(StrEnum):
     AUDIO = "AUDIO"
@@ -18,7 +20,7 @@ class VoiceEventType(StrEnum):
 @dataclass(frozen=True)
 class VoiceContext:
     system_instruction: str
-    textual_history: tuple[str, ...]
+    resume: ProviderResumeContext
 
 
 @dataclass(frozen=True)

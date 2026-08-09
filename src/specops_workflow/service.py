@@ -667,6 +667,61 @@ class WorkflowService:
         else: rollup = PackageReadiness.FORMULATING
         return SpecPackageGovernanceView(case_id=case.id, package_binding=case.package.binding, package_readiness=rollup, items=items)
 
+    def get_spec_package_content(self, query: QueryOne) -> SpecPackageContentView:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        if case.package is None or not isinstance(case.package.current.payload, SpecPackagePayloadV2):
+            raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        return SpecPackageContentView(
+            case_id=case.id,
+            package_binding=case.package.binding,
+            payload=case.package.current.payload,
+        )
+
+    def get_downstream_handoff(self, query: QueryOne) -> DownstreamHandoff:
+        case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
+        if case.package is None or not isinstance(case.package.current.payload, SpecPackagePayloadV2):
+            raise DomainError(ErrorCode.RECORD_NOT_FOUND)
+        governance = self.get_spec_package_governance(query)
+        ready = sorted(
+            (item.binding for item in governance.items if item.readiness == ItemReadiness.READY),
+            key=lambda binding: binding.item_id.bytes,
+        )
+        open_reviews = [
+            value for value in case.review_requests.values()
+            if value.status == ReviewRequestStatus.OPEN
+        ]
+        blocked = sorted(
+            (value for value in open_reviews if value.kind == ReviewRequestKind.DECISION_REQUIRED),
+            key=lambda value: value.review_request_id.bytes,
+        )
+        later = sorted(
+            (value for value in open_reviews if value.kind == ReviewRequestKind.LATER_REVIEW),
+            key=lambda value: value.review_request_id.bytes,
+        )
+        transcript_identities = sorted(
+            (
+                identity for identity in case.sources.values()
+                if identity.type == SourceArtifactType.WORKSHOP_TRANSCRIPT
+            ),
+            key=lambda identity: (identity.canonical_locator, identity.version),
+        )
+        transcript_refs = [
+            SourceRef(
+                artifact_id=identity.artifact_id,
+                version=identity.version,
+                content_hash=identity.content_hash,
+                location=LineRange(start=1, end=1),
+            )
+            for identity in transcript_identities
+        ]
+        return DownstreamHandoff(
+            package_binding=case.package.binding,
+            ready_item_bindings=ready,
+            blocked_review_requests=blocked,
+            later_review_requests=later,
+            transcript_source_refs=transcript_refs,
+        )
+
     def list_review_requests(self, query: UUIDListQuery) -> ReviewRequestPage:
         case = self._case(query.case_id); self._authorize_read(case, query.acting_actor_id)
         values = [value for value in case.review_requests.values() if query.after_cursor is None or value.review_request_id.bytes > query.after_cursor.bytes]

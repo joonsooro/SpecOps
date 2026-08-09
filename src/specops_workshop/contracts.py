@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from specops_workflow.models import SourceRef
+from specops_workflow.models import DownstreamHandoff, SourceRef, SpecPackageContentView
 
 
 class WorkshopModel(BaseModel):
@@ -96,6 +96,13 @@ class RecoveryView(WorkshopModel):
     session: WorkshopSession
     final_transcripts: tuple[TranscriptSnapshot, ...]
     pending_outbox_ids: tuple[UUID, ...]
+
+
+class ProviderResumeContext(WorkshopModel):
+    conversation_phase: ConversationPhase
+    committed_package: SpecPackageContentView | None
+    downstream_handoff: DownstreamHandoff | None
+    final_transcript_snapshots: tuple[TranscriptSnapshot, ...]
 
 
 class PackageProposalRecord(WorkshopModel):

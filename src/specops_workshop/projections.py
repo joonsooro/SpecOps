@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from specops_workflow.models import ReviewRequest, SpecPackageGovernanceView
+from specops_workflow.models import DownstreamHandoff, ReviewRequest, SpecPackageGovernanceView
 
 from .analyzer import AnalyzerTurnResult, ControlIntent
 from .contracts import (
@@ -24,6 +24,7 @@ class WorkshopProjection(WorkshopModel):
     pending_proposal: PendingProposalView | None
     governance: SpecPackageGovernanceView | None
     review_requests: tuple[ReviewRequest, ...]
+    handoff: DownstreamHandoff | None
 
 
 class ProposalControlInput(WorkshopModel):

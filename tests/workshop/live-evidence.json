@@ -1,0 +1,78 @@
+{
+  "completed_at": "2026-08-09T12:46:07.735652Z",
+  "decision_source_pointer": {
+    "artifact_id": "2175545a-909b-5512-a1a6-9e553d5a0c92",
+    "content_hash": "c139587efad026568be17538ca8ac1ea843fbb92d3dcbac519f2f52107171280",
+    "location": {
+      "end": 33,
+      "kind": "LINE_RANGE",
+      "start": 33
+    },
+    "version": 1
+  },
+  "foundation_revision": 7,
+  "gemini_audio_bytes": 2,
+  "gemini_model": "gemini-3.1-flash-live-preview",
+  "gemini_provider": "GeminiLiveProvider",
+  "gemini_request_ids": [
+    "b5a3d672-8605-417b-a1c6-22ba59834c56"
+  ],
+  "initial_transcript_revision": 5,
+  "package_binding": {
+    "artifact_id": "4e742e97-9c6f-5743-9c5d-e89d139514e4",
+    "artifact_kind": "SPEC_PACKAGE",
+    "semantic_hash": "ecfddc924f14181ac6e52cb7190ed13b69e494f5c64b1fedf0039a3b608b08cd",
+    "version": 1
+  },
+  "schema_version": 1,
+  "status": "PASS",
+  "sw_ev": "SW-EV-024",
+  "terra_model": "gpt-5.6-terra",
+  "terra_provider": "TerraResponsesProvider",
+  "terra_provider_diagnostics": [
+    {
+      "client_request_id": "specops-workshop-cache_warm-801e10cc-5e2f-407a-b149-02b5001b5d76",
+      "error_type": null,
+      "outcome": "PASS",
+      "provider_request_id": "req_40b37660bb0040f8a8dabd7724e5524d",
+      "stage": "CACHE_WARM",
+      "status_code": 200
+    },
+    {
+      "client_request_id": "specops-workshop-analysis-f2361e76-d627-4934-af24-b678a7b73c2a",
+      "error_type": "InternalServerError",
+      "outcome": "FAIL",
+      "provider_request_id": null,
+      "stage": "ANALYSIS",
+      "status_code": 520
+    },
+    {
+      "client_request_id": "specops-workshop-analysis-6e410016-554b-4e6f-8910-f72dcac6ebf5",
+      "error_type": null,
+      "outcome": "PASS",
+      "provider_request_id": "req_ade1fa65ad414bd5ac581bc94bcc56c3",
+      "stage": "ANALYSIS",
+      "status_code": 200
+    },
+    {
+      "client_request_id": "specops-workshop-cache_warm-a731ff60-d0e5-438f-9e22-e9e82bf4403d",
+      "error_type": null,
+      "outcome": "PASS",
+      "provider_request_id": "req_8ca573f25557462899f45f93d7f92753",
+      "stage": "CACHE_WARM",
+      "status_code": 200
+    },
+    {
+      "client_request_id": "specops-workshop-analysis-ad3cd4f5-defd-4ecf-94df-0e1dfaacfccb",
+      "error_type": null,
+      "outcome": "PASS",
+      "provider_request_id": "req_fa8b879ea031464797da4f833d26fde6",
+      "stage": "ANALYSIS",
+      "status_code": 200
+    }
+  ],
+  "terra_request_ids": [
+    "a617c446-c7fb-5c90-9d8f-61a061a2dabd",
+    "a617c446-c7fb-5c90-9d8f-61a061a2dabd"
+  ]
+}

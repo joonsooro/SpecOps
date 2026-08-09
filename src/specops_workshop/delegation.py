@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -32,12 +33,14 @@ class DelegationFixture(BaseModel):
     message_id: str
     delegator_actor_id: UUID
     delegate_actor_id: UUID
+    domain: Literal["TECHNICAL"]
     valid_from: datetime
     valid_until: datetime
     command_scope: tuple[str, ...]
     attachment_path: Path
     attachment_media_type: str
     attachment_hash: str
+    later_review_required: Literal[True]
 
 
 def load_delegation_fixture(
@@ -89,12 +92,14 @@ def load_delegation_fixture(
         message_id=frontmatter["scalars"]["message_id"],
         delegator_actor_id=DEV_LEAD_ACTOR_ID,
         delegate_actor_id=PM_ACTOR_ID,
+        domain="TECHNICAL",
         valid_from=valid_from,
         valid_until=valid_until,
         command_scope=commands,
         attachment_path=technical.path,
         attachment_media_type=technical.media_type,
         attachment_hash=EXPECTED_ATTACHMENT_HASH,
+        later_review_required=True,
     )
 
 

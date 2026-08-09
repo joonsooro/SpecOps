@@ -13,6 +13,7 @@ from specops_workflow.models import QueryOne, UUIDListQuery
 
 from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
 from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
+from .boundary import assert_downstream_boundary
 from .config import Settings
 from .contracts import FinalTurnInput, RecoveryView
 from .delegation import load_delegation_fixture
@@ -21,11 +22,13 @@ from .finish import FinishCoordinator, FinishResult
 from .live_transport import LiveTransport
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider
+from .provider_context import build_analyzer_source_context
 from .providers import GeminiLiveProvider
 from .providers.openai_responses import TerraResponsesProvider
 from .projections import PendingProposalView, ProposalControlInput, WorkshopProjection
 from .sessions import WorkshopStore
 from .sources import SourceCatalog, SourceName
+from .telemetry import BrowserSpanInput, LatencySpan, TelemetryRecorder
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -44,6 +47,7 @@ def create_app(
     idle_timeout_seconds: float = 30 * 60,
 ) -> FastAPI:
     runtime_clock = clock or SystemClock()
+    assert_downstream_boundary(BACKEND_ROOT)
     runtime_settings = settings or Settings.load(
         os.environ,
         Path(os.environ.get("SPECOPS_ENV_FILE", SPEC_ENG_ROOT / ".env")),
@@ -57,40 +61,56 @@ def create_app(
         clock=runtime_clock,
     )
     workshop_store = WorkshopStore(runtime_settings.workshop_database_url)
-    coordinator = WorkshopCoordinator(workshop_store, workflow, clock=runtime_clock)
+    telemetry = TelemetryRecorder(workshop_store, clock=runtime_clock)
+    coordinator = WorkshopCoordinator(
+        workshop_store, workflow, clock=runtime_clock, telemetry=telemetry
+    )
     coordinator.start_session(DEMO_SESSION_ID, case_id=bootstrap.case_id, pm_actor_id=bootstrap.pm_actor_id)
     voice_provider = live_provider or GeminiLiveProvider(
-        api_key=runtime_settings.gemini_api_key,
+        api_key=runtime_settings.gemini_api_key.get_secret_value(),
         model=runtime_settings.gemini_model,
     )
     resolved_analyzer = analyzer_provider
     if resolved_analyzer is None and live_provider is None:
-        resolved_analyzer = TerraResponsesProvider(api_key=runtime_settings.openai_api_key, model=runtime_settings.terra_model)
+        resolved_analyzer = TerraResponsesProvider(
+            api_key=runtime_settings.openai_api_key.get_secret_value(),
+            model=runtime_settings.terra_model,
+        )
     gate = None
+    analyzer_source_context = build_analyzer_source_context(catalog, bootstrap)
     if resolved_analyzer is not None:
         grounding = grounding_checker or RegisteredEvidenceGrounding(
             static_refs={
                 bootstrap.pm_source_id: (
                     1,
                     catalog.digest(SourceName.PM_SPEC),
-                    len(catalog.numbered_lines(SourceName.PM_SPEC)),
+                    tuple(line for _, line in catalog.numbered_lines(SourceName.PM_SPEC)),
                 ),
                 bootstrap.technical_source_id: (
                     1,
                     catalog.digest(SourceName.TECHNICAL_SPEC),
-                    len(catalog.numbered_lines(SourceName.TECHNICAL_SPEC)),
+                    tuple(line for _, line in catalog.numbered_lines(SourceName.TECHNICAL_SPEC)),
                 ),
             },
             store=workshop_store, session_id=DEMO_SESSION_ID,
         )
-        gate = WorkshopGate(workshop_store, workflow, resolved_analyzer, grounding, clock=runtime_clock)
+        gate = WorkshopGate(
+            workshop_store,
+            workflow,
+            resolved_analyzer,
+            grounding,
+            clock=runtime_clock,
+            source_context=analyzer_source_context,
+            telemetry=telemetry,
+            default_effort=runtime_settings.analyzer_reasoning_effort,
+        )
     finish_coordinator = None if gate is None else FinishCoordinator(
         workshop_store, workflow, gate, clock=runtime_clock
     )
     live_transport = LiveTransport(
         voice_provider, coordinator, workshop_store,
         session_id=DEMO_SESSION_ID, idle_timeout_seconds=idle_timeout_seconds, gate=gate,
-        finish_coordinator=finish_coordinator,
+        finish_coordinator=finish_coordinator, telemetry=telemetry,
     )
     app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
     app.state.settings = runtime_settings
@@ -103,7 +123,9 @@ def create_app(
     app.state.live_provider = voice_provider
     app.state.live_transport = live_transport
     app.state.gate = gate
+    app.state.analyzer_source_context = analyzer_source_context
     app.state.finish_coordinator = finish_coordinator
+    app.state.telemetry = telemetry
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:
@@ -125,6 +147,10 @@ def create_app(
         if app.state.gate is not None:
             await app.state.gate.analyze_final_turn(app.state.session_id, value.turn_sequence)
         return committed
+
+    @app.post("/api/telemetry/spans", response_model=LatencySpan)
+    async def browser_latency_span(value: BrowserSpanInput) -> LatencySpan:
+        return app.state.telemetry.record_browser(app.state.session_id, value)
 
     @app.get("/api/workshop", response_model=WorkshopProjection)
     async def workshop_projection() -> WorkshopProjection:

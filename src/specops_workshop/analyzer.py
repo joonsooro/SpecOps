@@ -12,7 +12,7 @@ from pydantic import Field, model_validator
 from specops_workflow.enums import AmbiguityCategory, Domain, Severity
 from specops_workflow.models import SourceRef
 
-from .contracts import ConversationPhase, TranscriptSnapshot, WorkshopModel
+from .contracts import AnalyzerSourceContext, ConversationPhase, TranscriptSnapshot, WorkshopModel
 
 
 PROPOSAL_NAMESPACE = UUID("99ebaa1a-2bed-5df3-92b5-9c577fdcad77")
@@ -119,8 +119,11 @@ class AnalyzerTurnResult(WorkshopModel):
 
 
 class AnalyzerRequest(WorkshopModel):
-    request_id: UUID; session_id: UUID; effort: Literal["low", "medium"]
+    request_id: UUID; session_id: UUID; effort: Literal["low", "medium", "high"]
+    purpose: Literal["TURN", "FINISH_AUDIT"] = "TURN"
     phase: ConversationPhase; final_turn: TranscriptSnapshot
+    source_context: AnalyzerSourceContext | None = None
+    final_transcript_snapshots: tuple[TranscriptSnapshot, ...] = ()
     committed_context_json: str
 
 

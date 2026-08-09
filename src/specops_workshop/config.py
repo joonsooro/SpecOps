@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 GEMINI_MODEL = "gemini-3.1-flash-live-preview"
 TERRA_MODEL = "gpt-5.6-terra"
+AnalyzerReasoningEffort = Literal["low", "medium", "high"]
 
 
 class Settings(BaseModel):
@@ -15,10 +17,11 @@ class Settings(BaseModel):
 
     specops_database_url: str = Field(min_length=1)
     workshop_database_url: str = Field(min_length=1)
-    gemini_api_key: str = Field(min_length=1)
-    openai_api_key: str = Field(min_length=1)
+    gemini_api_key: SecretStr = Field(repr=False)
+    openai_api_key: SecretStr = Field(repr=False)
     gemini_model: str = GEMINI_MODEL
     terra_model: str = TERRA_MODEL
+    analyzer_reasoning_effort: AnalyzerReasoningEffort = "medium"
 
     @classmethod
     def load(
@@ -38,6 +41,9 @@ class Settings(BaseModel):
             "openai_api_key": values.get("OPENAI_API_KEY"),
             "gemini_model": values.get("GEMINI_LIVE_MODEL", GEMINI_MODEL),
             "terra_model": values.get("OPENAI_ANALYZER_MODEL", TERRA_MODEL),
+            "analyzer_reasoning_effort": values.get(
+                "OPENAI_ANALYZER_REASONING_EFFORT", "medium"
+            ),
         }
         missing = sorted(key for key, value in mapped.items() if value is None)
         if missing:

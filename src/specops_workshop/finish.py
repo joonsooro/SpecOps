@@ -31,7 +31,12 @@ class FinishCoordinator:
         self.foundation = foundation
         self.gate = gate
         self.clock = clock
-        self.outbox = WorkshopCoordinator(store, foundation, clock=clock)
+        self.outbox = WorkshopCoordinator(
+            store,
+            foundation,
+            clock=clock,
+            telemetry=getattr(gate, "telemetry", None),
+        )
 
     async def finish(self, session_id: UUID) -> FinishResult:
         session = self.store.get_session(session_id)
@@ -54,7 +59,10 @@ class FinishCoordinator:
             session_id, workshop_state=WorkshopState.FINISHING, now=self.clock.now()
         )
         audit = await self.gate.analyze_final_turn(
-            session_id, snapshots[-1].turn_sequence, effort="medium"
+            session_id,
+            snapshots[-1].turn_sequence,
+            effort="medium",
+            purpose="FINISH_AUDIT",
         )
         if audit.complete_package_proposal is not None or self.store.pending_proposal(session_id) is not None:
             self.store.update_phase(

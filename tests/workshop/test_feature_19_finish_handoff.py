@@ -54,7 +54,7 @@ class FinishAnalyzer:
     async def analyze(self, request):
         self.requests.append(request)
         ref = request.final_turn.final_source_ref
-        if request.effort == "medium" or request.final_turn.normalized_text.lower() == "finish workshop":
+        if request.purpose == "FINISH_AUDIT" or request.final_turn.normalized_text.lower() == "finish workshop":
             return AnalyzerTurnResult(
                 schema_version=1, turn_source_ref=ref, finding_proposals=[],
                 complete_package_proposal=None, control_intent=ControlIntent.FINISH,
@@ -186,7 +186,8 @@ def test_finish_runs_medium_audit_keeps_voice_live_and_exposes_exact_idempotent_
         projection = client.get("/api/workshop").json()
         assert projection["handoff"] == handoff
         assert client.post("/api/finish").json()["handoff"] == handoff
-        assert [request.effort for request in analyzer.requests] == ["low", "medium"]
+        assert [request.effort for request in analyzer.requests] == ["medium", "medium"]
+        assert [request.purpose for request in analyzer.requests] == ["TURN", "FINISH_AUDIT"]
         assert client.post("/api/proposals/control", json={
             "intent": "REJECT", "proposal_ref": "old", "edit_instruction": None,
             "acknowledgement": None,
@@ -204,7 +205,7 @@ def test_pending_patch_prevents_finish_before_medium_audit(tmp_path):
         refused = client.post("/api/finish")
         assert refused.status_code == 409
         assert "pending package proposal" in refused.json()["detail"]
-        assert [request.effort for request in analyzer.requests] == ["low"]
+        assert [request.effort for request in analyzer.requests] == ["medium"]
 
 
 def test_explicit_technical_blocker_creates_native_decision_request_and_may_finish(tmp_path):
@@ -291,7 +292,10 @@ def test_provider_final_spoken_finish_uses_same_coordinator_and_does_not_end_voi
             assert voice.session.sent and voice.session.sent[-1].startswith("HANDOFF_READY")
             websocket.send_text('{"type":"END"}')
             assert websocket.receive_json()["state"] == "ENDED"
-    assert [request.effort for request in analyzer.requests] == ["low", "low", "medium"]
+    assert [request.effort for request in analyzer.requests] == ["medium", "medium", "medium"]
+    assert [request.purpose for request in analyzer.requests] == [
+        "TURN", "TURN", "FINISH_AUDIT"
+    ]
 
 
 def test_reconnect_sends_only_authorized_exact_context_in_turn_version_order(tmp_path):

@@ -86,6 +86,19 @@ const formatDate = (value: string) => new Intl.DateTimeFormat("en-GB", {
 
 const shortId = (value: string) => `${value.slice(0, 8)}…${value.slice(-4)}`;
 
+const reportBrowserSpan = (startedAt: number, outcome: "OK" | "ERROR") => {
+  void fetch("/api/telemetry/spans", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      span_id: crypto.randomUUID(),
+      stage: "BROWSER",
+      duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      outcome,
+    }),
+  });
+};
+
 function EvidenceLink({ sourceRef, onFocus }: { sourceRef: SourceRef; onFocus: (line: number) => void }) {
   const line = sourceRef.location.start;
   return (
@@ -123,6 +136,7 @@ export function App() {
   };
 
   useEffect(() => {
+    const startedAt = performance.now();
     Promise.all([
       fetch("/api/bootstrap").then((response) => {
         if (!response.ok) throw new Error("Bootstrap unavailable");
@@ -138,8 +152,12 @@ export function App() {
         setWorkshop(nextWorkshop);
         setCallState(nextWorkshop.session.call_state);
         setNotice("Foundation and delegation verified");
+        reportBrowserSpan(startedAt, "OK");
       })
-      .catch(() => setFailure("Workshop setup failed. Check the local server configuration and source fixtures."));
+      .catch(() => {
+        reportBrowserSpan(startedAt, "ERROR");
+        setFailure("Workshop setup failed. Check the local server configuration and source fixtures.");
+      });
     return () => live.current?.end();
   }, []);
 
@@ -274,6 +292,7 @@ export function App() {
           </div>
           <span className="phase-mark">{phase.replace("_", " ")}</span>
         </header>
+        {bootstrap && <p className="fixed-identity">Fixed PM identity · {shortId(bootstrap.pm_actor_id)}</p>}
 
         <div className="call-stage" data-state={callState}>
           <div className="state-line"><span className="state-dot" />{callState.replace("_", " ")}</div>

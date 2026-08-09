@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import timezone
 from uuid import UUID, uuid5
 
@@ -34,6 +35,7 @@ from .analyzer import (
 from .contracts import PackageProposalRecord, ProposalStatus
 from .orchestration import WorkshopCoordinator
 from .sessions import WorkshopStore
+from .telemetry import SpanOutcome, TelemetryStage
 
 
 GATE_NAMESPACE = UUID("aac80ba7-67e6-5538-a88b-3dac7ebde6ee")
@@ -41,62 +43,124 @@ GATE_NAMESPACE = UUID("aac80ba7-67e6-5538-a88b-3dac7ebde6ee")
 
 class RegisteredEvidenceGrounding:
     """Fail-closed identity/range grounding; semantic fixtures may be injected."""
-    def __init__(self, *, static_refs: dict[UUID, tuple[int, str, int]], store: WorkshopStore, session_id: UUID) -> None:
+    def __init__(self, *, static_refs: dict[UUID, tuple[int, str, int | tuple[str, ...]]], store: WorkshopStore, session_id: UUID) -> None:
         self.static_refs = static_refs; self.store = store; self.session_id = session_id
+        self.last_failure_code: str | None = None
 
     def supports(self, claim: str, evidence_refs: tuple) -> bool:
-        if not claim.strip() or not evidence_refs: return False
+        self.last_failure_code = None
+        if not claim.strip() or not evidence_refs:
+            return self._reject("MISSING_CLAIM_OR_EVIDENCE")
         transcript = {
-            snapshot.final_source_ref.model_dump_json()
+            snapshot.final_source_ref.model_dump_json(): snapshot.normalized_text
             for snapshot in self.store.latest_snapshots(self.session_id)
         }
         for ref in evidence_refs:
-            if ref.model_dump_json() in transcript: continue
+            transcript_text = transcript.get(ref.model_dump_json())
+            if transcript_text is not None:
+                if not self._semantic_overlap(claim, transcript_text):
+                    return self._reject("TRANSCRIPT_SEMANTIC_MISMATCH")
+                continue
             expected = self.static_refs.get(ref.artifact_id)
+            if expected is None:
+                return self._reject("UNKNOWN_SOURCE_ARTIFACT")
+            line_source = None if expected is None else expected[2]
+            line_count = line_source if isinstance(line_source, int) else len(line_source)
             if (
                 expected is None
                 or ref.version != expected[0]
                 or ref.content_hash != expected[1]
                 or not isinstance(ref.location, LineRange)
-                or ref.location.end > expected[2]
+                or ref.location.end > line_count
             ):
-                return False
+                return self._reject("SOURCE_IDENTITY_OR_RANGE_MISMATCH")
+            if isinstance(line_source, tuple):
+                excerpt = "\n".join(line_source[ref.location.start - 1:ref.location.end])
+                if not self._semantic_overlap(claim, excerpt):
+                    return self._reject("SOURCE_SEMANTIC_MISMATCH")
         return True
+
+    def _reject(self, code: str) -> bool:
+        self.last_failure_code = code
+        return False
+
+    @staticmethod
+    def _semantic_overlap(claim: str, evidence: str) -> bool:
+        stop = {
+            "a", "an", "and", "are", "as", "at", "be", "by", "does", "for", "from",
+            "how", "in", "is", "it", "of", "on", "or", "should", "the", "this", "to",
+            "what", "when", "which", "with",
+        }
+        def terms(value: str) -> set[str]:
+            return {
+                token for token in re.findall(r"[a-z0-9]+", value.casefold())
+                if len(token) >= 3 and token not in stop
+            }
+        return bool(terms(claim).intersection(terms(evidence)))
 
 
 class WorkshopGate:
-    def __init__(self, store: WorkshopStore, foundation, analyzer: SpecAnalyzerProvider, grounding: GroundingChecker, *, clock) -> None:
+    def __init__(
+        self,
+        store: WorkshopStore,
+        foundation,
+        analyzer: SpecAnalyzerProvider,
+        grounding: GroundingChecker,
+        *,
+        clock,
+        source_context=None,
+        telemetry=None,
+        default_effort: str = "medium",
+    ) -> None:
         self.store = store; self.foundation = foundation; self.analyzer = analyzer; self.grounding = grounding; self.clock = clock
-        self.coordinator = WorkshopCoordinator(store, foundation, clock=clock)
+        self.source_context = source_context
+        self.telemetry = telemetry
+        self.default_effort = default_effort
+        self.coordinator = WorkshopCoordinator(
+            store, foundation, clock=clock, telemetry=telemetry
+        )
 
     async def analyze_final_turn(
         self,
         session_id: UUID,
         turn_sequence: int,
         *,
-        effort: str = "low",
+        effort: str | None = None,
+        purpose: str = "TURN",
         edit_instruction: str | None = None,
     ) -> AnalyzerTurnResult:
+        resolved_effort = self.default_effort if effort is None else effort
         session = self.store.get_session(session_id)
         snapshots = {value.turn_sequence: value for value in self.store.latest_snapshots(session_id)}
         final = snapshots.get(turn_sequence)
         if final is None:
             raise ValueError("only persisted provider-final PM evidence may be analyzed")
         edit_identity = canonical_sha256(edit_instruction or "")
-        request_id = uuid5(GATE_NAMESPACE, f"{session_id}:analyze:{turn_sequence}:{final.version}:{effort}:{edit_identity}")
+        request_id = uuid5(GATE_NAMESPACE, f"{session_id}:analyze:{turn_sequence}:{final.version}:{resolved_effort}:{purpose}:{edit_identity}")
         request = AnalyzerRequest(
-            request_id=request_id, session_id=session_id, effort=effort, phase=session.conversation_phase,
+            request_id=request_id, session_id=session_id, effort=resolved_effort, purpose=purpose,
+            phase=session.conversation_phase,
             final_turn=final,
+            source_context=self.source_context,
+            final_transcript_snapshots=self.store.all_snapshots(session_id),
             committed_context_json=self._committed_context(session, edit_instruction),
         )
+        span_id = None
+        if self.telemetry is not None:
+            span_id = self.telemetry.start(
+                session_id=session_id,
+                stage=TelemetryStage.ANALYZER,
+                operation_id=str(request_id),
+            )
         result = None
+        last_error = None
         for attempt, delay in enumerate((0.0, 0.25, 0.75), start=1):
             if delay: await asyncio.sleep(delay)
             self.store.record_analyzer_attempt(
                 request_id=request_id,
                 session_id=session_id,
                 turn_sequence=turn_sequence,
-                effort=effort,
+                effort=resolved_effort,
                 status="IN_FLIGHT",
                 attempt_count=attempt,
                 now=self.clock.now(),
@@ -107,26 +171,35 @@ class WorkshopGate:
                     request_id=request_id,
                     session_id=session_id,
                     turn_sequence=turn_sequence,
-                    effort=effort,
+                    effort=resolved_effort,
                     status="CONFIRMED",
                     attempt_count=attempt,
                     now=self.clock.now(),
                 )
                 break
-            except Exception:
+            except Exception as exc:
+                last_error = exc
                 continue
         if result is None:
             self.store.record_analyzer_attempt(
                 request_id=request_id,
                 session_id=session_id,
                 turn_sequence=turn_sequence,
-                effort=effort,
+                effort=resolved_effort,
                 status="FAILED",
                 attempt_count=3,
                 now=self.clock.now(),
             )
             self.store.lock_session(session_id, "ANALYZER_UNAVAILABLE", self.clock.now())
-            raise RuntimeError("analyzer failed after bounded retries")
+            if span_id is not None:
+                self.telemetry.finish(
+                    span_id,
+                    outcome=SpanOutcome.ERROR,
+                    error_code="ANALYZER_UNAVAILABLE",
+                )
+            raise RuntimeError("analyzer failed after bounded retries") from last_error
+        if span_id is not None:
+            self.telemetry.finish(span_id, outcome=SpanOutcome.OK)
         if result.turn_source_ref != final.final_source_ref:
             raise ValueError("analyzer turn SourceRef mismatch")
         validate_phase(result, session.conversation_phase)
@@ -369,17 +442,27 @@ class WorkshopGate:
         if proposal:
             for value in [*proposal.requirements, *proposal.technical_decisions, *proposal.acceptance_checks]:
                 claims.append((value.statement, tuple(value.source_refs)))
-        if any(not self.grounding.supports(claim, refs) for claim, refs in claims):
-            raise ValueError("analyzer proposal is not grounded in its cited evidence")
+        for claim, refs in claims:
+            if not self.grounding.supports(claim, refs):
+                code = getattr(self.grounding, "last_failure_code", None)
+                suffix = f": {code}" if isinstance(code, str) else ""
+                raise ValueError(
+                    "analyzer proposal is not grounded in its cited evidence" + suffix
+                )
 
     def _committed_context(self, session, edit_instruction: str | None = None) -> str:
         try:
             governance = self.foundation.get_spec_package_governance(
                 QueryOne(case_id=session.case_id, acting_actor_id=session.pm_actor_id)
             ).model_dump(mode="json")
+            content = self.foundation.get_spec_package_content(
+                QueryOne(case_id=session.case_id, acting_actor_id=session.pm_actor_id)
+            ).model_dump(mode="json")
         except Exception:
             governance = None
+            content = None
         return json.dumps({
+            "content": content,
             "governance": governance,
             "edit_instruction": edit_instruction,
         }, sort_keys=True, separators=(",", ":"))

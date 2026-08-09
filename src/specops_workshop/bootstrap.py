@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict
@@ -39,9 +40,11 @@ class BootstrapView(BaseModel):
     pm_actor_id: UUID
     dev_lead_actor_id: UUID
     delegation_id: UUID
+    delegation_domain: Literal["TECHNICAL"]
     delegation_valid_from: datetime
     delegation_valid_until: datetime
     delegation_command_scope: tuple[str, ...]
+    delegation_later_review_required: Literal[True]
     pm_source_id: UUID
     technical_source_id: UUID
     technical_source_lines: tuple[tuple[int, str], ...]
@@ -105,9 +108,11 @@ def bootstrap_foundation(
         pm_actor_id=PM_ACTOR_ID,
         dev_lead_actor_id=DEV_LEAD_ACTOR_ID,
         delegation_id=DELEGATION_ID,
+        delegation_domain=fixture.domain,
         delegation_valid_from=fixture.valid_from,
         delegation_valid_until=fixture.valid_until,
         delegation_command_scope=fixture.command_scope,
+        delegation_later_review_required=fixture.later_review_required,
         pm_source_id=PM_SOURCE_ID,
         technical_source_id=TECHNICAL_SOURCE_ID,
         technical_source_lines=tuple(catalog.numbered_lines(SourceName.TECHNICAL_SPEC)),

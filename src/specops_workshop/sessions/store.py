@@ -21,6 +21,7 @@ from ..contracts import (
     WorkshopSession,
     WorkshopState,
 )
+from ..telemetry import LatencySpan, SpanOutcome, TelemetryStage
 
 
 metadata = MetaData()
@@ -380,6 +381,125 @@ class WorkshopStore:
                     analyzer_requests.c.request_id == str(request_id)
                 ).values(**values))
 
+    def start_latency_span(self, value: LatencySpan) -> LatencySpan:
+        if value.ended_at is not None or value.duration_ms is not None or value.outcome is not None:
+            raise ValueError("a new latency span must be open")
+        with self.engine.begin() as connection:
+            existing = connection.execute(select(latency_spans).where(
+                latency_spans.c.span_id == str(value.span_id)
+            )).mappings().one_or_none()
+            if existing is not None:
+                hydrated = self._latency_span(existing)
+                if hydrated != value:
+                    raise ValueError("latency span identity conflict")
+                return hydrated
+            connection.execute(insert(latency_spans).values(
+                span_id=str(value.span_id),
+                session_id=str(value.session_id),
+                stage=value.stage.value,
+                started_at=_instant(value.started_at),
+                ended_at=None,
+                duration_ms=None,
+                outcome=None,
+            ))
+        return value
+
+    def finish_latency_span(
+        self,
+        span_id: UUID,
+        *,
+        ended_at: datetime,
+        outcome: SpanOutcome,
+    ) -> LatencySpan:
+        with self.engine.begin() as connection:
+            row = connection.execute(select(latency_spans).where(
+                latency_spans.c.span_id == str(span_id)
+            )).mappings().one()
+            existing = self._latency_span(row)
+            if existing.ended_at is not None:
+                if existing.outcome != outcome:
+                    raise ValueError("completed latency span outcome conflict")
+                return existing
+            normalized_end = ended_at.astimezone(timezone.utc)
+            if normalized_end < existing.started_at:
+                raise ValueError("latency span cannot end before it starts")
+            duration_ms = int(
+                (normalized_end - existing.started_at).total_seconds() * 1000
+            )
+            connection.execute(update(latency_spans).where(
+                latency_spans.c.span_id == str(span_id)
+            ).values(
+                ended_at=_instant(normalized_end),
+                duration_ms=duration_ms,
+                outcome=outcome.value,
+            ))
+        return existing.model_copy(update={
+            "ended_at": normalized_end,
+            "duration_ms": duration_ms,
+            "outcome": outcome,
+        })
+
+    def record_completed_latency_span(self, value: LatencySpan) -> LatencySpan:
+        if value.ended_at is None or value.duration_ms is None or value.outcome is None:
+            raise ValueError("a completed latency span requires end, duration, and outcome")
+        expected = int((value.ended_at - value.started_at).total_seconds() * 1000)
+        if value.duration_ms != expected:
+            raise ValueError("latency span duration does not match its timestamps")
+        self.start_latency_span(value.model_copy(update={
+            "ended_at": None,
+            "duration_ms": None,
+            "outcome": None,
+        }))
+        return self.finish_latency_span(
+            value.span_id,
+            ended_at=value.ended_at,
+            outcome=value.outcome,
+        )
+
+    def list_latency_spans(self, session_id: UUID) -> tuple[LatencySpan, ...]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(latency_spans).where(
+                latency_spans.c.session_id == str(session_id)
+            ).order_by(latency_spans.c.started_at, latency_spans.c.span_id)).mappings()
+            return tuple(self._latency_span(row) for row in rows)
+
+    def record_agent_interruption(
+        self,
+        *,
+        session_id: UUID,
+        agent_turn_id: str,
+        provider_request_id: str,
+        interrupted_at: datetime,
+    ) -> None:
+        with self.engine.begin() as connection:
+            existing = connection.execute(select(agent_interruptions).where(
+                agent_interruptions.c.session_id == str(session_id),
+                agent_interruptions.c.agent_turn_id == agent_turn_id,
+            )).mappings().one_or_none()
+            values = {
+                "session_id": str(session_id),
+                "agent_turn_id": agent_turn_id,
+                "provider_request_id": provider_request_id,
+                "interrupted_at": _instant(interrupted_at),
+            }
+            if existing is not None:
+                if dict(existing) != values:
+                    raise ValueError("agent interruption identity conflict")
+                return
+            connection.execute(insert(agent_interruptions).values(**values))
+
+    def list_agent_interruptions(self, session_id: UUID) -> tuple[dict[str, object], ...]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(agent_interruptions).where(
+                agent_interruptions.c.session_id == str(session_id)
+            ).order_by(agent_interruptions.c.interrupted_at, agent_interruptions.c.agent_turn_id)).mappings()
+            return tuple({
+                "session_id": UUID(row["session_id"]),
+                "agent_turn_id": row["agent_turn_id"],
+                "provider_request_id": row["provider_request_id"],
+                "interrupted_at": _parse_instant(row["interrupted_at"]),
+            } for row in rows)
+
     def save_proposal(self, value: PackageProposalRecord) -> PackageProposalRecord:
         with self.engine.begin() as connection:
             prior = connection.execute(select(package_proposals).where(
@@ -502,4 +622,16 @@ class WorkshopStore:
             base_foundation_revision=row["base_foundation_revision"], analyzer_result_json=row["analyzer_result_json"],
             status=ProposalStatus(row["status"]), created_at=_parse_instant(row["created_at"]),
             updated_at=_parse_instant(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _latency_span(row) -> LatencySpan:
+        return LatencySpan(
+            span_id=UUID(row["span_id"]),
+            session_id=UUID(row["session_id"]),
+            stage=TelemetryStage(row["stage"]),
+            started_at=_parse_instant(row["started_at"]),
+            ended_at=None if row["ended_at"] is None else _parse_instant(row["ended_at"]),
+            duration_ms=row["duration_ms"],
+            outcome=None if row["outcome"] is None else SpanOutcome(row["outcome"]),
         )

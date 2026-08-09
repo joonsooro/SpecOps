@@ -40,6 +40,7 @@ from ..contracts import (
     WorkshopState,
 )
 from ..sessions import WorkshopStore
+from ..telemetry import SpanOutcome, TelemetryStage
 
 
 TRANSCRIPT_NAMESPACE = UUID("f620329f-45dc-5126-a43f-5e4e3e7a3769")
@@ -61,10 +62,18 @@ class FoundationGateway(Protocol):
 
 
 class WorkshopCoordinator:
-    def __init__(self, store: WorkshopStore, foundation: FoundationGateway | WorkflowService, *, clock: Clock) -> None:
+    def __init__(
+        self,
+        store: WorkshopStore,
+        foundation: FoundationGateway | WorkflowService,
+        *,
+        clock: Clock,
+        telemetry=None,
+    ) -> None:
         self.store = store
         self.foundation = foundation
         self.clock = clock
+        self.telemetry = telemetry
 
     def start_session(self, session_id: UUID, *, case_id: UUID, pm_actor_id: UUID) -> WorkshopSession:
         now = self.clock.now().astimezone(timezone.utc)
@@ -150,6 +159,13 @@ class WorkshopCoordinator:
             raise ValueError("rejected outbox entry cannot be retried")
         command = command_type.model_validate_json(outbox.command_json)
         now = self.clock.now().astimezone(timezone.utc)
+        span_id = None
+        if self.telemetry is not None:
+            span_id = self.telemetry.start(
+                session_id=outbox.session_id,
+                stage=TelemetryStage.FOUNDATION,
+                operation_id=f"{outbox.outbox_id}:{outbox.attempts + 1}",
+            )
         try:
             result = getattr(self.foundation, outbox.command_name)(command)
         except DomainError as exc:
@@ -157,21 +173,41 @@ class WorkshopCoordinator:
                 self.store.record_dispatch(outbox_id, status=OutboxStatus.REJECTED, now=now, lock_reason="FOUNDATION_REVISION_MISMATCH")
             else:
                 self.store.record_dispatch(outbox_id, status=OutboxStatus.REJECTED, now=now, lock_reason="FOUNDATION_COMMAND_REJECTED")
+            if span_id is not None:
+                self.telemetry.finish(
+                    span_id,
+                    outcome=SpanOutcome.ERROR,
+                    error_code=exc.code.value,
+                )
             raise
         except Exception:
             self.store.record_dispatch(
                 outbox_id, status=OutboxStatus.UNKNOWN, now=now,
                 lock_reason="FOUNDATION_OUTCOME_UNKNOWN",
             )
+            if span_id is not None:
+                self.telemetry.finish(
+                    span_id,
+                    outcome=SpanOutcome.ERROR,
+                    error_code="FOUNDATION_OUTCOME_UNKNOWN",
+                )
             raise
         stored = result.stored_result if not result.mutated else result
         if not isinstance(stored, result_type):
             self.store.record_dispatch(outbox_id, status=OutboxStatus.REJECTED, now=now, lock_reason="FOUNDATION_RESULT_TYPE_MISMATCH")
+            if span_id is not None:
+                self.telemetry.finish(
+                    span_id,
+                    outcome=SpanOutcome.ERROR,
+                    error_code="FOUNDATION_RESULT_TYPE_MISMATCH",
+                )
             raise TypeError("foundation returned the wrong typed result")
         self.store.record_dispatch(
             outbox_id, status=OutboxStatus.CONFIRMED, now=now,
             result_json=stored.model_dump_json(), confirmed_revision=stored.receipt.revision,
         )
+        if span_id is not None:
+            self.telemetry.finish(span_id, outcome=SpanOutcome.OK)
         return stored
 
     def enqueue_foundation_command(

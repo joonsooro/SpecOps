@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import WebSocket, WebSocketDisconnect
 from specops_workflow.errors import DomainError, ErrorCode
@@ -14,6 +14,7 @@ from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider, LiveVoiceSession, VoiceContext, VoiceEventType
 from .sessions import WorkshopStore
+from .telemetry import SpanOutcome, TelemetryStage
 
 
 INPUT_AUDIO_LIMIT = 320_000
@@ -62,6 +63,7 @@ class LiveTransport:
         idle_timeout_seconds: float = IDLE_TIMEOUT_SECONDS,
         gate=None,
         finish_coordinator=None,
+        telemetry=None,
     ) -> None:
         self.provider = provider
         self.coordinator = coordinator
@@ -74,9 +76,18 @@ class LiveTransport:
         self.gate = gate
         self._generation_blocked = False
         self.finish_coordinator = finish_coordinator
+        self.telemetry = telemetry
+        self._confirmation_prompt_active = False
 
     async def handle(self, websocket: WebSocket) -> None:
         await websocket.accept()
+        gateway_span = None
+        if self.telemetry is not None:
+            gateway_span = self.telemetry.start(
+                session_id=self.session_id,
+                stage=TelemetryStage.GATEWAY,
+                operation_id=str(uuid4()),
+            )
         recovered = self.coordinator.recover(self.session_id)
         query = QueryOne(
             case_id=recovered.session.case_id,
@@ -105,7 +116,11 @@ class LiveTransport:
         )
         session = await self._connect_with_retry(websocket, context)
         if session is None:
-            await self._text_only(websocket)
+            try:
+                await self._text_only(websocket)
+            finally:
+                if gateway_span is not None:
+                    self.telemetry.finish(gateway_span, outcome=SpanOutcome.OK)
             return
         self.store.update_phase(self.session_id, call_state=CallState.LISTENING, now=self.coordinator.clock.now())
         await websocket.send_json({"type": "CALL_STATE", "state": CallState.LISTENING.value})
@@ -118,12 +133,34 @@ class LiveTransport:
             for task in pending:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
+            fallback = False
             for task in done:
-                task.result()
+                try:
+                    task.result()
+                except WebSocketDisconnect:
+                    raise
+                except Exception:
+                    fallback = True
+            if self.store.get_session(self.session_id).call_state == CallState.DISCONNECTED:
+                fallback = True
+            if fallback:
+                self.store.update_phase(
+                    self.session_id,
+                    call_state=CallState.DISCONNECTED,
+                    now=self.coordinator.clock.now(),
+                )
+                await websocket.send_json({
+                    "type": "CALL_STATE",
+                    "state": CallState.DISCONNECTED.value,
+                    "guidance": "Voice disconnected. Continue with text; committed final turns remain available.",
+                })
+                await self._text_only(websocket)
         except WebSocketDisconnect:
             self.store.update_phase(self.session_id, call_state=CallState.DISCONNECTED, now=self.coordinator.clock.now())
         finally:
             await session.close()
+            if gateway_span is not None:
+                self.telemetry.finish(gateway_span, outcome=SpanOutcome.OK)
 
     async def _connect_with_retry(self, websocket: WebSocket, context: VoiceContext) -> LiveVoiceSession | None:
         self.store.update_phase(self.session_id, call_state=CallState.CONNECTING, now=self.coordinator.clock.now())
@@ -196,7 +233,12 @@ class LiveTransport:
                             "HANDOFF_READY. Summarize only these committed handoff facts: "
                             + finished.handoff.model_dump_json()
                         )
-                else:
+                elif proposal is not None and proposal.next_question:
+                    await session.send_text(
+                        "Speak exactly this governed question and add nothing: "
+                        + proposal.next_question
+                    )
+                elif proposal is None:
                     await session.send_text(str(value["text"]))
             elif kind == "FINISH":
                 if self.finish_coordinator is None:
@@ -226,6 +268,10 @@ class LiveTransport:
                     acknowledgement=value.get("acknowledgement"),
                     next_question=None,
                 )
+                pending_record = self.store.pending_proposal(self.session_id)
+                pending_result = None if pending_record is None else AnalyzerTurnResult.model_validate_json(
+                    pending_record.analyzer_result_json
+                )
                 applied = self.gate.apply_control(
                     self.session_id,
                     control,
@@ -244,13 +290,37 @@ class LiveTransport:
                     "status": None if applied is None else applied.status.value,
                 })
                 if intent == ControlIntent.CONFIRM:
-                    await session.send_text(
-                        "The proposed package is committed. Continue with one focused question."
-                    )
+                    governed_question = None if pending_result is None else pending_result.next_question
+                    if governed_question:
+                        await session.send_text(
+                            "The package commit is confirmed. Speak exactly this governed question and add nothing: "
+                            + governed_question
+                        )
+                    else:
+                        await session.send_text("Say exactly: Package committed.")
             elif kind == "INTERRUPT":
                 audio.clear()
+                marker = str(uuid4())
+                self.store.record_agent_interruption(
+                    session_id=self.session_id,
+                    agent_turn_id=f"client-{marker}",
+                    provider_request_id=f"client-{marker}",
+                    interrupted_at=self.coordinator.clock.now(),
+                )
                 await websocket.send_json({"type": "INTERRUPTED", "playback_cleared": True})
                 await session.interrupt()
+            elif kind == "DEVICE_FAILURE":
+                self.store.update_phase(
+                    self.session_id,
+                    call_state=CallState.DISCONNECTED,
+                    now=self.coordinator.clock.now(),
+                )
+                await websocket.send_json({
+                    "type": "CALL_STATE",
+                    "state": CallState.DISCONNECTED.value,
+                    "guidance": "Microphone became unavailable. Continue with text or reconnect the device.",
+                })
+                return
             elif kind == "END":
                 self.store.update_phase(
                     self.session_id, call_state=CallState.ENDED, conversation_phase=ConversationPhase.COMPLETE,
@@ -283,12 +353,31 @@ class LiveTransport:
         next_sequence = len(self.store.latest_snapshots(self.session_id)) + 1
         async for event in session.events():
             if event.type == VoiceEventType.AUDIO and event.audio is not None:
-                if self._generation_blocked:
+                if self._generation_blocked and not self._confirmation_prompt_active:
                     continue
+                current = self.store.get_session(self.session_id)
+                if current.call_state != CallState.AGENT_SPEAKING:
+                    self.store.update_phase(
+                        self.session_id,
+                        call_state=CallState.AGENT_SPEAKING,
+                        now=self.coordinator.clock.now(),
+                    )
+                    await websocket.send_json({
+                        "type": "CALL_STATE", "state": CallState.AGENT_SPEAKING.value
+                    })
+                playback_span = None
+                if self.telemetry is not None:
+                    playback_span = self.telemetry.start(
+                        session_id=self.session_id,
+                        stage=TelemetryStage.PLAYBACK,
+                        operation_id=f"{event.provider_request_id or uuid4()}:{uuid4()}",
+                    )
                 output.push(event.audio)
                 chunk = output.pop()
                 if chunk is not None:
                     await websocket.send_bytes(chunk)
+                if playback_span is not None:
+                    self.telemetry.finish(playback_span, outcome=SpanOutcome.OK)
             elif event.type == VoiceEventType.INPUT_PARTIAL:
                 await websocket.send_json({"type": "TRANSCRIPT_PARTIAL", "text": event.text})
             elif event.type == VoiceEventType.INPUT_FINAL and event.text:
@@ -322,12 +411,36 @@ class LiveTransport:
                     )
                 next_sequence += 1
             elif event.type == VoiceEventType.OUTPUT_TRANSCRIPT:
-                if self._generation_blocked:
+                if self._generation_blocked and not self._confirmation_prompt_active:
                     continue
                 await websocket.send_json({"type": "AGENT_TRANSCRIPT", "text": event.text})
             elif event.type == VoiceEventType.INTERRUPTED:
                 output.clear()
+                request_id = event.provider_request_id or f"provider-{uuid4()}"
+                self.store.record_agent_interruption(
+                    session_id=self.session_id,
+                    agent_turn_id=request_id,
+                    provider_request_id=request_id,
+                    interrupted_at=self.coordinator.clock.now(),
+                )
                 await websocket.send_json({"type": "INTERRUPTED", "playback_cleared": True})
+            elif event.type == VoiceEventType.TURN_COMPLETE:
+                self._confirmation_prompt_active = False
+                self.store.update_phase(
+                    self.session_id,
+                    call_state=CallState.LISTENING,
+                    now=self.coordinator.clock.now(),
+                )
+                await websocket.send_json({
+                    "type": "CALL_STATE", "state": CallState.LISTENING.value
+                })
+            elif event.type == VoiceEventType.DISCONNECTED:
+                self.store.update_phase(
+                    self.session_id,
+                    call_state=CallState.DISCONNECTED,
+                    now=self.coordinator.clock.now(),
+                )
+                return
 
     async def _text_only(self, websocket: WebSocket) -> None:
         while True:

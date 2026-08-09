@@ -22,6 +22,14 @@ from specops_workshop.contracts import ConversationPhase, ProposalStatus
 from specops_workshop.gate import WorkshopGate
 from specops_workshop.gate import RegisteredEvidenceGrounding
 from specops_workshop.providers.openai_responses import TerraResponsesProvider
+from specops_workshop.providers.terra_decomposition import (
+    TerraCacheWarmResult,
+    TerraDecisionPlan,
+    TerraFindingPlan,
+    TerraFinishAuditPlan,
+    TerraGroundedText,
+    TerraPackageOutline,
+)
 from specops_workshop.sources import SourceCatalog, SourceName
 
 
@@ -325,7 +333,8 @@ def test_substantive_voice_continuation_waits_for_typed_confirmed_foundation_com
             "status": "COMMITTED",
         }
         assert voice.session.text == [
-            "The proposed package is committed. Continue with one focused question."
+            "The package commit is confirmed. Speak exactly this governed question and add nothing: "
+            "Should we confirm this package?"
         ]
         governance = app.state.workflow.get_spec_package_governance(QueryOne(
             case_id=app.state.bootstrap.case_id,
@@ -341,7 +350,8 @@ def test_terra_adapter_pins_responses_structured_output_and_low_effort(tmp_path)
         def __init__(self): self.calls = []
         async def create(self, **kwargs):
             self.calls.append(kwargs)
-            return type("Response", (), {"output_text": expected.model_dump_json()})()
+            value = responses[len(self.calls) - 1]
+            return type("Response", (), {"output_text": value.model_dump_json()})()
     class Client:
         def __init__(self): self.responses = Responses()
 
@@ -358,14 +368,48 @@ def test_terra_adapter_pins_responses_structured_output_and_low_effort(tmp_path)
         provider_request_id="terra-request-shape",
     )
     snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
-    expected = proposal_result(snapshot.final_source_ref)
+    ref = snapshot.final_source_ref
+    plan = TerraDecisionPlan(
+        schema_version=1,
+        turn_source_ref=ref,
+        findings=[TerraFindingPlan(
+            domain=Domain.TECHNICAL,
+            evidence_refs=[ref],
+            clarification_question="Which export decision remains unresolved?",
+        )],
+    )
+    outline = TerraPackageOutline(
+        schema_version=1,
+        turn_source_ref=ref,
+        item_title="Complete filtered export",
+        business_requirement=TerraGroundedText(
+            statement="Export every filtered order",
+            evidence_refs=[ref],
+        ),
+        technical_decision=TerraGroundedText(
+            statement="Generate large exports asynchronously",
+            evidence_refs=[ref],
+        ),
+        acceptance_check=TerraGroundedText(
+            statement="No filtered order is truncated",
+            evidence_refs=[ref],
+        ),
+    )
+    responses = [
+        TerraCacheWarmResult(status="ready"),
+        plan,
+        TerraCacheWarmResult(status="ready"),
+        outline,
+    ]
     request = AnalyzerRequest(
         request_id=uuid4(),
         session_id=DEMO_SESSION_ID,
         effort="low",
         phase=ConversationPhase.WORKSHOP,
         final_turn=snapshot,
-        committed_context_json="null",
+        source_context=app.state.analyzer_source_context,
+        final_transcript_snapshots=(snapshot,),
+        committed_context_json='{"content":null,"edit_instruction":null,"governance":null}',
     )
     client = Client()
     provider = TerraResponsesProvider(
@@ -373,14 +417,89 @@ def test_terra_adapter_pins_responses_structured_output_and_low_effort(tmp_path)
         model=TERRA_MODEL,
         client=client,
     )
-    assert asyncio.run(provider.analyze(request)) == expected
-    call = client.responses.calls[0]
-    assert call["model"] == TERRA_MODEL
-    assert call["reasoning"] == {"effort": "low"}
-    assert call["store"] is False
-    assert call["text"]["format"]["type"] == "json_schema"
-    assert call["text"]["format"]["strict"] is True
-    assert "server-only-test-value" not in str(call)
+    analyzed = asyncio.run(provider.analyze(request))
+    package = analyzed.complete_package_proposal
+    assert package is not None
+    assert package.proposal_key == "package-001"
+    assert package.items[0].proposal_key == "item-001"
+    assert package.requirements[0].proposal_key == "requirement-001"
+    assert package.technical_decisions[0].proposal_key == "technical-decision-001"
+    assert package.acceptance_checks[0].related_unit_proposal_keys == [
+        "requirement-001", "technical-decision-001"
+    ]
+    assert analyzed.acknowledgement == "Evidence analyzed"
+    assert analyzed.next_question == plan.findings[0].clarification_question
+    assert len(client.responses.calls) == 4
+    assert [call["text"]["format"]["name"] for call in client.responses.calls] == [
+        "terra_cache_warm_v1",
+        "terra_decision_plan_v1",
+        "terra_cache_warm_v1",
+        "terra_package_outline_v1",
+    ]
+    for call in client.responses.calls:
+        assert call["model"] == TERRA_MODEL
+        assert call["reasoning"] == {"effort": "low"}
+        assert call["store"] is False
+        assert call["text"]["format"]["type"] == "json_schema"
+        assert call["text"]["format"]["strict"] is True
+        assert "server-only-test-value" not in str(call)
+
+
+def test_terra_medium_finish_audit_allows_no_new_finding_or_package(tmp_path):
+    class Responses:
+        def __init__(self): self.calls = []
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            value = responses[len(self.calls) - 1]
+            return type("Response", (), {"output_text": value.model_dump_json()})()
+
+    app = create_app(
+        settings=configured(tmp_path),
+        clock=FrozenClock(NOW),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+    )
+    app.state.coordinator.commit_final_turn(
+        DEMO_SESSION_ID,
+        turn_sequence=1,
+        text="Finish workshop",
+        provider_request_id="terra-medium-audit",
+    )
+    snapshot = app.state.workshop_store.latest_snapshots(DEMO_SESSION_ID)[0]
+    audit = TerraFinishAuditPlan(
+        schema_version=1,
+        turn_source_ref=snapshot.final_source_ref,
+        findings=[],
+    )
+    responses = [TerraCacheWarmResult(status="ready"), audit]
+    client = type("Client", (), {"responses": Responses()})()
+    request = AnalyzerRequest(
+        request_id=uuid4(),
+        session_id=DEMO_SESSION_ID,
+        effort="medium",
+        purpose="FINISH_AUDIT",
+        phase=ConversationPhase.WORKSHOP,
+        final_turn=snapshot,
+        source_context=app.state.analyzer_source_context,
+        final_transcript_snapshots=(snapshot,),
+        committed_context_json='{"content":null,"edit_instruction":null,"governance":null}',
+    )
+    result = asyncio.run(TerraResponsesProvider(
+        api_key="server-only-test-value",
+        model=TERRA_MODEL,
+        client=client,
+    ).analyze(request))
+    assert result.complete_package_proposal is None
+    assert result.finding_proposals == []
+    assert result.acknowledgement == "Audit complete"
+    assert result.next_question is None
+    assert [call["text"]["format"]["name"] for call in client.responses.calls] == [
+        "terra_cache_warm_v1", "terra_finish_audit_v1"
+    ]
+    assert all(
+        call["reasoning"] == {"effort": "medium"}
+        for call in client.responses.calls
+    )
 
 
 def test_crash_after_package_commit_replays_same_outbox_identity_and_finishes_gate(tmp_path):

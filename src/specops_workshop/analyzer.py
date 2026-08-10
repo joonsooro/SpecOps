@@ -21,6 +21,10 @@ class ControlIntent(StrEnum):
     NONE = "NONE"; CONFIRM = "CONFIRM"; EDIT = "EDIT"; REJECT = "REJECT"; FINISH = "FINISH"
 class ControlTarget(StrEnum): WORKSHOP_PATCH = "WORKSHOP_PATCH"
 class ProposalDisposition(StrEnum): OPEN = "OPEN"; RESOLVED = "RESOLVED"
+class SemanticOutcome(StrEnum):
+    PACKAGE_PROPOSAL = "PACKAGE_PROPOSAL"
+    FOCUSED_CLARIFICATION = "FOCUSED_CLARIFICATION"
+    CONTROL = "CONTROL"
 
 
 class FindingProposal(WorkshopModel):
@@ -137,6 +141,11 @@ class SemanticAnalyzerRequest(WorkshopModel):
     schema_version: Literal[1]
     purpose: Literal["TURN", "FINISH_AUDIT"] = "TURN"
     phase: ConversationPhase
+    required_outcome: Literal[
+        "PACKAGE_PROPOSAL",
+        "FOCUSED_CLARIFICATION",
+        "CONTROL",
+    ] = "PACKAGE_PROPOSAL"
     final_turn_text: str = Field(min_length=1, max_length=100_000)
     business_context: str = Field(min_length=1, max_length=250_000)
     candidates: tuple[SelectedSemanticEvidence, ...] = Field(min_length=1, max_length=5)
@@ -202,6 +211,11 @@ class SemanticPackageDelta(WorkshopModel):
 
 class SemanticTurnDraft(WorkshopModel):
     schema_version: Literal[1]
+    outcome: Literal[
+        "PACKAGE_PROPOSAL",
+        "FOCUSED_CLARIFICATION",
+        "CONTROL",
+    ]
     findings: tuple[SemanticFinding, ...] = Field(max_length=1)
     package_delta: SemanticPackageDelta | None
     control_intent: ControlIntent
@@ -225,11 +239,83 @@ class SemanticTurnDraft(WorkshopModel):
                 raise ValueError("EDIT requires an edit instruction")
         elif self.edit_instruction is not None:
             raise ValueError("only EDIT may carry an edit instruction")
-        if self.control_intent != ControlIntent.NONE and (
-            self.findings or self.package_delta is not None
-        ):
-            raise ValueError("control-only semantic drafts cannot carry analysis")
+        if self.outcome == SemanticOutcome.PACKAGE_PROPOSAL:
+            if self.package_delta is None or self.findings or self.control_intent != ControlIntent.NONE:
+                raise ValueError("PACKAGE_PROPOSAL requires only one package delta")
+        elif self.outcome == SemanticOutcome.FOCUSED_CLARIFICATION:
+            if len(self.findings) != 1 or self.package_delta is not None or self.control_intent != ControlIntent.NONE:
+                raise ValueError("FOCUSED_CLARIFICATION requires only one focused finding")
+        elif self.outcome == SemanticOutcome.CONTROL:
+            if (
+                self.control_intent == ControlIntent.NONE
+                or self.findings
+                or self.package_delta is not None
+            ):
+                raise ValueError("CONTROL requires only one non-NONE control intent")
         return self
+
+
+class PackageProposalSemanticDraft(WorkshopModel):
+    """Provider-schema branch for the only productive package outcome."""
+
+    schema_version: Literal[1]
+    outcome: Literal["PACKAGE_PROPOSAL"]
+    findings: tuple[SemanticFinding, ...] = Field(max_length=0)
+    package_delta: SemanticPackageDelta
+    control_intent: Literal[ControlIntent.NONE]
+    edit_instruction: Literal[None] = None
+    acknowledgement: str | None = Field(default=None, max_length=240)
+    next_question: str | None = Field(default=None, max_length=2000)
+    uncertainty: str | None = Field(default=None, max_length=1000)
+
+
+class FocusedClarificationSemanticDraft(WorkshopModel):
+    """Provider-schema branch for one grounded, decision-closing question."""
+
+    schema_version: Literal[1]
+    outcome: Literal["FOCUSED_CLARIFICATION"]
+    findings: tuple[SemanticFinding, ...] = Field(min_length=1, max_length=1)
+    package_delta: Literal[None] = None
+    control_intent: Literal[ControlIntent.NONE]
+    edit_instruction: Literal[None] = None
+    acknowledgement: str | None = Field(default=None, max_length=240)
+    next_question: str | None = Field(default=None, max_length=2000)
+    uncertainty: str | None = Field(default=None, max_length=1000)
+
+
+class ControlSemanticDraft(WorkshopModel):
+    """Provider-schema branch for an existing governed control intent."""
+
+    schema_version: Literal[1]
+    outcome: Literal["CONTROL"]
+    findings: tuple[SemanticFinding, ...] = Field(max_length=0)
+    package_delta: Literal[None] = None
+    control_intent: Literal[
+        ControlIntent.CONFIRM,
+        ControlIntent.EDIT,
+        ControlIntent.REJECT,
+        ControlIntent.FINISH,
+    ]
+    edit_instruction: str | None = Field(default=None, max_length=2000)
+    acknowledgement: str | None = Field(default=None, max_length=240)
+    next_question: str | None = Field(default=None, max_length=2000)
+    uncertainty: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def exact_control_fields(self):
+        if self.control_intent == ControlIntent.EDIT and not self.edit_instruction:
+            raise ValueError("EDIT requires an edit instruction")
+        if self.control_intent != ControlIntent.EDIT and self.edit_instruction is not None:
+            raise ValueError("only EDIT may carry an edit instruction")
+        return self
+
+
+ProviderSemanticTurnDraft = Annotated[
+    PackageProposalSemanticDraft
+    | FocusedClarificationSemanticDraft
+    | ControlSemanticDraft,
+    Field(discriminator="outcome"),
+]
 
 
 class SpecAnalyzerProvider(Protocol):

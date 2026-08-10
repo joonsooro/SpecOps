@@ -427,6 +427,7 @@ def test_authorized_terra_context_is_exact_and_excludes_contract(tmp_path, monke
     )
     draft = SemanticTurnDraft(
         schema_version=1,
+        outcome="PACKAGE_PROPOSAL",
         findings=(),
         package_delta=SemanticPackageDelta(
             item_title="Timezone-safe export",

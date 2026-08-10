@@ -8,8 +8,7 @@ SW_IDS = tuple(f"SW-EV-{index:03d}" for index in range(1, 25))
 SW_EVIDENCE = {
     "SW-EV-001": (("playwright", "frontend/e2e/workshop.spec.ts", "renders the governed three-panel projection and focuses exact evidence"),),
     "SW-EV-002": (
-        ("pytest", "tests/workshop/test_feature_20_release.py", "test_authorized_terra_context_is_exact_and_excludes_contract"),
-        ("pytest", "tests/workshop/test_feature_20_release.py", "test_terra_gateway_minimizes_committed_governance_identifiers"),
+        ("pytest", "tests/workshop/test_feature_24_productive_turn.py", "test_s2_c1_native_schemas_and_two_block_egress_are_identity_free"),
     ),
     "SW-EV-003": (("pytest", "tests/workshop/test_feature_20_release.py", "test_delegation_identity_scope_and_frontmatter_fail_closed"),),
     "SW-EV-004": (("pytest", "tests/test_feature_13_package_items.py", "test_partial_readiness_selective_revision_and_restart"),),

@@ -76,6 +76,7 @@ def valid_draft(request: SemanticAnalyzerRequest) -> SemanticTurnDraft:
     candidate = request.candidates[0]
     return SemanticTurnDraft(
         schema_version=1,
+        outcome="PACKAGE_PROPOSAL",
         findings=(),
         package_delta=SemanticPackageDelta(
             item_title="Exactly grounded filtered export",
@@ -233,7 +234,10 @@ def test_ar_ev_004_request_and_response_schemas_are_alias_only_and_identity_free
         app.state.evidence_snapshots[0].content_hash,
     ):
         assert authoritative not in serialized
-    assert request.business_context == SourceCatalog(ROOT).read_text(SourceName.PM_SPEC)
+    pm_document = SourceCatalog(ROOT).read_text(SourceName.PM_SPEC)
+    assert request.business_context != pm_document
+    assert "Business objective:" in request.business_context
+    assert pm_document not in serialized
     selected = app.state.evidence_index.unit_for("technical-agenda:d-02")
     unselected = app.state.evidence_index.unit_for("technical-agenda:d-01")
     assert request.candidates[0].text == selected.text

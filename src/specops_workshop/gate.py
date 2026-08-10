@@ -39,6 +39,7 @@ from .analyzer import (
     ProposalDisposition,
     RequirementProposal,
     SelectedSemanticEvidence,
+    SemanticOutcome,
     SemanticAnalyzerRequest,
     SemanticPackageDelta,
     SemanticTurnDraft,
@@ -422,6 +423,10 @@ class WorkshopGate:
             effort="medium",
             purpose=purpose,
             phase=session.conversation_phase,
+            required_outcome=self._required_outcome(
+                purpose=purpose,
+                final_turn_text=final.normalized_text,
+            ),
             final_turn_text=final.normalized_text,
             business_context=self.business_context,
             candidates=selected,
@@ -461,6 +466,13 @@ class WorkshopGate:
                 draft = SemanticTurnDraft.model_validate(
                     raw.model_dump(mode="python")
                 )
+                if (
+                    purpose == "TURN"
+                    and draft.outcome != request.required_outcome
+                ):
+                    raise AnalyzerProviderSchemaError(
+                        "provider draft did not satisfy the required local outcome"
+                    )
             except AnalyzerDeadlineExceeded:
                 last_failure = AnalyzerFailureKind.DEADLINE
                 last_action = AnalyzerRecoveryAction.TEXT_FALLBACK
@@ -1041,11 +1053,15 @@ class WorkshopGate:
         selected_aliases: tuple[str, ...],
         draft: SemanticTurnDraft,
     ) -> AnalyzerTurnResult:
-        if purpose == "FINISH_AUDIT" and draft.package_delta is not None:
+        if purpose == "FINISH_AUDIT" and draft.outcome == SemanticOutcome.PACKAGE_PROPOSAL:
             raise ValueError("finish audit cannot return a package delta")
-        if phase.value != "WORKSHOP" and draft.package_delta is not None:
+        if phase.value != "WORKSHOP" and draft.outcome == SemanticOutcome.PACKAGE_PROPOSAL:
             raise ValueError("package semantic deltas are WORKSHOP-only")
-        if purpose == "FINISH_AUDIT" and draft.control_intent != ControlIntent.NONE:
+        if (
+            purpose == "FINISH_AUDIT"
+            and draft.outcome == SemanticOutcome.CONTROL
+            and draft.control_intent != ControlIntent.FINISH
+        ):
             raise ValueError("finish audit cannot return a control intent")
 
         grounded = [value.question for value in draft.findings]
@@ -1152,6 +1168,19 @@ class WorkshopGate:
             acknowledgement=draft.acknowledgement,
             next_question=next_question,
         )
+
+    @staticmethod
+    def _required_outcome(*, purpose: str, final_turn_text: str) -> SemanticOutcome:
+        if purpose == "FINISH_AUDIT":
+            # A clean audit is an explicit FINISH control; an audit finding is
+            # permitted by the local assembler as a focused clarification.
+            return SemanticOutcome.CONTROL
+        if re.match(
+            r"^(?:please\s+)?(?:confirm|reject|edit|finish\s+workshop)\b",
+            final_turn_text.casefold().strip(),
+        ):
+            return SemanticOutcome.CONTROL
+        return SemanticOutcome.PACKAGE_PROPOSAL
 
     def _assemble_package(self, session_id, session, delta, source_refs):
         if delta is None:

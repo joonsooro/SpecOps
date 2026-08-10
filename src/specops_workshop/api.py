@@ -24,6 +24,7 @@ from .evidence import (
 )
 from .gate import RegisteredEvidenceGrounding, WorkshopGate
 from .finish import FinishCoordinator, FinishResult
+from .final_turn import FinalTurnProcessor
 from .live_transport import LiveTransport
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider
@@ -135,10 +136,12 @@ def create_app(
     finish_coordinator = None if gate is None else FinishCoordinator(
         workshop_store, workflow, gate, clock=runtime_clock
     )
+    final_turn_processor = FinalTurnProcessor(coordinator, gate)
     live_transport = LiveTransport(
         voice_provider, coordinator, workshop_store,
         session_id=DEMO_SESSION_ID, idle_timeout_seconds=idle_timeout_seconds, gate=gate,
         finish_coordinator=finish_coordinator, telemetry=telemetry,
+        final_turn_processor=final_turn_processor,
     )
     app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
     app.state.settings = runtime_settings
@@ -153,6 +156,7 @@ def create_app(
     app.state.live_provider = voice_provider
     app.state.live_transport = live_transport
     app.state.gate = gate
+    app.state.final_turn_processor = final_turn_processor
     app.state.analyzer_business_context = analyzer_business_context
     app.state.finish_coordinator = finish_coordinator
     app.state.telemetry = telemetry
@@ -173,16 +177,14 @@ def create_app(
 
     @app.post("/api/session/final-turn")
     async def final_turn(value: FinalTurnInput):
-        committed = app.state.coordinator.commit_final_turn(
+        processed = await app.state.final_turn_processor.process(
             app.state.session_id,
             turn_sequence=value.turn_sequence,
             text=value.text,
             provider_request_id=value.provider_request_id,
             correction_of_version=value.correction_of_version,
         )
-        if app.state.gate is not None:
-            await app.state.gate.analyze_final_turn(app.state.session_id, value.turn_sequence)
-        return committed
+        return processed.committed
 
     @app.post("/api/telemetry/spans", response_model=LatencySpan)
     async def browser_latency_span(value: BrowserSpanInput) -> LatencySpan:

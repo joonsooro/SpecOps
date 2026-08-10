@@ -61,27 +61,37 @@ class FinishAnalyzer:
             )
 
         if request.purpose == "FINISH_AUDIT":
+            if self.blocked:
+                return SemanticTurnDraft(
+                    schema_version=1,
+                    outcome="FOCUSED_CLARIFICATION",
+                    findings=(SemanticFinding(
+                        domain=Domain.CROSS_DOMAIN,
+                        question=grounded("How is timezone configuration resolved?"),
+                        uncertainty="The selected agenda decision remains open.",
+                    ),),
+                    package_delta=None,
+                    control_intent=ControlIntent.NONE,
+                    edit_instruction=None,
+                    acknowledgement="Audit requires decision",
+                    next_question="How is timezone configuration resolved?",
+                    uncertainty="The selected agenda decision remains open.",
+                )
             return SemanticTurnDraft(
-                schema_version=1, findings=(), package_delta=None,
-                control_intent=ControlIntent.NONE, edit_instruction=None,
+                schema_version=1, outcome="CONTROL", findings=(), package_delta=None,
+                control_intent=ControlIntent.FINISH, edit_instruction=None,
                 acknowledgement="Audit complete", next_question=None, uncertainty=None,
             )
         if request.final_turn_text.lower().startswith("finish workshop"):
             return SemanticTurnDraft(
-                schema_version=1, findings=(), package_delta=None,
+                schema_version=1, outcome="CONTROL", findings=(), package_delta=None,
                 control_intent=ControlIntent.FINISH, edit_instruction=None,
                 acknowledgement="Workshop finished", next_question=None, uncertainty=None,
             )
-        findings = () if not self.blocked else (
-            SemanticFinding(
-                domain=Domain.TECHNICAL,
-                question=grounded("How is timezone configuration resolved?"),
-                uncertainty="The selected agenda decision remains open.",
-            ),
-        )
         return SemanticTurnDraft(
             schema_version=1,
-            findings=findings,
+            outcome="PACKAGE_PROPOSAL",
+            findings=(),
             package_delta=SemanticPackageDelta(
                 item_title="Complete filtered export",
                 business_requirement=grounded("Use the organization timezone."),
@@ -175,7 +185,7 @@ def test_explicit_technical_blocker_creates_native_decision_request_and_may_fini
     with client:
         prepare(client)
         before = client.get("/api/workshop").json()["governance"]["items"][0]
-        assert before["readiness"] == ItemReadiness.NEEDS_CLARIFICATION.value
+        assert before["readiness"] == ItemReadiness.READY.value
         finished = client.post("/api/finish")
         assert finished.status_code == 200
         handoff = finished.json()["handoff"]
@@ -184,7 +194,7 @@ def test_explicit_technical_blocker_creates_native_decision_request_and_may_fini
         assert [value["review_request_id"] for value in handoff["blocked_review_requests"]] == sorted(
             value["review_request_id"] for value in handoff["blocked_review_requests"]
         )
-        assert handoff["later_review_requests"] == []
+        assert len(handoff["later_review_requests"]) == 1
         assert {request["kind"] for request in handoff["blocked_review_requests"]} == {"DECISION_REQUIRED"}
         assert {request["question"] for request in handoff["blocked_review_requests"]} == {
             "How is timezone configuration resolved?",

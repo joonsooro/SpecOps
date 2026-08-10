@@ -129,6 +129,33 @@ test("visible controls keep native focus and formulation state", async ({ page }
   await expect(page.getByRole("button", { name: "Apply edit" })).toBeEnabled();
 });
 
+test("a rendered pending proposal confirms once and remains committed after refresh", async ({ page }) => {
+  let pending = true;
+  let confirmationCalls = 0;
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({
+    json: { ...workshop, pending_proposal: pending ? workshop.pending_proposal : null },
+  }));
+  await page.unroute("**/api/proposals/control");
+  await page.route("**/api/proposals/control", (route) => {
+    confirmationCalls += 1;
+    if (confirmationCalls > 1) {
+      return route.fulfill({ status: 409, json: { detail: "Proposal already resolved" } });
+    }
+    pending = false;
+    return route.fulfill({ json: { status: "COMMITTED" } });
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Proposed · awaiting PM confirmation")).toBeVisible();
+  await page.getByRole("button", { name: "Confirm" }).click();
+  await expect(page.getByText("Proposal committed to the governed package")).toBeVisible();
+  await expect(page.getByText("Proposed · awaiting PM confirmation")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("Proposed · awaiting PM confirmation")).toHaveCount(0);
+  expect(confirmationCalls).toBe(1);
+});
+
 test("Finish freezes formulation, preserves text, and renders exact handoff facts", async ({ page }) => {
   let finished = false;
   const packageBinding = {

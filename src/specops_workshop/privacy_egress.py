@@ -9,7 +9,7 @@ from .analyzer import SemanticAnalyzerRequest, SemanticTurnDraft
 from .contracts import WorkshopModel
 
 
-TERRA_EGRESS_POLICY_VERSION = "terra-alias-semantic-v2"
+TERRA_EGRESS_POLICY_VERSION = "terra-alias-semantic-v3"
 _FORBIDDEN_CONTRACT_FIELDS = frozenset(
     {
         "request_id",
@@ -66,7 +66,7 @@ class TerraEgressBlockSummary(WorkshopModel):
 
 class TerraEgressManifest(WorkshopModel):
     destination: Literal["OPENAI_TERRA"] = "OPENAI_TERRA"
-    policy_version: Literal["terra-alias-semantic-v2"] = TERRA_EGRESS_POLICY_VERSION
+    policy_version: Literal["terra-alias-semantic-v3"] = TERRA_EGRESS_POLICY_VERSION
     blocks: tuple[TerraEgressBlockSummary, ...]
 
 
@@ -87,7 +87,7 @@ class TerraPrivacyEgressGateway:
         instruction = (
             "Reason only over the identity-free PM business context, final PM turn, committed "
             "semantics, and selected technical evidence aliases in the request. Return exactly "
-            "one strict SemanticTurnDraft. Every grounded statement or finding question must cite "
+            "one strict required SemanticTurnDraft outcome. Every grounded statement or finding question must cite "
             "a unique selected alias and copy an exact supporting excerpt from that alias text. "
             "Never invent authoritative identities, source locations, evidence aliases, or "
             "downstream platform actions."

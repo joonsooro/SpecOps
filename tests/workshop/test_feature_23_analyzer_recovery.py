@@ -113,6 +113,7 @@ def valid_draft(request) -> SemanticTurnDraft:
 
     return SemanticTurnDraft(
         schema_version=1,
+        outcome="PACKAGE_PROPOSAL",
         findings=(),
         package_delta=SemanticPackageDelta(
             item_title="Deadline-safe filtered export",
@@ -146,6 +147,7 @@ def invalid_alias_draft(request) -> SemanticTurnDraft:
     )
     return SemanticTurnDraft(
         schema_version=1,
+        outcome="PACKAGE_PROPOSAL",
         findings=(),
         package_delta=SemanticPackageDelta(
             item_title="Invalid alias package",

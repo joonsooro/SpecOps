@@ -103,6 +103,7 @@ def semantic_draft(request):
     )
     return SemanticTurnDraft(
         schema_version=1,
+        outcome="PACKAGE_PROPOSAL",
         findings=(),
         package_delta=SemanticPackageDelta(
             item_title="Timezone-safe filtered export",
@@ -434,7 +435,7 @@ def test_terra_medium_finish_audit_allows_no_new_finding_or_package(tmp_path):
     unit = app.state.evidence_index.unit_for("technical-agenda:d-02")
     audit = SemanticTurnDraft(
         schema_version=1,
-        findings=(), package_delta=None, control_intent=ControlIntent.NONE,
+        outcome="CONTROL", findings=(), package_delta=None, control_intent=ControlIntent.FINISH,
         edit_instruction=None, acknowledgement="Audit complete", next_question=None,
         uncertainty=None,
     )
@@ -443,6 +444,7 @@ def test_terra_medium_finish_audit_allows_no_new_finding_or_package(tmp_path):
         schema_version=1,
         purpose="FINISH_AUDIT",
         phase=ConversationPhase.WORKSHOP,
+        required_outcome="CONTROL",
         final_turn_text="Resolve D-02 timezone configuration.",
         business_context=app.state.analyzer_business_context,
         candidates=(SelectedSemanticEvidence(

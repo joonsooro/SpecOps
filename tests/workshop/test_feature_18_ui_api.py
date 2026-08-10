@@ -50,6 +50,7 @@ class ProposalAnalyzer:
             )
         return SemanticTurnDraft(
             schema_version=1,
+            outcome="PACKAGE_PROPOSAL",
             findings=(),
             package_delta=SemanticPackageDelta(
                 item_title="Complete filtered export",

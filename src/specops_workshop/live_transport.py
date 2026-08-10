@@ -11,6 +11,7 @@ from specops_workflow.models import QueryOne
 
 from .contracts import CallState, ConversationPhase, ProviderResumeContext
 from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
+from .final_turn import FinalTurnProcessor
 from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider, LiveVoiceSession, VoiceContext, VoiceEventType
 from .sessions import WorkshopStore
@@ -64,6 +65,7 @@ class LiveTransport:
         gate=None,
         finish_coordinator=None,
         telemetry=None,
+        final_turn_processor: FinalTurnProcessor | None = None,
     ) -> None:
         self.provider = provider
         self.coordinator = coordinator
@@ -74,6 +76,9 @@ class LiveTransport:
         self.idle_timeout_seconds = idle_timeout_seconds
         self._last_input_at = 0.0
         self.gate = gate
+        self.final_turn_processor = final_turn_processor or FinalTurnProcessor(
+            coordinator, gate
+        )
         self._generation_blocked = False
         self.finish_coordinator = finish_coordinator
         self.telemetry = telemetry
@@ -202,16 +207,15 @@ class LiveTransport:
             value = json.loads(message["text"])
             kind = value.get("type")
             if kind == "TEXT":
-                result = self.coordinator.commit_final_turn(
-                    self.session_id, turn_sequence=int(value["turn_sequence"]), text=str(value["text"]),
+                processed = await self.final_turn_processor.process(
+                    self.session_id,
+                    turn_sequence=int(value["turn_sequence"]),
+                    text=str(value["text"]),
                     provider_request_id=str(value["provider_request_id"]),
                     correction_of_version=value.get("correction_of_version"),
                 )
-                proposal = None
-                if self.gate is not None:
-                    proposal = await self.gate.analyze_final_turn(
-                        self.session_id, int(value["turn_sequence"])
-                    )
+                result = processed.committed
+                proposal = processed.analyzer_result
                 await websocket.send_json({"type": "FINAL_COMMITTED", "revision": result.receipt.revision})
                 if proposal is not None and proposal.complete_package_proposal is not None:
                     self._generation_blocked = True
@@ -387,15 +391,17 @@ class LiveTransport:
             elif event.type == VoiceEventType.INPUT_PARTIAL:
                 await websocket.send_json({"type": "TRANSCRIPT_PARTIAL", "text": event.text})
             elif event.type == VoiceEventType.INPUT_FINAL and event.text:
-                result = self.coordinator.commit_final_turn(
-                    self.session_id, turn_sequence=next_sequence, text=event.text,
+                processed = await self.final_turn_processor.process(
+                    self.session_id,
+                    turn_sequence=next_sequence,
+                    text=event.text,
                     provider_request_id=event.provider_request_id or f"provider-turn-{next_sequence}",
                 )
-                if self.gate is not None:
-                    proposal = await self.gate.analyze_final_turn(self.session_id, next_sequence)
-                    if proposal.complete_package_proposal is not None:
-                        self._generation_blocked = True
-                        await session.interrupt()
+                result = processed.committed
+                proposal = processed.analyzer_result
+                if proposal is not None and proposal.complete_package_proposal is not None:
+                    self._generation_blocked = True
+                    await session.interrupt()
                 await websocket.send_json({
                     "type": "TRANSCRIPT_FINAL", "text": event.text,
                     "turn_sequence": next_sequence, "revision": result.receipt.revision,
@@ -462,16 +468,15 @@ class LiveTransport:
             except WebSocketDisconnect:
                 return
             if value.get("type") == "TEXT":
-                result = self.coordinator.commit_final_turn(
-                    self.session_id, turn_sequence=int(value["turn_sequence"]), text=str(value["text"]),
+                processed = await self.final_turn_processor.process(
+                    self.session_id,
+                    turn_sequence=int(value["turn_sequence"]),
+                    text=str(value["text"]),
                     provider_request_id=str(value["provider_request_id"]),
                     correction_of_version=value.get("correction_of_version"),
                 )
-                proposal = None
-                if self.gate is not None:
-                    proposal = await self.gate.analyze_final_turn(
-                        self.session_id, int(value["turn_sequence"])
-                    )
+                result = processed.committed
+                proposal = processed.analyzer_result
                 await websocket.send_json({"type": "FINAL_COMMITTED", "revision": result.receipt.revision})
                 if (
                     proposal is not None

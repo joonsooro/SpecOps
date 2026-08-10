@@ -16,6 +16,11 @@ from ..analyzer import (
     SpecAnalyzerProvider,
 )
 from ..config import TERRA_MODEL
+from ..native_schemas import (
+    ValidationDiagnostic,
+    openai_semantic_turn_schema,
+    safe_validation_diagnostics,
+)
 from ..privacy_egress import TerraPrivacyEgressGateway, assert_identity_free_schema
 
 
@@ -40,9 +45,10 @@ class TerraRequestDiagnostic:
     provider_request_id: str | None
     status_code: int | None
     error_type: str | None
+    validation_diagnostics: tuple[ValidationDiagnostic, ...] = ()
 
     def as_receipt(self) -> dict[str, object]:
-        return {
+        receipt = {
             "stage": self.stage,
             "outcome": self.outcome,
             "client_request_id": self.client_request_id,
@@ -50,6 +56,11 @@ class TerraRequestDiagnostic:
             "status_code": self.status_code,
             "error_type": self.error_type,
         }
+        if self.validation_diagnostics:
+            receipt["validation_diagnostics"] = [
+                value.model_dump(mode="json") for value in self.validation_diagnostics
+            ]
+        return receipt
 
 
 class TerraProviderRequestError(AnalyzerProviderAvailabilityError):
@@ -68,23 +79,6 @@ class TerraProviderRequestError(AnalyzerProviderAvailabilityError):
         self.provider_request_id = provider_request_id
         self.status_code = status_code
         self.request_diagnostics = request_diagnostics
-
-
-def _openai_strict_schema(value):
-    if isinstance(value, dict):
-        result = {
-            ("anyOf" if key == "oneOf" else key): _openai_strict_schema(item)
-            for key, item in value.items()
-            if key != "discriminator"
-        }
-        properties = result.get("properties")
-        if isinstance(properties, dict):
-            result["required"] = list(properties)
-            result["additionalProperties"] = False
-        return result
-    if isinstance(value, list):
-        return [_openai_strict_schema(item) for item in value]
-    return value
 
 
 class TerraResponsesProvider(SpecAnalyzerProvider):
@@ -116,9 +110,7 @@ class TerraResponsesProvider(SpecAnalyzerProvider):
             raise ValueError("Workshop Terra analysis requires explicit medium effort")
         content = self._egress_gateway.content_blocks(request)
         self._egress_gateway.manifest(content)
-        schema = _openai_strict_schema(
-            SemanticTurnDraft.model_json_schema(mode="validation")
-        )
+        schema = openai_semantic_turn_schema()
         assert_identity_free_schema(schema)
         response = await self._create_response(
             request=request,
@@ -147,6 +139,7 @@ class TerraResponsesProvider(SpecAnalyzerProvider):
                 ),
                 status_code=(previous.status_code if previous is not None else None),
                 error_type=f"{stage_name}_{type(exc).__name__}",
+                validation_diagnostics=safe_validation_diagnostics(exc),
             )
         )
 

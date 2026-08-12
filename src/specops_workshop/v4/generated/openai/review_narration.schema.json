@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "ReviewConsideration": {
+      "additionalProperties": false,
+      "properties": {
+        "consideration_kind": {
+          "$ref": "#/$defs/ReviewConsiderationKind"
+        },
+        "text": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "consideration_kind",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ReviewConsiderationKind": {
+      "enum": [
+        "IMPACT",
+        "RISK",
+        "FUTURE_CONSEQUENCE"
+      ],
+      "type": "string"
+    },
+    "ReviewNarrationItemCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "core_concept": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "handle": {
+          "pattern": "^[A-Z]{1,2}$",
+          "type": "string"
+        },
+        "material_considerations": {
+          "items": {
+            "$ref": "#/$defs/ReviewConsideration"
+          },
+          "maxItems": 5,
+          "type": "array"
+        }
+      },
+      "required": [
+        "handle",
+        "core_concept",
+        "material_considerations"
+      ],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "analyzer_run_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "based_on_case_revision": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "context_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "decision_batch_view_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "decision_batch_view_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ReviewNarrationItemCandidate"
+      },
+      "maxItems": 26,
+      "minItems": 1,
+      "type": "array"
+    },
+    "output_type": {
+      "const": "REVIEW_NARRATION_CANDIDATE",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "type": "string"
+    },
+    "request_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_set_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "spoken_confirmation_question": {
+      "maxLength": 20000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "spoken_opening": {
+      "maxLength": 20000,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "output_type",
+    "analyzer_run_id",
+    "context_id",
+    "request_hash",
+    "source_set_hash",
+    "decision_batch_view_id",
+    "decision_batch_view_hash",
+    "based_on_case_revision",
+    "spoken_opening",
+    "items",
+    "spoken_confirmation_question"
+  ],
+  "type": "object"
+}

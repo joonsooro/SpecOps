@@ -1,0 +1,544 @@
+{
+  "$defs": {
+    "CapturePolicy": {
+      "enum": [
+        "CLARIFICATION_ONLY",
+        "LOW_RISK_FACT",
+        "BINDING_DECISION"
+      ],
+      "type": "string"
+    },
+    "ClusterCouplingType": {
+      "enum": [
+        "SHARED_OUTCOME",
+        "SHARED_CONSTRAINT",
+        "DECISION_DEPENDENCY",
+        "MUTUAL_EXCLUSION",
+        "COMMON_EVIDENCE",
+        "WORKFLOW_SEQUENCE"
+      ],
+      "type": "string"
+    },
+    "ConfirmationCheckpointCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "cluster_keys": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "type": "string"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "type": "array"
+        },
+        "trigger_description": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "cluster_keys",
+        "trigger_description"
+      ],
+      "type": "object"
+    },
+    "DocumentAnchorLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "locator_kind": {
+          "const": "DOCUMENT_ANCHOR",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "anchor"
+      ],
+      "type": "object"
+    },
+    "Domain": {
+      "enum": [
+        "PRODUCT",
+        "TECHNICAL",
+        "CROSS_DOMAIN",
+        "POLICY",
+        "SECURITY",
+        "PRIVACY",
+        "DATA",
+        "ACCEPTANCE"
+      ],
+      "type": "string"
+    },
+    "EvidenceCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceLineLocator"
+            },
+            {
+              "$ref": "#/$defs/JsonPointerLocator"
+            },
+            {
+              "$ref": "#/$defs/DocumentAnchorLocator"
+            },
+            {
+              "$ref": "#/$defs/QuoteSearchLocator"
+            }
+          ]
+        },
+        "quoted_text_candidate": {
+          "anyOf": [
+            {
+              "maxLength": 8000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relevance_claim": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_role": {
+          "$ref": "#/$defs/SourceRole"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "source_role",
+        "locator",
+        "relevance_claim",
+        "quoted_text_candidate"
+      ],
+      "type": "object"
+    },
+    "JsonPointerLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "locator_kind": {
+          "const": "JSON_POINTER",
+          "type": "string"
+        },
+        "pointer": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "pointer"
+      ],
+      "type": "object"
+    },
+    "ProblemCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "consequence": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "domain": {
+          "$ref": "#/$defs/Domain"
+        },
+        "evidence_candidate_keys": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "type": "string"
+          },
+          "maxItems": 25,
+          "minItems": 1,
+          "type": "array"
+        },
+        "problem_kind": {
+          "$ref": "#/$defs/ProblemKind"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "statement": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "problem_kind",
+        "domain",
+        "severity",
+        "statement",
+        "consequence",
+        "evidence_candidate_keys"
+      ],
+      "type": "object"
+    },
+    "ProblemClusterCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "coupling_reason": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "coupling_type": {
+          "$ref": "#/$defs/ClusterCouplingType"
+        },
+        "problem_keys": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 2,
+          "type": "array"
+        },
+        "suggested_confirmation_mode": {
+          "$ref": "#/$defs/SuggestedConfirmationMode"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "problem_keys",
+        "coupling_type",
+        "coupling_reason",
+        "suggested_confirmation_mode"
+      ],
+      "type": "object"
+    },
+    "ProblemKind": {
+      "enum": [
+        "AMBIGUITY",
+        "MISSING_DECISION",
+        "CONTRADICTION",
+        "RISK",
+        "MISSING_ACCEPTANCE",
+        "MISSING_AUTHORITY",
+        "MISSING_EVIDENCE"
+      ],
+      "type": "string"
+    },
+    "QuestionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "addresses_problem_keys": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "answer_options": {
+          "items": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "capture_policy": {
+          "$ref": "#/$defs/CapturePolicy"
+        },
+        "prerequisite_problem_keys": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "question_shape": {
+          "$ref": "#/$defs/QuestionShape"
+        },
+        "rationale": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "safe_without_current_turn_interpretation": {
+          "type": "boolean"
+        },
+        "text": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "text",
+        "rationale",
+        "question_shape",
+        "capture_policy",
+        "answer_options",
+        "addresses_problem_keys",
+        "prerequisite_problem_keys",
+        "safe_without_current_turn_interpretation"
+      ],
+      "type": "object"
+    },
+    "QuestionRunwayCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "do_not_ask_question_keys": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 0,
+          "type": "array"
+        },
+        "recommended_question_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "safe_alternate_question_keys": {
+          "items": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "type": "string"
+          },
+          "maxItems": 5,
+          "minItems": 0,
+          "type": "array"
+        }
+      },
+      "required": [
+        "recommended_question_key",
+        "safe_alternate_question_keys",
+        "do_not_ask_question_keys"
+      ],
+      "type": "object"
+    },
+    "QuestionShape": {
+      "enum": [
+        "OPEN_TEXT",
+        "CLOSED_BOOLEAN",
+        "CLOSED_ENUM",
+        "CLOSED_INTEGER",
+        "CLOSED_DECIMAL",
+        "CLOSED_TEXT"
+      ],
+      "type": "string"
+    },
+    "QuoteSearchLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "exact_quote": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "locator_kind": {
+          "const": "QUOTE_SEARCH",
+          "type": "string"
+        },
+        "occurrence": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "exact_quote",
+        "occurrence"
+      ],
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ],
+      "type": "string"
+    },
+    "SourceLineLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "end_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "locator_kind": {
+          "const": "SOURCE_LINES",
+          "type": "string"
+        },
+        "start_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "start_line",
+        "end_line"
+      ],
+      "type": "object"
+    },
+    "SourceRole": {
+      "enum": [
+        "PM_SPEC",
+        "TECHNICAL_CONTRACT"
+      ],
+      "type": "string"
+    },
+    "SuggestedConfirmationMode": {
+      "enum": [
+        "TOGETHER",
+        "SEPARATE",
+        "CONDITIONAL"
+      ],
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "analyzer_run_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "based_on_case_revision": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "confirmation_checkpoints": {
+      "items": {
+        "$ref": "#/$defs/ConfirmationCheckpointCandidate"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "context_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "customer_promise_summary": {
+      "maxLength": 80000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "evidence_candidates": {
+      "items": {
+        "$ref": "#/$defs/EvidenceCandidate"
+      },
+      "maxItems": 500,
+      "minItems": 1,
+      "type": "array"
+    },
+    "initial_runway": {
+      "$ref": "#/$defs/QuestionRunwayCandidate"
+    },
+    "output_type": {
+      "const": "INTERVIEW_BRIEF_CANDIDATE",
+      "type": "string"
+    },
+    "problem_clusters": {
+      "items": {
+        "$ref": "#/$defs/ProblemClusterCandidate"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "problems": {
+      "items": {
+        "$ref": "#/$defs/ProblemCandidate"
+      },
+      "maxItems": 500,
+      "minItems": 1,
+      "type": "array"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "type": "string"
+    },
+    "questions": {
+      "items": {
+        "$ref": "#/$defs/QuestionCandidate"
+      },
+      "maxItems": 500,
+      "minItems": 1,
+      "type": "array"
+    },
+    "request_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_set_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "output_type",
+    "analyzer_run_id",
+    "context_id",
+    "request_hash",
+    "source_set_hash",
+    "based_on_case_revision",
+    "customer_promise_summary",
+    "evidence_candidates",
+    "problems",
+    "problem_clusters",
+    "questions",
+    "initial_runway",
+    "confirmation_checkpoints"
+  ],
+  "type": "object"
+}

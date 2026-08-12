@@ -9,6 +9,7 @@ from pathlib import Path
 class SourceName(StrEnum):
     PM_SPEC = "PM_SPEC"
     TECHNICAL_SPEC = "TECHNICAL_SPEC"
+    TECHNICAL_CONTRACT = "TECHNICAL_CONTRACT"
     DELEGATION_FIXTURE = "DELEGATION_FIXTURE"
 
 
@@ -31,6 +32,14 @@ class SourceCatalog:
             SourceName.TECHNICAL_SPEC: SourceDocument(
                 SourceName.TECHNICAL_SPEC,
                 root / "docs" / "technical-specs" / "filtered-orders-csv-export-technical-spec.md",
+                "text/markdown",
+            ),
+            SourceName.TECHNICAL_CONTRACT: SourceDocument(
+                SourceName.TECHNICAL_CONTRACT,
+                root
+                / "docs"
+                / "technical-specs"
+                / "filtered-orders-csv-export-technical-contract.md",
                 "text/markdown",
             ),
             SourceName.DELEGATION_FIXTURE: SourceDocument(

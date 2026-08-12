@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -114,3 +115,44 @@ def test_proposal_control_rejects_missing_and_unknown_browser_fields(tmp_path):
             "intent": "REJECT", "proposal_ref": "patch-1", "edit_instruction": None,
             "acknowledgement": None, "platform": "forbidden",
         }).status_code == 422
+
+
+def test_real_browser_latency_json_reaches_the_strict_server_contract(tmp_path):
+    app = create_app(
+        settings=configured(tmp_path), clock=FrozenClock(NOW),
+        source_catalog=SourceCatalog(ROOT), live_provider=object(),
+    )
+    with TestClient(app) as client:
+        response = client.post("/api/telemetry/spans", json={
+            "span_id": str(uuid4()),
+            "stage": "BROWSER",
+            "duration_ms": 42,
+            "outcome": "OK",
+        })
+        assert response.status_code == 200, response.json()
+        assert response.json()["stage"] == "BROWSER"
+
+        rejected = client.post("/api/telemetry/spans", json={
+            "span_id": str(uuid4()),
+            "stage": "ANALYZER",
+            "duration_ms": 42,
+            "outcome": "OK",
+        })
+        assert rejected.status_code == 422
+
+
+def test_v4_runtime_binds_the_exact_two_approved_full_source_documents(tmp_path):
+    app = create_app(
+        settings=configured(tmp_path), clock=FrozenClock(NOW),
+        source_catalog=SourceCatalog(ROOT), live_provider=object(),
+    )
+    sources = app.state.v4_source_uploads
+    assert [item.source.role for item in sources] == ["PM_SPEC", "TECHNICAL_CONTRACT"]
+    assert [item.source.filename for item in sources] == [
+        "PM_Specs.md",
+        "filtered-orders-csv-export-technical-contract.md",
+    ]
+    assert sources[0].content == (ROOT / "docs/PM_Specs.md").read_bytes()
+    assert sources[1].content == (
+        ROOT / "docs/technical-specs/filtered-orders-csv-export-technical-contract.md"
+    ).read_bytes()

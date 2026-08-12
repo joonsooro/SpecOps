@@ -1,0 +1,1652 @@
+{
+  "$defs": {
+    "architectureContext": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture_constraints": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "interactions": {
+          "items": {
+            "$ref": "#/$defs/contextInteraction"
+          },
+          "type": "array"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/contextNode"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "system_boundary": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "system_boundary",
+        "nodes",
+        "interactions",
+        "architecture_constraints",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "buildUnit": {
+      "additionalProperties": false,
+      "properties": {
+        "done_when": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "implements_spec_refs": {
+          "items": {
+            "$ref": "#/$defs/specRef"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "kill_switch": {
+          "$ref": "#/$defs/killSwitch"
+        },
+        "landing_zone": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "outputs": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "prerequisite_unit_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "technical_refs": {
+          "$ref": "#/$defs/techRefs"
+        }
+      },
+      "required": [
+        "id",
+        "sequence",
+        "name",
+        "prerequisite_unit_refs",
+        "inputs",
+        "outputs",
+        "done_when",
+        "kill_switch",
+        "landing_zone",
+        "implements_spec_refs",
+        "technical_refs"
+      ],
+      "type": "object"
+    },
+    "component": {
+      "additionalProperties": false,
+      "properties": {
+        "consumes_interface_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dependency_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "failure_responsibilities": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "implements_spec_refs": {
+          "items": {
+            "$ref": "#/$defs/specRef"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owns_data_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "provides_interface_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "responsibility": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "responsibility",
+        "owner",
+        "provides_interface_refs",
+        "consumes_interface_refs",
+        "owns_data_refs",
+        "dependency_refs",
+        "failure_responsibilities",
+        "implements_spec_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "contextInteraction": {
+      "additionalProperties": false,
+      "properties": {
+        "data_or_signal": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "from_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "to_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "trust_boundary_crossed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from_ref",
+        "to_ref",
+        "purpose",
+        "data_or_signal",
+        "trust_boundary_crossed"
+      ],
+      "type": "object"
+    },
+    "contextNode": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "inside_system_boundary": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "actor",
+            "system",
+            "service",
+            "data_store",
+            "external_provider"
+          ]
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "responsibility": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "inside_system_boundary",
+        "responsibility"
+      ],
+      "type": "object"
+    },
+    "contractIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "customer_promise": {
+          "$ref": "#/$defs/copiedStatement"
+        },
+        "implementation_objective": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "negative_contract": {
+          "$ref": "#/$defs/copiedStatement"
+        },
+        "product_one_liner": {
+          "$ref": "#/$defs/copiedStatement"
+        }
+      },
+      "required": [
+        "product_one_liner",
+        "customer_promise",
+        "negative_contract",
+        "implementation_objective"
+      ],
+      "type": "object"
+    },
+    "copiedStatement": {
+      "additionalProperties": false,
+      "properties": {
+        "spec_json_pointer": {
+          "pattern": "^/",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "value",
+        "spec_json_pointer"
+      ],
+      "type": "object"
+    },
+    "dataContract": {
+      "additionalProperties": false,
+      "properties": {
+        "consistency": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/dataField"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "implements_spec_refs": {
+          "items": {
+            "$ref": "#/$defs/specRef"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "invariants": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner_component_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "retention": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_of_truth": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "owner_component_ref",
+        "source_of_truth",
+        "fields",
+        "invariants",
+        "lifecycle",
+        "retention",
+        "consistency",
+        "implements_spec_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "dataField": {
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ]
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "null_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "semantics": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "required",
+        "semantics",
+        "classification",
+        "null_behaviour"
+      ],
+      "type": "object"
+    },
+    "engineeringDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "alternatives_considered": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "authority_domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "decision": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "question": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "spec_constraint_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "validation_required",
+            "deferred",
+            "superseded"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "decision",
+        "rationale",
+        "alternatives_considered",
+        "status",
+        "authority_domain",
+        "owner",
+        "spec_constraint_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "evidenceItem": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "excerpt_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "locator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "source_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "source_id",
+        "source_hash",
+        "locator",
+        "excerpt_hash",
+        "claim_refs"
+      ],
+      "type": "object"
+    },
+    "evidenceRefs": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "failureContract": {
+      "additionalProperties": false,
+      "properties": {
+        "condition": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "containment": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "detection": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "implements_spec_refs": {
+          "$ref": "#/$defs/specRefs"
+        },
+        "owner_component_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "prohibited_outcomes": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "retry_recovery": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "user_visible_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "verification_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "condition",
+        "detection",
+        "containment",
+        "user_visible_behaviour",
+        "retry_recovery",
+        "prohibited_outcomes",
+        "owner_component_ref",
+        "implements_spec_refs",
+        "verification_refs"
+      ],
+      "type": "object"
+    },
+    "interfaceContract": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "consumer_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/interfaceError"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "idempotency": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "implements_spec_refs": {
+          "items": {
+            "$ref": "#/$defs/specRef"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "input": {
+          "$ref": "#/$defs/payloadContract"
+        },
+        "kind": {
+          "enum": [
+            "api",
+            "event",
+            "ui",
+            "file",
+            "job",
+            "internal"
+          ]
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "output": {
+          "$ref": "#/$defs/payloadContract"
+        },
+        "postconditions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "preconditions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "producer_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "timeout": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "versioning": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "producer_ref",
+        "consumer_refs",
+        "purpose",
+        "versioning",
+        "input",
+        "output",
+        "preconditions",
+        "postconditions",
+        "errors",
+        "authorization",
+        "idempotency",
+        "timeout",
+        "implements_spec_refs"
+      ],
+      "type": "object"
+    },
+    "interfaceError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "condition": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "contract_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "user_visible_effect": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "code",
+        "condition",
+        "contract_behaviour",
+        "retryable",
+        "user_visible_effect"
+      ],
+      "type": "object"
+    },
+    "killSwitch": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "condition": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "threshold": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "time_window": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "condition",
+        "threshold",
+        "time_window",
+        "action"
+      ],
+      "type": "object"
+    },
+    "nonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "observabilityAudit": {
+      "additionalProperties": false,
+      "properties": {
+        "alerts": {
+          "items": {
+            "$ref": "#/$defs/observableSignal"
+          },
+          "type": "array"
+        },
+        "audit_records": {
+          "items": {
+            "$ref": "#/$defs/observableSignal"
+          },
+          "type": "array"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/observableSignal"
+          },
+          "type": "array"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/observableSignal"
+          },
+          "type": "array"
+        },
+        "traces": {
+          "items": {
+            "$ref": "#/$defs/observableSignal"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "events",
+        "metrics",
+        "traces",
+        "audit_records",
+        "alerts"
+      ],
+      "type": "object"
+    },
+    "observableSignal": {
+      "additionalProperties": false,
+      "properties": {
+        "alert_or_review": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "emission_point": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "prohibited_fields": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "purpose": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "required_fields": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "retention": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "purpose",
+        "emission_point",
+        "required_fields",
+        "prohibited_fields",
+        "retention",
+        "alert_or_review"
+      ],
+      "type": "object"
+    },
+    "payloadContract": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_ref": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "semantics": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "schema_ref",
+        "semantics"
+      ],
+      "type": "object"
+    },
+    "qualityBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "failure_response": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "measurement_point": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "measurement_window": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "metric": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "scope": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "spec_quality_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "verification_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "metric",
+        "target",
+        "scope",
+        "measurement_point",
+        "measurement_window",
+        "failure_response",
+        "owner",
+        "spec_quality_ref",
+        "verification_refs"
+      ],
+      "type": "object"
+    },
+    "reviewObligation": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "type": "boolean"
+        },
+        "downstream_effect": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "due_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "question_or_obligation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "related_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "required_completion_evidence": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "satisfied",
+            "waived",
+            "rejected"
+          ]
+        },
+        "type": {
+          "enum": [
+            "engineering_validation",
+            "architecture_review",
+            "security_review",
+            "privacy_review",
+            "compliance_review",
+            "operational_readiness",
+            "dependency_provisioning"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "question_or_obligation",
+        "status",
+        "blocking",
+        "owner",
+        "due_date",
+        "required_completion_evidence",
+        "downstream_effect",
+        "related_refs"
+      ],
+      "type": "object"
+    },
+    "rolloutMigrationRecovery": {
+      "additionalProperties": false,
+      "properties": {
+        "compatibility_contract": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "data_recovery": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "feature_control": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "migration": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "recovery_evidence": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "rollback_action": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "rollout_steps": {
+          "items": {
+            "$ref": "#/$defs/rolloutStep"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "feature_control",
+        "compatibility_contract",
+        "migration",
+        "rollout_steps",
+        "rollback_action",
+        "data_recovery",
+        "recovery_evidence"
+      ],
+      "type": "object"
+    },
+    "rolloutStep": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_criteria": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "rollback_trigger": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "scope": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "success_criteria": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "sequence",
+        "scope",
+        "entry_criteria",
+        "success_criteria",
+        "rollback_trigger"
+      ],
+      "type": "object"
+    },
+    "securityControl": {
+      "additionalProperties": false,
+      "properties": {
+        "audit_evidence": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "control": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "enforcement_point": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "failure_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "implements_spec_refs": {
+          "$ref": "#/$defs/specRefs"
+        },
+        "threat_or_obligation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "verification_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "threat_or_obligation",
+        "control",
+        "enforcement_point",
+        "failure_behaviour",
+        "audit_evidence",
+        "implements_spec_refs",
+        "verification_refs"
+      ],
+      "type": "object"
+    },
+    "securityPrivacyContract": {
+      "additionalProperties": false,
+      "properties": {
+        "authentication": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "authorization": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "controls": {
+          "items": {
+            "$ref": "#/$defs/securityControl"
+          },
+          "type": "array"
+        },
+        "data_minimization": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "secret_handling": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "authentication",
+        "authorization",
+        "data_minimization",
+        "secret_handling",
+        "controls"
+      ],
+      "type": "object"
+    },
+    "semanticEvidenceFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "analyzer_contract_version": {
+          "const": "1.0.0"
+        },
+        "analyzer_run_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "assessment": {
+          "enum": [
+            "SUPPORTS",
+            "SUGGESTS",
+            "CONTRADICTS",
+            "INSUFFICIENT",
+            "AMBIGUOUS"
+          ]
+        },
+        "claim_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "claim_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "evidence_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "excerpt_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "finding_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "finding_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_id",
+        "finding_version",
+        "claim_ref",
+        "claim_hash",
+        "evidence_ref",
+        "source_hash",
+        "excerpt_hash",
+        "assessment",
+        "confidence",
+        "analyzer_run_id",
+        "analyzer_contract_version"
+      ],
+      "type": "object"
+    },
+    "specRef": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "specRefs": {
+      "items": {
+        "$ref": "#/$defs/specRef"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "substrateDependency": {
+      "additionalProperties": false,
+      "properties": {
+        "access_mechanism": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "category": {
+          "enum": [
+            "data_source",
+            "persistence",
+            "frontend_design_system",
+            "hosting_runtime",
+            "authentication",
+            "observability",
+            "payments",
+            "search",
+            "queue",
+            "ai_provider",
+            "jobs",
+            "secrets_management",
+            "other"
+          ]
+        },
+        "choice": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "credential_status": {
+          "enum": [
+            "not_required",
+            "available_securely",
+            "provisioning_required",
+            "unknown"
+          ]
+        },
+        "due_date": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "purpose": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "spec_constraint_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "open",
+            "validation_required",
+            "unavailable"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "choice",
+        "status",
+        "purpose",
+        "rationale",
+        "access_mechanism",
+        "credential_status",
+        "owner",
+        "due_date",
+        "spec_constraint_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "techRef": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "techRefs": {
+      "items": {
+        "$ref": "#/$defs/techRef"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "traceEdge": {
+      "additionalProperties": false,
+      "properties": {
+        "from_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "relation": {
+          "enum": [
+            "implements",
+            "realizes",
+            "verifies",
+            "depends_on",
+            "produces",
+            "consumes",
+            "owns",
+            "constrains",
+            "mitigates",
+            "decided_by",
+            "derived_from"
+          ]
+        },
+        "to_ref": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from_ref",
+        "relation",
+        "to_ref"
+      ],
+      "type": "object"
+    },
+    "verificationItem": {
+      "additionalProperties": false,
+      "properties": {
+        "covers_acceptance_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "expected_evidence": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "unit",
+            "contract",
+            "integration",
+            "end_to_end",
+            "security",
+            "performance",
+            "operational"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "pass_criteria": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "technical_refs": {
+          "$ref": "#/$defs/techRefs"
+        }
+      },
+      "required": [
+        "id",
+        "level",
+        "method",
+        "pass_criteria",
+        "expected_evidence",
+        "covers_acceptance_refs",
+        "technical_refs",
+        "owner"
+      ],
+      "type": "object"
+    },
+    "workflow": {
+      "additionalProperties": false,
+      "properties": {
+        "concurrency_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "implements_spec_refs": {
+          "items": {
+            "$ref": "#/$defs/specRef"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "invalid_transition_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "states": {
+          "items": {
+            "$ref": "#/$defs/workflowState"
+          },
+          "minItems": 2,
+          "type": "array"
+        },
+        "transitions": {
+          "items": {
+            "$ref": "#/$defs/workflowTransition"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "trigger_interface_ref": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "trigger_interface_ref",
+        "states",
+        "transitions",
+        "invalid_transition_behaviour",
+        "concurrency_behaviour",
+        "implements_spec_refs"
+      ],
+      "type": "object"
+    },
+    "workflowState": {
+      "additionalProperties": false,
+      "properties": {
+        "meaning": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "terminal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "meaning",
+        "terminal"
+      ],
+      "type": "object"
+    },
+    "workflowTransition": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "event": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "failure_ref": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "guard": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "to": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "from",
+        "event",
+        "guard",
+        "to",
+        "action",
+        "failure_ref"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.local/schemas/technical-contract-payload.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Canonical implementation semantics carried in the payload field of a Foundation Artifact Envelope.",
+  "properties": {
+    "architecture_context": {
+      "$ref": "#/$defs/architectureContext"
+    },
+    "build_units": {
+      "items": {
+        "$ref": "#/$defs/buildUnit"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "components": {
+      "items": {
+        "$ref": "#/$defs/component"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "contract_intent": {
+      "$ref": "#/$defs/contractIntent"
+    },
+    "data_contracts": {
+      "items": {
+        "$ref": "#/$defs/dataContract"
+      },
+      "type": "array"
+    },
+    "engineering_decisions": {
+      "items": {
+        "$ref": "#/$defs/engineeringDecision"
+      },
+      "type": "array"
+    },
+    "evidence_catalog": {
+      "items": {
+        "$ref": "#/$defs/evidenceItem"
+      },
+      "type": "array"
+    },
+    "failure_contracts": {
+      "items": {
+        "$ref": "#/$defs/failureContract"
+      },
+      "type": "array"
+    },
+    "interfaces": {
+      "items": {
+        "$ref": "#/$defs/interfaceContract"
+      },
+      "type": "array"
+    },
+    "observability_audit": {
+      "$ref": "#/$defs/observabilityAudit"
+    },
+    "quality_budgets": {
+      "items": {
+        "$ref": "#/$defs/qualityBudget"
+      },
+      "type": "array"
+    },
+    "review_obligations": {
+      "items": {
+        "$ref": "#/$defs/reviewObligation"
+      },
+      "type": "array"
+    },
+    "rollout_migration_recovery": {
+      "$ref": "#/$defs/rolloutMigrationRecovery"
+    },
+    "security_privacy_contract": {
+      "$ref": "#/$defs/securityPrivacyContract"
+    },
+    "semantic_evidence_findings": {
+      "items": {
+        "$ref": "#/$defs/semanticEvidenceFinding"
+      },
+      "type": "array"
+    },
+    "substrate_dependencies": {
+      "items": {
+        "$ref": "#/$defs/substrateDependency"
+      },
+      "type": "array"
+    },
+    "traceability": {
+      "items": {
+        "$ref": "#/$defs/traceEdge"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "verification_plan": {
+      "items": {
+        "$ref": "#/$defs/verificationItem"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "workflows": {
+      "items": {
+        "$ref": "#/$defs/workflow"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "contract_intent",
+    "evidence_catalog",
+    "semantic_evidence_findings",
+    "architecture_context",
+    "components",
+    "interfaces",
+    "data_contracts",
+    "workflows",
+    "failure_contracts",
+    "security_privacy_contract",
+    "quality_budgets",
+    "substrate_dependencies",
+    "observability_audit",
+    "rollout_migration_recovery",
+    "build_units",
+    "verification_plan",
+    "engineering_decisions",
+    "review_obligations",
+    "traceability"
+  ],
+  "title": "Technical Contract Payload",
+  "type": "object"
+}

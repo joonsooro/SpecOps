@@ -1,0 +1,355 @@
+{
+  "$defs": {
+    "approvalSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "approved_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "domain",
+        "decision",
+        "actor_ref",
+        "approved_at"
+      ],
+      "type": "object"
+    },
+    "governanceSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/approvalSummary"
+          },
+          "type": "array"
+        },
+        "handoff_authorization_id": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handoff_restrictions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "quality_contract_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "readiness_audit_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "quality_contract_version",
+        "readiness_audit_id",
+        "approvals",
+        "handoff_authorization_id",
+        "handoff_restrictions"
+      ],
+      "type": "object"
+    },
+    "header": {
+      "additionalProperties": false,
+      "properties": {
+        "build_unit_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "component_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contract_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "downstream_handoff_allowed": {
+          "type": "boolean"
+        },
+        "interface_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "open_blocking_obligation_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "open_nonblocking_obligation_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "readiness": {
+          "enum": [
+            "ready",
+            "conditional",
+            "blocked"
+          ]
+        },
+        "short_payload_hash": {
+          "pattern": "^[a-f0-9]{8,16}$",
+          "type": "string"
+        },
+        "version_label": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "contract_name",
+        "version_label",
+        "readiness",
+        "downstream_handoff_allowed",
+        "component_count",
+        "interface_count",
+        "build_unit_count",
+        "open_blocking_obligation_count",
+        "open_nonblocking_obligation_count",
+        "short_payload_hash"
+      ],
+      "type": "object"
+    },
+    "nonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "queueEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_pointer": {
+          "pattern": "^/payload/",
+          "type": "string"
+        },
+        "due_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "related_refs": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "reason",
+        "owner",
+        "due_date",
+        "related_refs",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "queues": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking_obligations": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        },
+        "later_review": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        },
+        "open_dependencies": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        },
+        "rejected_or_superseded_decisions": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "blocking_obligations",
+        "later_review",
+        "open_dependencies",
+        "rejected_or_superseded_decisions"
+      ],
+      "type": "object"
+    },
+    "sourceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^CONTRACT-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "case_revision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed_spec_artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confirmed_spec_artifact_key": {
+          "pattern": "^SPEC-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "confirmed_spec_confirmation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confirmed_spec_payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "confirmed_spec_record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "confirmed_spec_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "lifecycle_status": {
+          "enum": [
+            "draft",
+            "conditional",
+            "approved",
+            "superseded"
+          ]
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "payload_hash",
+        "lifecycle_status",
+        "case_revision",
+        "confirmed_spec_artifact_id",
+        "confirmed_spec_artifact_key",
+        "confirmed_spec_version",
+        "confirmed_spec_record_revision",
+        "confirmed_spec_payload_hash",
+        "confirmed_spec_confirmation_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.local/schemas/technical-contract-view.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read-only JSON projection for the existing FastAPI-to-React runtime. The contract payload is already section-oriented; this view adds display metadata, resolved evidence, and governance summaries without changing semantics.",
+  "properties": {
+    "contract_content": {
+      "$ref": "technical-contract-payload.schema.json"
+    },
+    "evidence_index": {
+      "items": {
+        "$ref": "final-spec-package-view.schema.json#/$defs/evidenceView"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "governance_summary": {
+      "$ref": "#/$defs/governanceSummary"
+    },
+    "header": {
+      "$ref": "#/$defs/header"
+    },
+    "mode": {
+      "enum": [
+        "draft",
+        "review",
+        "final",
+        "diff"
+      ]
+    },
+    "projection_integrity": {
+      "$ref": "final-spec-package-view.schema.json#/$defs/projectionIntegrity"
+    },
+    "queues": {
+      "$ref": "#/$defs/queues"
+    },
+    "source": {
+      "$ref": "#/$defs/sourceBinding"
+    },
+    "view_id": {
+      "description": "Foundation-minted immutable identifier for this materialized projection. A regenerated projection receives a new view_id and therefore a new view_hash even when its displayed semantic content is unchanged.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "view_schema_version": {
+      "const": "3.0.0"
+    },
+    "view_type": {
+      "const": "technical_contract_view"
+    }
+  },
+  "required": [
+    "view_schema_version",
+    "view_type",
+    "view_id",
+    "mode",
+    "source",
+    "generated_at",
+    "header",
+    "contract_content",
+    "governance_summary",
+    "queues",
+    "evidence_index",
+    "projection_integrity"
+  ],
+  "title": "Technical Contract Read Model",
+  "type": "object"
+}

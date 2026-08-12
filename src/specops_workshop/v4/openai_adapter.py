@@ -1,0 +1,533 @@
+"""OpenAI Responses adapter for the stored V4 Workshop context.
+
+This module has no model fallback and no local semantic search.  It uploads the
+two approved source documents once, binds every stored response to one explicit
+Conversation, uses the narrow operation schema, and returns only locally
+validated candidates.  Provider diagnostics are deliberately content-free.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Callable
+from uuid import UUID
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel, ValidationError
+
+from . import contracts
+from .schema_compiler import native_schema_for
+
+
+REQUEST_TIMEOUT_SECONDS = 30.0
+MAX_OUTPUT_TOKENS = {
+    contracts.AnalyzerOperation.BOOTSTRAP: 24_000,
+    contracts.AnalyzerOperation.TURN_ANALYSIS: 20_000,
+    contracts.AnalyzerOperation.GUIDANCE: 8_000,
+    contracts.AnalyzerOperation.REVIEW_NARRATION: 8_000,
+    contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS: 24_000,
+    contracts.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS: 24_000,
+}
+
+
+@dataclass(frozen=True)
+class ProviderSourceUpload:
+    source: contracts.SourceIdentity
+    content: bytes
+
+
+@dataclass(frozen=True)
+class PreparedProviderContext:
+    provider_conversation_id: str
+    source_set: contracts.SourceSetBinding
+
+
+@dataclass(frozen=True)
+class BootstrapResult:
+    context: contracts.AnalyzerContextBinding
+    candidate: contracts.InterviewBriefCandidate
+
+
+class ProviderAdapterError(RuntimeError):
+    """A provider failure whose only public detail is a safe receipt."""
+
+    def __init__(self, receipt: contracts.ProviderFailureReceipt) -> None:
+        super().__init__(receipt.code.value)
+        self.receipt = receipt
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _safe_provider_identifier(value: Any) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 512 or not value.isascii():
+        return None
+    if not all(character.isalnum() or character in "._:-" for character in value):
+        return None
+    return value
+
+
+_KNOWN_SCHEMA_PATHS = frozenset(
+    {
+        "protocol_version",
+        "output_type",
+        "analyzer_run_id",
+        "context_id",
+        "request_hash",
+        "source_set_hash",
+        "based_on_case_revision",
+        "transcript_event_id",
+        "disposition",
+        "no_change_reason_code",
+        "evidence_candidates",
+        "new_problems",
+        "new_problem_clusters",
+        "revised_problem_clusters",
+        "new_questions",
+        "revised_questions",
+        "low_risk_facts",
+        "decisions",
+        "problem_assessments",
+        "evidence_findings",
+        "customer_promise_summary",
+        "problems",
+        "problem_clusters",
+        "questions",
+        "initial_runway",
+        "confirmation_checkpoints",
+        "recommended_question",
+        "safe_alternates",
+        "do_not_ask_question_refs",
+        "dependencies",
+        "acknowledgement_suggestion",
+        "decision_batch_view_id",
+        "decision_batch_view_hash",
+        "spoken_opening",
+        "items",
+        "spoken_confirmation_question",
+        "foundation_artifact_id",
+        "identity_plan_id",
+        "identity_plan_version",
+        "semantic_state_hash",
+        "candidate_payload_json",
+        "payload_schema_id",
+        "payload_schema_version",
+    }
+)
+
+
+def safe_validation_diagnostics(error: Exception) -> tuple[contracts.SafeValidationDiagnostic, ...]:
+    if not isinstance(error, ValidationError):
+        return ()
+    result: list[contracts.SafeValidationDiagnostic] = []
+    for item in error.errors(include_url=False, include_context=False, include_input=False):
+        path: list[str] = []
+        for segment in item.get("loc", ())[:16]:
+            if isinstance(segment, int) and 0 <= segment <= 9_999:
+                path.append(str(segment))
+            elif isinstance(segment, str) and segment in _KNOWN_SCHEMA_PATHS:
+                path.append(segment)
+            elif isinstance(segment, str):
+                path.append("$unknown")
+                break
+            else:
+                path.append("$unknown")
+                break
+        raw_code = str(item.get("type", ""))
+        if raw_code == "missing":
+            code = contracts.SafeValidationCode.MISSING
+        elif raw_code == "extra_forbidden":
+            code = contracts.SafeValidationCode.UNKNOWN_FIELD
+        elif raw_code.endswith("_type") or raw_code in {"model_attributes_type", "dict_type"}:
+            code = contracts.SafeValidationCode.INVALID_TYPE
+        elif "discriminator" in raw_code or raw_code == "union_tag_invalid":
+            code = contracts.SafeValidationCode.WRONG_DISCRIMINATOR
+        elif any(token in raw_code for token in ("less_than", "greater_than", "too_short", "too_long")):
+            code = contracts.SafeValidationCode.OUT_OF_RANGE
+        elif raw_code == "json_invalid":
+            code = contracts.SafeValidationCode.MALFORMED_JSON
+        else:
+            code = contracts.SafeValidationCode.INVARIANT_FAILED
+        diagnostic = contracts.SafeValidationDiagnostic(path=tuple(path), code=code)
+        if diagnostic not in result:
+            result.append(diagnostic)
+        if len(result) == 50:
+            break
+    return tuple(result)
+
+
+class StoredConversationOpenAIAdapter:
+    """Sole V4 production provider adapter (Terra, medium, stored Conversation)."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        client: Any | None = None,
+        now: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        self._client = client or AsyncOpenAI(
+            api_key=api_key,
+            max_retries=0,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        self._now = now
+        self._failures: deque[contracts.ProviderFailureReceipt] = deque(maxlen=32)
+
+    @property
+    def failure_receipts(self) -> tuple[contracts.ProviderFailureReceipt, ...]:
+        return tuple(self._failures)
+
+    async def prepare_context(
+        self,
+        sources: tuple[ProviderSourceUpload, ProviderSourceUpload],
+    ) -> PreparedProviderContext:
+        roles = tuple(item.source.role for item in sources)
+        if roles != (contracts.SourceRole.PM_SPEC, contracts.SourceRole.TECHNICAL_CONTRACT):
+            raise ValueError("provider sources must be ordered PM_SPEC then TECHNICAL_CONTRACT")
+        if len({item.source.source_id for item in sources}) != 2:
+            raise ValueError("provider sources must have distinct Foundation identities")
+
+        uploaded: list[contracts.ProviderSourceBinding] = []
+        for item in sources:
+            actual_hash = "sha256:" + hashlib.sha256(item.content).hexdigest()
+            if actual_hash != item.source.payload_hash:
+                raise ValueError("provider source bytes do not match the Foundation payload hash")
+            client_request_id = f"specops-file-{item.source.source_id}"
+            try:
+                provider_file = await asyncio.wait_for(
+                    self._client.files.create(
+                        file=(item.source.filename, item.content, item.source.media_type),
+                        purpose="user_data",
+                        extra_headers={"X-Client-Request-Id": client_request_id},
+                    ),
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+                file_id = _safe_provider_identifier(getattr(provider_file, "id", None))
+                if file_id is None:
+                    raise ValueError("unsafe provider file identifier")
+                uploaded.append(
+                    contracts.ProviderSourceBinding(source=item.source, provider_file_id=file_id)
+                )
+            except Exception as exc:
+                raise self._provider_error(
+                    exc,
+                    stage=contracts.ProviderProcessingStage.FILE_UPLOAD,
+                    client_request_id=client_request_id,
+                ) from exc
+
+        conversation_request_id = "specops-conversation-" + hashlib.sha256(
+            "|".join(str(item.source.source_id) for item in sources).encode("ascii")
+        ).hexdigest()[:32]
+        try:
+            conversation = await asyncio.wait_for(
+                self._client.conversations.create(
+                    metadata={"protocol": contracts.PROTOCOL_VERSION},
+                    extra_headers={"X-Client-Request-Id": conversation_request_id},
+                ),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            conversation_id = _safe_provider_identifier(getattr(conversation, "id", None))
+            if conversation_id is None:
+                raise ValueError("unsafe provider Conversation identifier")
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage.CONVERSATION_CREATE,
+                client_request_id=conversation_request_id,
+            ) from exc
+
+        source_set_hash = self.source_set_hash(tuple(item.source for item in sources))
+        return PreparedProviderContext(
+            provider_conversation_id=conversation_id,
+            source_set=contracts.SourceSetBinding(
+                source_set_hash=source_set_hash,
+                ordered_sources=tuple(uploaded),
+            ),
+        )
+
+    async def bootstrap(
+        self,
+        request: contracts.BootstrapAnalyzerRequest,
+        *,
+        prepared: PreparedProviderContext,
+        session_id: UUID,
+    ) -> BootstrapResult:
+        if request.provider_conversation_id != prepared.provider_conversation_id:
+            raise ValueError("bootstrap request does not bind the prepared Conversation")
+        if request.source_set != prepared.source_set:
+            raise ValueError("bootstrap request does not bind the two uploaded sources")
+        candidate, response_id = await self._execute(request, bootstrap=True)
+        assert isinstance(candidate, contracts.InterviewBriefCandidate)
+        context = contracts.AnalyzerContextBinding(
+            protocol_version=contracts.PROTOCOL_VERSION,
+            context_id=request.context_id,
+            session_id=session_id,
+            provider=contracts.ProviderName.OPENAI,
+            provider_conversation_id=prepared.provider_conversation_id,
+            bootstrap_response_id=response_id,
+            model="gpt-5.6-terra",
+            reasoning_effort=contracts.ReasoningEffort.MEDIUM,
+            conversation_state_persisted=True,
+            response_store_enabled=True,
+            analyzer_contract=request.analyzer_contract,
+            source_set=prepared.source_set,
+            status=contracts.ContextStatus.ACTIVE,
+            created_at=self._now(),
+            invalidated_at=None,
+            invalidation_reason=None,
+        )
+        return BootstrapResult(context=context, candidate=candidate)
+
+    async def execute(
+        self,
+        request: contracts.AnalyzerProviderRequest,
+        *,
+        context: contracts.AnalyzerContextBinding,
+    ) -> contracts.AnalyzerProviderCandidate:
+        if request.request_type is contracts.AnalyzerOperation.BOOTSTRAP:
+            raise ValueError("use bootstrap() for the initial provider request")
+        self._validate_context(request, context)
+        candidate, _ = await self._execute(request, bootstrap=False)
+        return candidate
+
+    async def context_is_available(self, context: contracts.AnalyzerContextBinding) -> bool:
+        if context.status is not contracts.ContextStatus.ACTIVE:
+            return False
+        client_request_id = f"specops-context-check-{context.context_id}"
+        try:
+            value = await asyncio.wait_for(
+                self._client.conversations.retrieve(
+                    context.provider_conversation_id,
+                    extra_headers={"X-Client-Request-Id": client_request_id},
+                ),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage.CONVERSATION_CREATE,
+                client_request_id=client_request_id,
+            )
+            return False
+        return getattr(value, "id", None) == context.provider_conversation_id
+
+    async def _execute(self, request: contracts.AnalyzerProviderRequest, *, bootstrap: bool):
+        operation = contracts.AnalyzerOperation(request.request_type)
+        schema_name, schema, candidate_type = native_schema_for(operation)
+        content: list[dict[str, str]] = []
+        if bootstrap:
+            assert isinstance(request, contracts.BootstrapAnalyzerRequest)
+            content.extend(
+                {"type": "input_file", "file_id": item.provider_file_id}
+                for item in request.source_set.ordered_sources
+            )
+        content.append(
+            {
+                "type": "input_text",
+                "text": request.model_dump_json(exclude_none=False),
+            }
+        )
+        arguments = {
+            "model": "gpt-5.6-terra",
+            "reasoning": {"effort": "medium", "context": "all_turns"},
+            "store": True,
+            "conversation": request.provider_conversation_id,
+            "extra_headers": {"X-Client-Request-Id": request.client_request_id},
+            "instructions": self._instructions(operation),
+            "input": [{"role": "user", "content": content}],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+            "max_output_tokens": MAX_OUTPUT_TOKENS[operation],
+        }
+        try:
+            response = await asyncio.wait_for(
+                self._client.responses.create(**arguments),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage(operation.value),
+                client_request_id=request.client_request_id,
+            ) from exc
+
+        response_id = _safe_provider_identifier(getattr(response, "id", None))
+        if response_id is None:
+            raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
+        try:
+            candidate = candidate_type.model_validate_json(response.output_text)
+            self._validate_candidate_echo(request, candidate)
+        except Exception as exc:
+            raise self._output_error(
+                request.client_request_id,
+                exc,
+                provider_request_id=_safe_provider_identifier(getattr(response, "_request_id", None)),
+            ) from exc
+        return candidate, response_id
+
+    @staticmethod
+    def _instructions(operation: contracts.AnalyzerOperation) -> str:
+        return (
+            "You are the SpecOps Workshop Analyzer. Use the two source documents already "
+            "attached to this Conversation and the new Foundation-bound request. Return only "
+            f"the strict {operation.value} candidate. Propose semantics; never claim authority, "
+            "confirmation, readiness, Foundation commands, or new canonical identities."
+        )
+
+    @staticmethod
+    def _validate_context(
+        request: contracts.AnalyzerProviderRequest,
+        context: contracts.AnalyzerContextBinding,
+    ) -> None:
+        if context.status is not contracts.ContextStatus.ACTIVE:
+            raise ValueError("Analyzer context is not active")
+        if request.context_id != context.context_id:
+            raise ValueError("request context ID does not match the active context")
+        if request.provider_conversation_id != context.provider_conversation_id:
+            raise ValueError("request Conversation does not match the active context")
+        if request.source_set_hash != context.source_set.source_set_hash:
+            raise ValueError("request source set does not match the active context")
+        if request.analyzer_contract != context.analyzer_contract:
+            raise ValueError("request Analyzer contract does not match the active context")
+        if context.model != "gpt-5.6-terra" or context.reasoning_effort != "medium":
+            raise ValueError("active context violates the fixed provider profile")
+        if not context.conversation_state_persisted or not context.response_store_enabled:
+            raise ValueError("active context does not prove stored Conversation policy")
+
+    @staticmethod
+    def _validate_candidate_echo(request: BaseModel, candidate: BaseModel) -> None:
+        for field in ("analyzer_run_id", "context_id", "request_hash", "source_set_hash"):
+            if getattr(candidate, field) != getattr(request, field):
+                raise ValueError(f"provider candidate does not echo {field}")
+        if hasattr(candidate, "based_on_case_revision") and (
+            candidate.based_on_case_revision != request.based_on_case_revision
+        ):
+            raise ValueError("provider candidate does not echo based_on_case_revision")
+
+    @staticmethod
+    def source_set_hash(sources: tuple[contracts.SourceIdentity, contracts.SourceIdentity]) -> str:
+        # The production canonical helper replaces this local import; keeping the
+        # domain-separated recipe here avoids provider IDs entering the binding.
+        from .canonical import domain_hash
+
+        material = [
+            {
+                "source_id": str(item.source_id),
+                "role": item.role.value,
+                "version": item.version,
+                "payload_hash": item.payload_hash,
+            }
+            for item in sources
+        ]
+        return domain_hash("SPECOPS:SOURCE_SET:v1", material)
+
+    def _output_error(
+        self,
+        client_request_id: str,
+        error: Exception,
+        *,
+        provider_request_id: str | None = None,
+    ) -> ProviderAdapterError:
+        receipt = contracts.ProviderFailureReceipt(
+            provider=contracts.ProviderName.OPENAI,
+            stage=contracts.ProviderProcessingStage.LOCAL_VALIDATION,
+            client_request_id=client_request_id,
+            provider_request_id=provider_request_id,
+            status_code=None,
+            code=contracts.ProviderFailureCode.OUTPUT_INVALID,
+            retryable=False,
+            validation_diagnostics=safe_validation_diagnostics(error),
+            occurred_at=self._now(),
+        )
+        self._failures.append(receipt)
+        return ProviderAdapterError(receipt)
+
+    def _provider_error(
+        self,
+        error: Exception,
+        *,
+        stage: contracts.ProviderProcessingStage,
+        client_request_id: str,
+    ) -> ProviderAdapterError:
+        status = getattr(error, "status_code", None)
+        status_code = status if isinstance(status, int) and 100 <= status <= 599 else None
+        code_value = getattr(error, "code", None)
+        parameter = getattr(error, "param", None)
+        code, retryable = self._classify(
+            status_code,
+            code_value,
+            parameter,
+            stage,
+            type(error).__name__,
+        )
+        receipt = contracts.ProviderFailureReceipt(
+            provider=contracts.ProviderName.OPENAI,
+            stage=stage,
+            client_request_id=client_request_id,
+            provider_request_id=_safe_provider_identifier(getattr(error, "request_id", None)),
+            status_code=status_code,
+            code=code,
+            retryable=retryable,
+            validation_diagnostics=(),
+            occurred_at=self._now(),
+        )
+        self._failures.append(receipt)
+        return ProviderAdapterError(receipt)
+
+    @staticmethod
+    def _classify(status_code, code, parameter, stage, error_type):
+        if isinstance(code, str):
+            code = code.lower()
+        if isinstance(parameter, str):
+            parameter = parameter.lower()
+        if status_code == 400:
+            if parameter and ("text.format" in parameter or "schema" in parameter):
+                if code in {"unsupported_schema_keyword", "unsupported_value"}:
+                    return contracts.ProviderFailureCode.UNSUPPORTED_SCHEMA_KEYWORD, False
+                return contracts.ProviderFailureCode.SCHEMA_REJECTED, False
+            if parameter and "conversation" in parameter:
+                return contracts.ProviderFailureCode.CONVERSATION_UNAVAILABLE, True
+            if parameter and ("file" in parameter or "input" in parameter) and code in {
+                "invalid_file",
+                "file_not_found",
+                "unsupported_file",
+            }:
+                return contracts.ProviderFailureCode.INPUT_FILE_UNAVAILABLE, True
+            if code in {"context_mismatch", "conversation_context_mismatch"}:
+                return contracts.ProviderFailureCode.CONTEXT_MISMATCH, True
+            if code in {"context_length_exceeded", "request_too_large"}:
+                return contracts.ProviderFailureCode.REQUEST_TOO_LARGE, False
+            if code in {"invalid_request_error", "invalid_parameter"}:
+                return contracts.ProviderFailureCode.INVALID_REQUEST_SHAPE, False
+            return contracts.ProviderFailureCode.UNKNOWN_SAFE, False
+        exact = {
+            401: contracts.ProviderFailureCode.HTTP_401,
+            403: contracts.ProviderFailureCode.HTTP_403,
+            404: contracts.ProviderFailureCode.HTTP_404,
+            409: contracts.ProviderFailureCode.HTTP_409,
+            429: contracts.ProviderFailureCode.HTTP_429,
+        }
+        if status_code in exact:
+            return exact[status_code], status_code in {409, 429}
+        if status_code is not None and 500 <= status_code <= 599:
+            return contracts.ProviderFailureCode.HTTP_5XX, True
+        normalized_error_type = error_type.lower() if isinstance(error_type, str) else ""
+        if status_code is None and "timeout" in normalized_error_type:
+            return contracts.ProviderFailureCode.TIMEOUT, True
+        if status_code is None and "connection" in normalized_error_type:
+            return contracts.ProviderFailureCode.CONNECTION, True
+        if stage is contracts.ProviderProcessingStage.CONVERSATION_CREATE and status_code == 404:
+            return contracts.ProviderFailureCode.CONVERSATION_UNAVAILABLE, True
+        return contracts.ProviderFailureCode.UNKNOWN_SAFE, False

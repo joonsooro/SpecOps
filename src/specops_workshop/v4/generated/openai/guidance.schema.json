@@ -1,0 +1,161 @@
+{
+  "$defs": {
+    "FoundationEntityRef": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_version": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "foundation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ref_kind": {
+          "const": "FOUNDATION_ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref_kind",
+        "foundation_id",
+        "expected_version"
+      ],
+      "type": "object"
+    },
+    "GuidanceDependency": {
+      "additionalProperties": false,
+      "properties": {
+        "dependency_kind": {
+          "$ref": "#/$defs/GuidanceDependencyKind"
+        },
+        "entity_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FoundationEntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "dependency_kind",
+        "entity_ref"
+      ],
+      "type": "object"
+    },
+    "GuidanceDependencyKind": {
+      "enum": [
+        "SOURCE_SET",
+        "FOUNDATION_ENTITY",
+        "QUESTION",
+        "PROBLEM"
+      ],
+      "type": "string"
+    },
+    "GuidanceQuestion": {
+      "additionalProperties": false,
+      "properties": {
+        "exact_text": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "question_ref": {
+          "$ref": "#/$defs/FoundationEntityRef"
+        },
+        "reason": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_ref",
+        "exact_text",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "acknowledgement_suggestion": {
+      "maxLength": 20000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "analyzer_run_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "based_on_case_revision": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "context_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "dependencies": {
+      "items": {
+        "$ref": "#/$defs/GuidanceDependency"
+      },
+      "maxItems": 100,
+      "minItems": 1,
+      "type": "array"
+    },
+    "do_not_ask_question_refs": {
+      "items": {
+        "$ref": "#/$defs/FoundationEntityRef"
+      },
+      "maxItems": 50,
+      "type": "array"
+    },
+    "output_type": {
+      "const": "GUIDANCE_CANDIDATE",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "type": "string"
+    },
+    "recommended_question": {
+      "$ref": "#/$defs/GuidanceQuestion"
+    },
+    "request_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "safe_alternates": {
+      "items": {
+        "$ref": "#/$defs/GuidanceQuestion"
+      },
+      "maxItems": 5,
+      "type": "array"
+    },
+    "source_set_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "output_type",
+    "analyzer_run_id",
+    "context_id",
+    "request_hash",
+    "source_set_hash",
+    "based_on_case_revision",
+    "recommended_question",
+    "safe_alternates",
+    "do_not_ask_question_refs",
+    "dependencies",
+    "acknowledgement_suggestion"
+  ],
+  "type": "object"
+}

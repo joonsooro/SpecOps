@@ -1,0 +1,427 @@
+{
+  "$defs": {
+    "approval": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "approval_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "approved_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "authority_validation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "approved",
+            "approved_with_obligations",
+            "rejected",
+            "withdrawn"
+          ]
+        },
+        "domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "review_view": {
+          "$ref": "#/$defs/reviewViewBinding"
+        }
+      },
+      "required": [
+        "approval_id",
+        "domain",
+        "actor_ref",
+        "decision",
+        "authority_validation_id",
+        "review_view",
+        "approved_at"
+      ],
+      "type": "object"
+    },
+    "contractGovernance": {
+      "additionalProperties": false,
+      "properties": {
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/approval"
+          },
+          "type": "array"
+        },
+        "contract_readiness": {
+          "$ref": "#/$defs/contractReadiness"
+        },
+        "handoff_authorization": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/handoffAuthorization"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_review_view": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/reviewViewBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quality_contract": {
+          "$ref": "#/$defs/qualityContractPointer"
+        }
+      },
+      "required": [
+        "quality_contract",
+        "contract_readiness",
+        "approvals",
+        "latest_review_view",
+        "handoff_authorization"
+      ],
+      "type": "object"
+    },
+    "contractReadiness": {
+      "additionalProperties": false,
+      "properties": {
+        "audit_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "based_on_contract_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "blocker_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "downstream_handoff_allowed": {
+          "type": "boolean"
+        },
+        "handoff_reasons": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "quality_contract_version": {
+          "const": "2.0.0"
+        },
+        "result": {
+          "enum": [
+            "ready",
+            "conditional",
+            "blocked"
+          ]
+        },
+        "rule_results": {
+          "items": {
+            "$ref": "#/$defs/readinessRuleResult"
+          },
+          "type": "array"
+        },
+        "run_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "audit_id",
+        "quality_contract_version",
+        "based_on_contract_version",
+        "run_at",
+        "rule_results",
+        "blocker_refs",
+        "result",
+        "downstream_handoff_allowed",
+        "handoff_reasons"
+      ],
+      "type": "object"
+    },
+    "handoffAuthorization": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^CONTRACT-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "authorization_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "authorized_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "case_revision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "restrictions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "authorization_id",
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "payload_hash",
+        "case_revision",
+        "allowed",
+        "restrictions",
+        "authorized_at"
+      ],
+      "type": "object"
+    },
+    "nonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "qualityContractPointer": {
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "contract_id": {
+          "const": "SEMANTIC-QUALITY-CONTRACT"
+        },
+        "version": {
+          "const": "2.0.0"
+        }
+      },
+      "required": [
+        "contract_id",
+        "version",
+        "content_hash"
+      ],
+      "type": "object"
+    },
+    "readinessRuleResult": {
+      "additionalProperties": false,
+      "properties": {
+        "explanation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "finding_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "fail",
+            "not_applicable"
+          ]
+        },
+        "rule_id": {
+          "pattern": "^TECH-Q-[0-9]{3}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "result",
+        "finding_refs",
+        "explanation"
+      ],
+      "type": "object"
+    },
+    "reviewViewBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^CONTRACT-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "draft",
+            "review",
+            "final",
+            "diff"
+          ]
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "profile_id": {
+          "const": "artifact-review-view"
+        },
+        "profile_version": {
+          "const": "3.0.0"
+        },
+        "record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "view_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "view_id": {
+          "description": "Foundation-minted immutable identifier for this materialized review projection. It is unique even when two projections contain identical content.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_id",
+        "profile_version",
+        "view_id",
+        "mode",
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "payload_hash",
+        "view_hash",
+        "generated_at"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.local/schemas/technical-contract.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "$ref": "artifact-envelope.schema.json"
+    },
+    {
+      "if": {
+        "properties": {
+          "envelope": {
+            "properties": {
+              "lifecycle_status": {
+                "const": "approved"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "governance": {
+            "properties": {
+              "contract_readiness": {
+                "properties": {
+                  "downstream_handoff_allowed": {
+                    "const": true
+                  },
+                  "result": {
+                    "const": "ready"
+                  }
+                }
+              },
+              "handoff_authorization": {
+                "$ref": "#/$defs/handoffAuthorization"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "description": "Canonical JSON artifact exchanged with Foundation. The payload is implementation semantics derived from an exact confirmed Spec Package.",
+  "properties": {
+    "envelope": {
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^CONTRACT-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "technical_contract"
+        },
+        "lifecycle_status": {
+          "enum": [
+            "draft",
+            "conditional",
+            "approved",
+            "superseded"
+          ]
+        },
+        "lineage": {
+          "contains": {
+            "$ref": "artifact-envelope.schema.json#/$defs/confirmedFromLineageEdge"
+          },
+          "maxContains": 1,
+          "minContains": 1
+        },
+        "schema_id": {
+          "const": "technical-contract"
+        },
+        "schema_version": {
+          "const": "4.0.0"
+        }
+      }
+    },
+    "governance": {
+      "$ref": "#/$defs/contractGovernance"
+    },
+    "payload": {
+      "$ref": "technical-contract-payload.schema.json"
+    }
+  },
+  "title": "Technical Contract Artifact"
+}

@@ -1,0 +1,6429 @@
+{
+  "components": {
+    "schemas": {
+      "AnalyzerContextCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "context_status": {
+            "$ref": "#/components/schemas/ContextStatus"
+          },
+          "receipt_type": {
+            "const": "ANALYZER_CONTEXT",
+            "title": "Receipt Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "context_id",
+          "context_status"
+        ],
+        "title": "AnalyzerContextCommandReceipt",
+        "type": "object"
+      },
+      "ArtifactConfirmationBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "format": "uuid",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_key": {
+            "pattern": "^(?:SPEC|CONTRACT)-[A-Z0-9][A-Z0-9-]{2,63}$",
+            "title": "Artifact Key",
+            "type": "string"
+          },
+          "artifact_type": {
+            "enum": [
+              "SPEC_PACKAGE",
+              "TECHNICAL_CONTRACT"
+            ],
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "artifact_version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Artifact Version",
+            "type": "integer"
+          },
+          "confirmation_id": {
+            "format": "uuid",
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "payload_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Payload Hash",
+            "type": "string"
+          },
+          "record_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Record Revision",
+            "type": "integer"
+          },
+          "view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "View Hash",
+            "type": "string"
+          },
+          "view_id": {
+            "format": "uuid",
+            "title": "View Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_type",
+          "artifact_id",
+          "artifact_key",
+          "artifact_version",
+          "record_revision",
+          "payload_hash",
+          "confirmation_id",
+          "view_id",
+          "view_hash"
+        ],
+        "title": "ArtifactConfirmationBinding",
+        "type": "object"
+      },
+      "ArtifactConfirmationReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/ArtifactConfirmationBinding"
+          },
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "receipt_type": {
+            "const": "ARTIFACT_CONFIRMATION",
+            "title": "Receipt Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "binding"
+        ],
+        "title": "ArtifactConfirmationReceipt",
+        "type": "object"
+      },
+      "ArtifactReviewProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation_id": {
+            "format": "uuid",
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "view": {
+            "additionalProperties": true,
+            "title": "View",
+            "type": "object"
+          },
+          "view_hash": {
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "title": "View Hash",
+            "type": "string"
+          },
+          "view_id": {
+            "format": "uuid",
+            "title": "View Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirmation_id",
+          "view_id",
+          "view_hash",
+          "view",
+          "confirmed"
+        ],
+        "title": "ArtifactReviewProjection",
+        "type": "object"
+      },
+      "ArtifactReviewReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "confirmation_id": {
+            "format": "uuid",
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "receipt_type": {
+            "const": "ARTIFACT_REVIEW",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "View Hash",
+            "type": "string"
+          },
+          "view_id": {
+            "format": "uuid",
+            "title": "View Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "confirmation_id",
+          "view_id",
+          "view_hash"
+        ],
+        "title": "ArtifactReviewReceipt",
+        "type": "object"
+      },
+      "ArtifactSynthesisAdmissionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "artifact_id": {
+            "format": "uuid",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_key": {
+            "pattern": "^(?:SPEC|CONTRACT)-[A-Z0-9][A-Z0-9-]{2,63}$",
+            "title": "Artifact Key",
+            "type": "string"
+          },
+          "artifact_type": {
+            "enum": [
+              "SPEC_PACKAGE",
+              "TECHNICAL_CONTRACT"
+            ],
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "artifact_version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Artifact Version",
+            "type": "integer"
+          },
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "payload_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Payload Hash",
+            "type": "string"
+          },
+          "receipt_type": {
+            "const": "ARTIFACT_SYNTHESIS_ADMISSION",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "record_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Record Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "analyzer_run_id",
+          "artifact_type",
+          "artifact_id",
+          "artifact_key",
+          "artifact_version",
+          "record_revision",
+          "payload_hash"
+        ],
+        "title": "ArtifactSynthesisAdmissionReceipt",
+        "type": "object"
+      },
+      "CandidateIdentityMapping": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "entity_kind": {
+            "enum": [
+              "EVIDENCE",
+              "PROBLEM",
+              "CLUSTER",
+              "QUESTION",
+              "FACT",
+              "DECISION",
+              "FINDING"
+            ],
+            "title": "Entity Kind",
+            "type": "string"
+          },
+          "foundation_id": {
+            "format": "uuid",
+            "title": "Foundation Id",
+            "type": "string"
+          },
+          "record_version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Record Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "analyzer_run_id",
+          "candidate_key",
+          "entity_kind",
+          "foundation_id",
+          "record_version"
+        ],
+        "title": "CandidateIdentityMapping",
+        "type": "object"
+      },
+      "CommandOutcome": {
+        "enum": [
+          "APPLIED",
+          "NO_OP_REPLAY",
+          "REJECTED"
+        ],
+        "title": "CommandOutcome",
+        "type": "string"
+      },
+      "ConfirmedArtifactProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "format": "uuid",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_key": {
+            "title": "Artifact Key",
+            "type": "string"
+          },
+          "artifact_version": {
+            "title": "Artifact Version",
+            "type": "integer"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "payload_hash": {
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "title": "Payload Hash",
+            "type": "string"
+          },
+          "record_revision": {
+            "title": "Record Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "artifact_key",
+          "artifact_version",
+          "record_revision",
+          "payload_hash",
+          "payload"
+        ],
+        "title": "ConfirmedArtifactProjection",
+        "type": "object"
+      },
+      "ContextStatus": {
+        "enum": [
+          "ACTIVE",
+          "REBUILD_REQUIRED",
+          "REBUILDING",
+          "CLOSED",
+          "FAILED"
+        ],
+        "title": "ContextStatus",
+        "type": "string"
+      },
+      "ContractValidationEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ContractValidationResponse"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "ContractValidationEnvelope",
+        "type": "object"
+      },
+      "ContractValidationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/SafeValidationDiagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          }
+        },
+        "required": [
+          "diagnostics"
+        ],
+        "title": "ContractValidationResponse",
+        "type": "object"
+      },
+      "DecisionBatchItemReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "committed_decision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Committed Decision Id"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/DecisionItemOutcome"
+          },
+          "pending_decision_id": {
+            "format": "uuid",
+            "title": "Pending Decision Id",
+            "type": "string"
+          },
+          "review_item_id": {
+            "format": "uuid",
+            "title": "Review Item Id",
+            "type": "string"
+          },
+          "revision_request_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision Request Id"
+          }
+        },
+        "required": [
+          "review_item_id",
+          "pending_decision_id",
+          "outcome",
+          "committed_decision_id",
+          "revision_request_id"
+        ],
+        "title": "DecisionBatchItemReceipt",
+        "type": "object"
+      },
+      "DecisionBatchResponseReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "decision_batch_view_id": {
+            "format": "uuid",
+            "title": "Decision Batch View Id",
+            "type": "string"
+          },
+          "item_results": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionBatchItemReceipt"
+            },
+            "maxItems": 26,
+            "minItems": 1,
+            "title": "Item Results",
+            "type": "array"
+          },
+          "receipt_type": {
+            "const": "DECISION_BATCH_RESPONSE",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "resulting_readiness": {
+            "$ref": "#/components/schemas/Readiness"
+          },
+          "resulting_review_obligation": {
+            "$ref": "#/components/schemas/ReviewObligation"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "decision_batch_view_id",
+          "item_results",
+          "resulting_readiness",
+          "resulting_review_obligation"
+        ],
+        "title": "DecisionBatchResponseReceipt",
+        "type": "object"
+      },
+      "DecisionBatchReviewReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "receipt_type": {
+            "const": "DECISION_BATCH_REVIEW",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "View Hash",
+            "type": "string"
+          },
+          "view_id": {
+            "format": "uuid",
+            "title": "View Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "view_id",
+          "view_hash"
+        ],
+        "title": "DecisionBatchReviewReceipt",
+        "type": "object"
+      },
+      "DecisionBatchReviewView": {
+        "additionalProperties": false,
+        "properties": {
+          "based_on_case_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "derived_from_cluster_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Derived From Cluster Ids",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionReviewItemView"
+            },
+            "maxItems": 26,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "View Hash",
+            "type": "string"
+          },
+          "view_id": {
+            "format": "uuid",
+            "title": "View Id",
+            "type": "string"
+          },
+          "view_type": {
+            "const": "DECISION_BATCH_REVIEW",
+            "title": "View Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "view_type",
+          "view_id",
+          "view_hash",
+          "session_id",
+          "based_on_case_revision",
+          "derived_from_cluster_ids",
+          "items",
+          "generated_at"
+        ],
+        "title": "DecisionBatchReviewView",
+        "type": "object"
+      },
+      "DecisionItemOutcome": {
+        "enum": [
+          "COMMITTED",
+          "REVISION_REQUESTED",
+          "REJECTED",
+          "DEFERRED",
+          "REMAINED_PENDING",
+          "REJECTED_STALE",
+          "REJECTED_AUTHORITY"
+        ],
+        "title": "DecisionItemOutcome",
+        "type": "string"
+      },
+      "DecisionReviewItemView": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "$ref": "#/components/schemas/Domain"
+          },
+          "exact_statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Exact Statement",
+            "type": "string"
+          },
+          "handle": {
+            "pattern": "^[A-Z]{1,2}$",
+            "title": "Handle",
+            "type": "string"
+          },
+          "pending_decision_id": {
+            "format": "uuid",
+            "title": "Pending Decision Id",
+            "type": "string"
+          },
+          "pending_decision_version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Pending Decision Version",
+            "type": "integer"
+          },
+          "problem_origins": {
+            "items": {
+              "$ref": "#/components/schemas/ProblemOriginView"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Problem Origins",
+            "type": "array"
+          },
+          "rationale": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "review_item_id": {
+            "format": "uuid",
+            "title": "Review Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_item_id",
+          "handle",
+          "pending_decision_id",
+          "pending_decision_version",
+          "classification",
+          "exact_statement",
+          "rationale",
+          "problem_origins"
+        ],
+        "title": "DecisionReviewItemView",
+        "type": "object"
+      },
+      "Domain": {
+        "enum": [
+          "PRODUCT",
+          "TECHNICAL",
+          "CROSS_DOMAIN",
+          "POLICY",
+          "SECURITY",
+          "PRIVACY",
+          "DATA",
+          "ACCEPTANCE"
+        ],
+        "title": "Domain",
+        "type": "string"
+      },
+      "FoundationCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/CommandOutcome"
+          },
+          "prior_case_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Prior Case Revision",
+            "type": "integer"
+          },
+          "receipt_type": {
+            "const": "FOUNDATION_COMMAND",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "rejection_code": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FoundationRejectionCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "resulting_case_revision": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Resulting Case Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command_id",
+          "idempotency_key",
+          "outcome",
+          "prior_case_revision",
+          "resulting_case_revision",
+          "occurred_at",
+          "rejection_code"
+        ],
+        "title": "FoundationCommandReceipt",
+        "type": "object"
+      },
+      "FoundationErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/FoundationErrorResponse"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "FoundationErrorEnvelope",
+        "type": "object"
+      },
+      "FoundationErrorResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/FoundationRejectionCode"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "FoundationErrorResponse",
+        "type": "object"
+      },
+      "FoundationRejectionCode": {
+        "enum": [
+          "STALE_STATE",
+          "STALE_VIEW",
+          "STALE_ENTITY",
+          "AUTHORITY_FAILED",
+          "SOURCE_BINDING_FAILED",
+          "EVIDENCE_BINDING_FAILED",
+          "PROVIDER_REQUEST_BINDING_FAILED",
+          "TRANSCRIPT_BINDING_FAILED",
+          "IDENTITY_PLAN_FAILED",
+          "PAYLOAD_SCHEMA_FAILED",
+          "CONFIRMATION_BINDING_FAILED",
+          "DUPLICATE_CONFLICT",
+          "UNKNOWN_REFERENCE",
+          "INVALID_TRANSITION",
+          "MALFORMED_COMMAND"
+        ],
+        "title": "FoundationRejectionCode",
+        "type": "string"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LowRiskFactCaptureReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "fact_id": {
+            "format": "uuid",
+            "title": "Fact Id",
+            "type": "string"
+          },
+          "fact_version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Fact Version",
+            "type": "integer"
+          },
+          "promoted_to_pending_decision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Promoted To Pending Decision Id"
+          },
+          "receipt_type": {
+            "const": "LOW_RISK_FACT_CAPTURE",
+            "title": "Receipt Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "fact_id",
+          "fact_version",
+          "promoted_to_pending_decision_id"
+        ],
+        "title": "LowRiskFactCaptureReceipt",
+        "type": "object"
+      },
+      "ProblemOriginView": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence_summary": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Evidence Summary",
+            "type": "string"
+          },
+          "problem_id": {
+            "format": "uuid",
+            "title": "Problem Id",
+            "type": "string"
+          },
+          "problem_statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Problem Statement",
+            "type": "string"
+          },
+          "problem_version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Problem Version",
+            "type": "integer"
+          },
+          "resolution_kind": {
+            "$ref": "#/components/schemas/ProblemResolutionKind"
+          }
+        },
+        "required": [
+          "problem_id",
+          "problem_version",
+          "problem_statement",
+          "resolution_kind",
+          "evidence_summary"
+        ],
+        "title": "ProblemOriginView",
+        "type": "object"
+      },
+      "ProblemResolutionKind": {
+        "enum": [
+          "FULL",
+          "PARTIAL",
+          "CONTRIBUTES",
+          "DOES_NOT_RESOLVE"
+        ],
+        "title": "ProblemResolutionKind",
+        "type": "string"
+      },
+      "ProposalAdmissionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "admitted_guidance_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admitted Guidance Id"
+          },
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "identity_mappings": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateIdentityMapping"
+            },
+            "maxItems": 2500,
+            "title": "Identity Mappings",
+            "type": "array"
+          },
+          "receipt_type": {
+            "const": "PROPOSAL_ADMISSION",
+            "title": "Receipt Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "analyzer_run_id",
+          "identity_mappings",
+          "admitted_guidance_id"
+        ],
+        "title": "ProposalAdmissionReceipt",
+        "type": "object"
+      },
+      "Readiness": {
+        "enum": [
+          "READY",
+          "NEEDS_CLARIFICATION",
+          "BLOCKED",
+          "FORMULATING"
+        ],
+        "title": "Readiness",
+        "type": "string"
+      },
+      "ReviewNarrationAdmissionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "decision_batch_view_id": {
+            "format": "uuid",
+            "title": "Decision Batch View Id",
+            "type": "string"
+          },
+          "narration_id": {
+            "format": "uuid",
+            "title": "Narration Id",
+            "type": "string"
+          },
+          "narration_version": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 1.0,
+            "title": "Narration Version",
+            "type": "integer"
+          },
+          "receipt_type": {
+            "const": "REVIEW_NARRATION_ADMISSION",
+            "title": "Receipt Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "narration_id",
+          "narration_version",
+          "decision_batch_view_id"
+        ],
+        "title": "ReviewNarrationAdmissionReceipt",
+        "type": "object"
+      },
+      "ReviewObligation": {
+        "enum": [
+          "NONE",
+          "LATER_REVIEW",
+          "DECISION_REQUIRED"
+        ],
+        "title": "ReviewObligation",
+        "type": "string"
+      },
+      "SafeValidationCode": {
+        "enum": [
+          "missing",
+          "invalid_type",
+          "out_of_range",
+          "unknown_field",
+          "wrong_discriminator",
+          "invariant_failed",
+          "malformed_json"
+        ],
+        "title": "SafeValidationCode",
+        "type": "string"
+      },
+      "SafeValidationDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/SafeValidationCode"
+          },
+          "path": {
+            "items": {
+              "pattern": "^(?:[a-z][a-z0-9_]{0,63}|[0-9]{1,4}|\\$unknown)$",
+              "type": "string"
+            },
+            "maxItems": 16,
+            "title": "Path",
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "code"
+        ],
+        "title": "SafeValidationDiagnostic",
+        "type": "object"
+      },
+      "TranscriptRecordedReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "receipt_type": {
+            "const": "TRANSCRIPT_RECORDED",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          },
+          "transcript_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Transcript Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "transcript_event_id",
+          "transcript_hash"
+        ],
+        "title": "TranscriptRecordedReceipt",
+        "type": "object"
+      },
+      "V4_ActivateAnalyzerContextCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ACTIVATE_ANALYZER_CONTEXT",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/components/schemas/V4_AnalyzerContextBinding"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "context"
+        ],
+        "title": "ActivateAnalyzerContextCommand",
+        "type": "object"
+      },
+      "V4_AdmitGuidanceCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/V4_GuidanceCandidate"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ADMIT_GUIDANCE",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider_request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Provider Request Hash",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "analyzer_run_id",
+          "context_id",
+          "provider_request_hash",
+          "candidate"
+        ],
+        "title": "AdmitGuidanceCommand",
+        "type": "object"
+      },
+      "V4_AdmitInterviewBriefCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/V4_InterviewBriefCandidate"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ADMIT_INTERVIEW_BRIEF",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider_request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Provider Request Hash",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "analyzer_run_id",
+          "context_id",
+          "provider_request_hash",
+          "candidate"
+        ],
+        "title": "AdmitInterviewBriefCommand",
+        "type": "object"
+      },
+      "V4_AdmitReviewNarrationCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/V4_ReviewNarrationCandidate"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ADMIT_REVIEW_NARRATION",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider_request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Provider Request Hash",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "analyzer_run_id",
+          "context_id",
+          "provider_request_hash",
+          "candidate"
+        ],
+        "title": "AdmitReviewNarrationCommand",
+        "type": "object"
+      },
+      "V4_AdmitSpecPackageSynthesisCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/V4_SpecPackageSynthesisCandidate"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ADMIT_SPEC_PACKAGE_SYNTHESIS",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "identity_plan": {
+            "$ref": "#/components/schemas/V4_ArtifactSynthesisIdentityPlan"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider_request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Provider Request Hash",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/V4_ArtifactDraftTarget"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "target",
+          "identity_plan",
+          "provider_request_hash",
+          "candidate"
+        ],
+        "title": "AdmitSpecPackageSynthesisCommand",
+        "type": "object"
+      },
+      "V4_AdmitTechnicalContractSynthesisCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/V4_TechnicalContractSynthesisCandidate"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ADMIT_TECHNICAL_CONTRACT_SYNTHESIS",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "confirmed_spec": {
+            "$ref": "#/components/schemas/V4_ConfirmedSpecSynthesisBinding"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "identity_plan": {
+            "$ref": "#/components/schemas/V4_ArtifactSynthesisIdentityPlan"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider_request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Provider Request Hash",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/V4_ArtifactDraftTarget"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "target",
+          "identity_plan",
+          "confirmed_spec",
+          "provider_request_hash",
+          "candidate"
+        ],
+        "title": "AdmitTechnicalContractSynthesisCommand",
+        "type": "object"
+      },
+      "V4_AdmitTurnAnalysisCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/V4_TurnAnalysisCandidate"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "ADMIT_TURN_ANALYSIS",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider_request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Provider Request Hash",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "analyzer_run_id",
+          "context_id",
+          "provider_request_hash",
+          "candidate"
+        ],
+        "title": "AdmitTurnAnalysisCommand",
+        "type": "object"
+      },
+      "V4_AnalyzerContextBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_contract": {
+            "$ref": "#/components/schemas/V4_AnalyzerContractBinding"
+          },
+          "bootstrap_response_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$",
+            "title": "Bootstrap Response Id",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "conversation_state_persisted": {
+            "const": true,
+            "title": "Conversation State Persisted",
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "invalidated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invalidated At"
+          },
+          "invalidation_reason": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invalidation Reason"
+          },
+          "model": {
+            "const": "gpt-5.6-terra",
+            "title": "Model",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider": {
+            "const": "OPENAI",
+            "title": "Provider",
+            "type": "string"
+          },
+          "provider_conversation_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$",
+            "title": "Provider Conversation Id",
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "const": "medium",
+            "title": "Reasoning Effort",
+            "type": "string"
+          },
+          "response_store_enabled": {
+            "const": true,
+            "title": "Response Store Enabled",
+            "type": "boolean"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source_set": {
+            "$ref": "#/components/schemas/V4_SourceSetBinding"
+          },
+          "status": {
+            "$ref": "#/components/schemas/V4_ContextStatus"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "context_id",
+          "session_id",
+          "provider",
+          "provider_conversation_id",
+          "bootstrap_response_id",
+          "model",
+          "reasoning_effort",
+          "conversation_state_persisted",
+          "response_store_enabled",
+          "analyzer_contract",
+          "source_set",
+          "status",
+          "created_at",
+          "invalidated_at",
+          "invalidation_reason"
+        ],
+        "title": "AnalyzerContextBinding",
+        "type": "object"
+      },
+      "V4_AnalyzerContractBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "instruction_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Instruction Set Hash",
+            "type": "string"
+          },
+          "instruction_set_id": {
+            "const": "specops-workshop-analyzer",
+            "title": "Instruction Set Id",
+            "type": "string"
+          },
+          "instruction_set_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Instruction Set Version",
+            "type": "integer"
+          },
+          "model": {
+            "const": "gpt-5.6-terra",
+            "title": "Model",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "provider_schema_version": {
+            "const": "1.0.0",
+            "title": "Provider Schema Version",
+            "type": "string"
+          },
+          "reasoning_effort": {
+            "const": "medium",
+            "title": "Reasoning Effort",
+            "type": "string"
+          },
+          "semantic_quality_contract_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Semantic Quality Contract Hash",
+            "type": "string"
+          },
+          "semantic_quality_contract_id": {
+            "const": "SEMANTIC-QUALITY-CONTRACT",
+            "title": "Semantic Quality Contract Id",
+            "type": "string"
+          },
+          "semantic_quality_contract_version": {
+            "const": "2.0.0",
+            "title": "Semantic Quality Contract Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "instruction_set_id",
+          "instruction_set_version",
+          "instruction_set_hash",
+          "semantic_quality_contract_id",
+          "semantic_quality_contract_version",
+          "semantic_quality_contract_hash",
+          "provider_schema_version",
+          "model",
+          "reasoning_effort"
+        ],
+        "title": "AnalyzerContractBinding",
+        "type": "object"
+      },
+      "V4_ApplyDecisionBatchResponseCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "const": "SYSTEM",
+                "type": "string"
+              }
+            ],
+            "title": "Acting Actor Id"
+          },
+          "actor_authentication": {
+            "discriminator": {
+              "mapping": {
+                "ENTERPRISE_SSO": "#/components/schemas/V4_EnterpriseSsoAuthentication",
+                "VERBAL_SELF_ASSERTION": "#/components/schemas/V4_VerbalSelfAssertion"
+              },
+              "propertyName": "authentication_method"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_VerbalSelfAssertion"
+              },
+              {
+                "$ref": "#/components/schemas/V4_EnterpriseSsoAuthentication"
+              }
+            ],
+            "title": "Actor Authentication"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "APPLY_DECISION_BATCH_RESPONSE",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "decision_batch_view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Decision Batch View Hash",
+            "type": "string"
+          },
+          "decision_batch_view_id": {
+            "format": "uuid",
+            "title": "Decision Batch View Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "item_actions": {
+            "items": {
+              "$ref": "#/components/schemas/V4_DecisionBatchItemActionCommand"
+            },
+            "maxItems": 26,
+            "minItems": 1,
+            "title": "Item Actions",
+            "type": "array"
+          },
+          "observed_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Observed Case Revision",
+            "type": "integer"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "response_transcript_event_id": {
+            "format": "uuid",
+            "title": "Response Transcript Event Id",
+            "type": "string"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/V4_VoiceConfirmationSelectionCandidate"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "unmentioned_item_policy": {
+            "const": "REMAIN_PENDING",
+            "title": "Unmentioned Item Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "observed_case_revision",
+          "command_type",
+          "actor_authentication",
+          "selection",
+          "decision_batch_view_id",
+          "decision_batch_view_hash",
+          "response_transcript_event_id",
+          "item_actions",
+          "unmentioned_item_policy"
+        ],
+        "title": "ApplyDecisionBatchResponseCommand",
+        "type": "object"
+      },
+      "V4_ArtifactConfirmationBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "format": "uuid",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_key": {
+            "pattern": "^(?:SPEC|CONTRACT)-[A-Z0-9][A-Z0-9-]{2,63}$",
+            "title": "Artifact Key",
+            "type": "string"
+          },
+          "artifact_type": {
+            "enum": [
+              "SPEC_PACKAGE",
+              "TECHNICAL_CONTRACT"
+            ],
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "artifact_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Artifact Version",
+            "type": "integer"
+          },
+          "confirmation_id": {
+            "format": "uuid",
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "payload_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Payload Hash",
+            "type": "string"
+          },
+          "record_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Record Revision",
+            "type": "integer"
+          },
+          "view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "View Hash",
+            "type": "string"
+          },
+          "view_id": {
+            "format": "uuid",
+            "title": "View Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_type",
+          "artifact_id",
+          "artifact_key",
+          "artifact_version",
+          "record_revision",
+          "payload_hash",
+          "confirmation_id",
+          "view_id",
+          "view_hash"
+        ],
+        "title": "ArtifactConfirmationBinding",
+        "type": "object"
+      },
+      "V4_ArtifactDraftTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_key": {
+            "pattern": "^(?:SPEC|CONTRACT)-[A-Z0-9][A-Z0-9-]{2,63}$",
+            "title": "Artifact Key",
+            "type": "string"
+          },
+          "artifact_type": {
+            "enum": [
+              "SPEC_PACKAGE",
+              "TECHNICAL_CONTRACT"
+            ],
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "foundation_artifact_id": {
+            "format": "uuid",
+            "title": "Foundation Artifact Id",
+            "type": "string"
+          },
+          "next_artifact_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Next Artifact Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_type",
+          "foundation_artifact_id",
+          "artifact_key",
+          "next_artifact_version"
+        ],
+        "title": "ArtifactDraftTarget",
+        "type": "object"
+      },
+      "V4_ArtifactReviewSubjectBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "format": "uuid",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_key": {
+            "pattern": "^(?:SPEC|CONTRACT)-[A-Z0-9][A-Z0-9-]{2,63}$",
+            "title": "Artifact Key",
+            "type": "string"
+          },
+          "artifact_type": {
+            "enum": [
+              "SPEC_PACKAGE",
+              "TECHNICAL_CONTRACT"
+            ],
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "artifact_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Artifact Version",
+            "type": "integer"
+          },
+          "payload_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Payload Hash",
+            "type": "string"
+          },
+          "record_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Record Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "artifact_type",
+          "artifact_id",
+          "artifact_key",
+          "artifact_version",
+          "record_revision",
+          "payload_hash"
+        ],
+        "title": "ArtifactReviewSubjectBinding",
+        "type": "object"
+      },
+      "V4_ArtifactSynthesisIdentityPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "based_on_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "identity_plan_id": {
+            "format": "uuid",
+            "title": "Identity Plan Id",
+            "type": "string"
+          },
+          "identity_plan_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Identity Plan Version",
+            "type": "integer"
+          },
+          "planned_identities": {
+            "items": {
+              "$ref": "#/components/schemas/V4_PlannedArtifactIdentity"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Planned Identities",
+            "type": "array"
+          },
+          "semantic_state_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Semantic State Hash",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/V4_ArtifactDraftTarget"
+          }
+        },
+        "required": [
+          "identity_plan_id",
+          "identity_plan_version",
+          "target",
+          "based_on_case_revision",
+          "semantic_state_hash",
+          "planned_identities"
+        ],
+        "title": "ArtifactSynthesisIdentityPlan",
+        "type": "object"
+      },
+      "V4_CandidateEntityRef": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "ref_kind": {
+            "const": "CANDIDATE_KEY",
+            "title": "Ref Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref_kind",
+          "candidate_key"
+        ],
+        "title": "CandidateEntityRef",
+        "type": "object"
+      },
+      "V4_CaptureLowRiskFactCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "format": "uuid",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "addressed_actor_id": {
+            "format": "uuid",
+            "title": "Addressed Actor Id",
+            "type": "string"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "CAPTURE_LOW_RISK_FACT",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "expected_question_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Expected Question Version",
+            "type": "integer"
+          },
+          "fact_proposal_id": {
+            "format": "uuid",
+            "title": "Fact Proposal Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "question_id": {
+            "format": "uuid",
+            "title": "Question Id",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "speaker_actor_id": {
+            "format": "uuid",
+            "title": "Speaker Actor Id",
+            "type": "string"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "fact_proposal_id",
+          "question_id",
+          "expected_question_version",
+          "transcript_event_id",
+          "speaker_actor_id",
+          "addressed_actor_id"
+        ],
+        "title": "CaptureLowRiskFactCommand",
+        "type": "object"
+      },
+      "V4_CapturePolicy": {
+        "enum": [
+          "CLARIFICATION_ONLY",
+          "LOW_RISK_FACT",
+          "BINDING_DECISION"
+        ],
+        "title": "CapturePolicy",
+        "type": "string"
+      },
+      "V4_ClusterCouplingType": {
+        "enum": [
+          "SHARED_OUTCOME",
+          "SHARED_CONSTRAINT",
+          "DECISION_DEPENDENCY",
+          "MUTUAL_EXCLUSION",
+          "COMMON_EVIDENCE",
+          "WORKFLOW_SEQUENCE"
+        ],
+        "title": "ClusterCouplingType",
+        "type": "string"
+      },
+      "V4_ConfirmArtifactCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "const": "SYSTEM",
+                "type": "string"
+              }
+            ],
+            "title": "Acting Actor Id"
+          },
+          "actor_authentication": {
+            "discriminator": {
+              "mapping": {
+                "ENTERPRISE_SSO": "#/components/schemas/V4_EnterpriseSsoAuthentication",
+                "VERBAL_SELF_ASSERTION": "#/components/schemas/V4_VerbalSelfAssertion"
+              },
+              "propertyName": "authentication_method"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_VerbalSelfAssertion"
+              },
+              {
+                "$ref": "#/components/schemas/V4_EnterpriseSsoAuthentication"
+              }
+            ],
+            "title": "Actor Authentication"
+          },
+          "approved_exception_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Approved Exception Ids",
+            "type": "array"
+          },
+          "binding": {
+            "$ref": "#/components/schemas/V4_ArtifactConfirmationBinding"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "CONFIRM_ARTIFACT",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "confirmation_transcript_event_id": {
+            "format": "uuid",
+            "title": "Confirmation Transcript Event Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "actor_authentication",
+          "binding",
+          "confirmation_transcript_event_id",
+          "approved_exception_ids"
+        ],
+        "title": "ConfirmArtifactCommand",
+        "type": "object"
+      },
+      "V4_ConfirmationAction": {
+        "enum": [
+          "CONFIRM",
+          "REVISE",
+          "REJECT",
+          "DEFER"
+        ],
+        "title": "ConfirmationAction",
+        "type": "string"
+      },
+      "V4_ConfirmationCheckpointCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "cluster_keys": {
+            "items": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Cluster Keys",
+            "type": "array"
+          },
+          "trigger_description": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Trigger Description",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "cluster_keys",
+          "trigger_description"
+        ],
+        "title": "ConfirmationCheckpointCandidate",
+        "type": "object"
+      },
+      "V4_ConfirmationMappingStatus": {
+        "enum": [
+          "MAPPED",
+          "CLARIFICATION_REQUIRED"
+        ],
+        "title": "ConfirmationMappingStatus",
+        "type": "string"
+      },
+      "V4_ConfirmedSpecSynthesisBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_key": {
+            "pattern": "^SPEC-[A-Z0-9][A-Z0-9-]{2,63}$",
+            "title": "Artifact Key",
+            "type": "string"
+          },
+          "artifact_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Artifact Version",
+            "type": "integer"
+          },
+          "canonical_payload_json": {
+            "maxLength": 2000000,
+            "minLength": 2,
+            "title": "Canonical Payload Json",
+            "type": "string"
+          },
+          "confirmation_id": {
+            "format": "uuid",
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "confirmed_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Confirmed Case Revision",
+            "type": "integer"
+          },
+          "foundation_artifact_id": {
+            "format": "uuid",
+            "title": "Foundation Artifact Id",
+            "type": "string"
+          },
+          "payload_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Payload Hash",
+            "type": "string"
+          },
+          "record_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Record Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "foundation_artifact_id",
+          "artifact_key",
+          "artifact_version",
+          "record_revision",
+          "confirmed_case_revision",
+          "payload_hash",
+          "confirmation_id",
+          "canonical_payload_json"
+        ],
+        "title": "ConfirmedSpecSynthesisBinding",
+        "type": "object"
+      },
+      "V4_ContextStatus": {
+        "enum": [
+          "ACTIVE",
+          "REBUILD_REQUIRED",
+          "REBUILDING",
+          "CLOSED",
+          "FAILED"
+        ],
+        "title": "ContextStatus",
+        "type": "string"
+      },
+      "V4_DecisionBatchItemActionCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/V4_ConfirmationAction"
+          },
+          "expected_pending_decision_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Expected Pending Decision Version",
+            "type": "integer"
+          },
+          "handle": {
+            "pattern": "^[A-Z]{1,2}$",
+            "title": "Handle",
+            "type": "string"
+          },
+          "pending_decision_id": {
+            "format": "uuid",
+            "title": "Pending Decision Id",
+            "type": "string"
+          },
+          "review_item_id": {
+            "format": "uuid",
+            "title": "Review Item Id",
+            "type": "string"
+          },
+          "revision_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/V4_TranscriptSpan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "review_item_id",
+          "handle",
+          "pending_decision_id",
+          "expected_pending_decision_version",
+          "action",
+          "revision_span"
+        ],
+        "title": "DecisionBatchItemActionCommand",
+        "type": "object"
+      },
+      "V4_DecisionCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "alternatives_considered": {
+            "items": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Alternatives Considered",
+            "type": "array"
+          },
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/V4_Domain"
+          },
+          "evidence_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "existing_decision_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/V4_FoundationEntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "problem_links": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ProblemResolutionLink"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Problem Links",
+            "type": "array"
+          },
+          "rationale": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "requires_human_confirmation": {
+            "const": true,
+            "title": "Requires Human Confirmation",
+            "type": "boolean"
+          },
+          "statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "existing_decision_ref",
+          "classification",
+          "statement",
+          "rationale",
+          "alternatives_considered",
+          "problem_links",
+          "evidence_refs",
+          "requires_human_confirmation"
+        ],
+        "title": "DecisionCandidate",
+        "type": "object"
+      },
+      "V4_DocumentAnchorLocator": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Anchor",
+            "type": "string"
+          },
+          "locator_kind": {
+            "const": "DOCUMENT_ANCHOR",
+            "title": "Locator Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "locator_kind",
+          "anchor"
+        ],
+        "title": "DocumentAnchorLocator",
+        "type": "object"
+      },
+      "V4_Domain": {
+        "enum": [
+          "PRODUCT",
+          "TECHNICAL",
+          "CROSS_DOMAIN",
+          "POLICY",
+          "SECURITY",
+          "PRIVACY",
+          "DATA",
+          "ACCEPTANCE"
+        ],
+        "title": "Domain",
+        "type": "string"
+      },
+      "V4_EnterpriseSsoAuthentication": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {
+            "format": "uuid",
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "assurance_level": {
+            "const": "VERIFIED",
+            "title": "Assurance Level",
+            "type": "string"
+          },
+          "authentication_event_id": {
+            "format": "uuid",
+            "title": "Authentication Event Id",
+            "type": "string"
+          },
+          "authentication_method": {
+            "const": "ENTERPRISE_SSO",
+            "title": "Authentication Method",
+            "type": "string"
+          },
+          "external_subject": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "External Subject",
+            "type": "string"
+          },
+          "identity_provider": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Identity Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authentication_method",
+          "assurance_level",
+          "actor_id",
+          "identity_provider",
+          "external_subject",
+          "authentication_event_id"
+        ],
+        "title": "EnterpriseSsoAuthentication",
+        "type": "object"
+      },
+      "V4_EvidenceAssessment": {
+        "enum": [
+          "SUPPORTS",
+          "SUGGESTS",
+          "CONTRADICTS",
+          "INSUFFICIENT",
+          "AMBIGUOUS"
+        ],
+        "title": "EvidenceAssessment",
+        "type": "string"
+      },
+      "V4_EvidenceCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "locator": {
+            "discriminator": {
+              "mapping": {
+                "DOCUMENT_ANCHOR": "#/components/schemas/V4_DocumentAnchorLocator",
+                "JSON_POINTER": "#/components/schemas/V4_JsonPointerLocator",
+                "QUOTE_SEARCH": "#/components/schemas/V4_QuoteSearchLocator",
+                "SOURCE_LINES": "#/components/schemas/V4_SourceLineLocator"
+              },
+              "propertyName": "locator_kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_SourceLineLocator"
+              },
+              {
+                "$ref": "#/components/schemas/V4_JsonPointerLocator"
+              },
+              {
+                "$ref": "#/components/schemas/V4_DocumentAnchorLocator"
+              },
+              {
+                "$ref": "#/components/schemas/V4_QuoteSearchLocator"
+              }
+            ],
+            "title": "Locator"
+          },
+          "quoted_text_candidate": {
+            "anyOf": [
+              {
+                "maxLength": 8000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quoted Text Candidate"
+          },
+          "relevance_claim": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Relevance Claim",
+            "type": "string"
+          },
+          "source_role": {
+            "$ref": "#/components/schemas/V4_SourceRole"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "source_role",
+          "locator",
+          "relevance_claim",
+          "quoted_text_candidate"
+        ],
+        "title": "EvidenceCandidate",
+        "type": "object"
+      },
+      "V4_FoundationEntityRef": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "foundation_id": {
+            "format": "uuid",
+            "title": "Foundation Id",
+            "type": "string"
+          },
+          "ref_kind": {
+            "const": "FOUNDATION_ID",
+            "title": "Ref Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref_kind",
+          "foundation_id",
+          "expected_version"
+        ],
+        "title": "FoundationEntityRef",
+        "type": "object"
+      },
+      "V4_GuidanceCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledgement_suggestion": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Acknowledgement Suggestion",
+            "type": "string"
+          },
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "based_on_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/V4_GuidanceDependency"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "do_not_ask_question_refs": {
+            "items": {
+              "$ref": "#/components/schemas/V4_FoundationEntityRef"
+            },
+            "maxItems": 50,
+            "title": "Do Not Ask Question Refs",
+            "type": "array"
+          },
+          "output_type": {
+            "const": "GUIDANCE_CANDIDATE",
+            "title": "Output Type",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "recommended_question": {
+            "$ref": "#/components/schemas/V4_GuidanceQuestion"
+          },
+          "request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "safe_alternates": {
+            "items": {
+              "$ref": "#/components/schemas/V4_GuidanceQuestion"
+            },
+            "maxItems": 5,
+            "title": "Safe Alternates",
+            "type": "array"
+          },
+          "source_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Source Set Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "output_type",
+          "analyzer_run_id",
+          "context_id",
+          "request_hash",
+          "source_set_hash",
+          "based_on_case_revision",
+          "recommended_question",
+          "safe_alternates",
+          "do_not_ask_question_refs",
+          "dependencies",
+          "acknowledgement_suggestion"
+        ],
+        "title": "GuidanceCandidate",
+        "type": "object"
+      },
+      "V4_GuidanceDependency": {
+        "additionalProperties": false,
+        "properties": {
+          "dependency_kind": {
+            "$ref": "#/components/schemas/V4_GuidanceDependencyKind"
+          },
+          "entity_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/V4_FoundationEntityRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "dependency_kind",
+          "entity_ref"
+        ],
+        "title": "GuidanceDependency",
+        "type": "object"
+      },
+      "V4_GuidanceDependencyKind": {
+        "enum": [
+          "SOURCE_SET",
+          "FOUNDATION_ENTITY",
+          "QUESTION",
+          "PROBLEM"
+        ],
+        "title": "GuidanceDependencyKind",
+        "type": "string"
+      },
+      "V4_GuidanceQuestion": {
+        "additionalProperties": false,
+        "properties": {
+          "exact_text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Exact Text",
+            "type": "string"
+          },
+          "question_ref": {
+            "$ref": "#/components/schemas/V4_FoundationEntityRef"
+          },
+          "reason": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_ref",
+          "exact_text",
+          "reason"
+        ],
+        "title": "GuidanceQuestion",
+        "type": "object"
+      },
+      "V4_InterviewBriefCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "based_on_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "confirmation_checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ConfirmationCheckpointCandidate"
+            },
+            "maxItems": 100,
+            "title": "Confirmation Checkpoints",
+            "type": "array"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "customer_promise_summary": {
+            "maxLength": 80000,
+            "minLength": 1,
+            "title": "Customer Promise Summary",
+            "type": "string"
+          },
+          "evidence_candidates": {
+            "items": {
+              "$ref": "#/components/schemas/V4_EvidenceCandidate"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Evidence Candidates",
+            "type": "array"
+          },
+          "initial_runway": {
+            "$ref": "#/components/schemas/V4_QuestionRunwayCandidate"
+          },
+          "output_type": {
+            "const": "INTERVIEW_BRIEF_CANDIDATE",
+            "title": "Output Type",
+            "type": "string"
+          },
+          "problem_clusters": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ProblemClusterCandidate"
+            },
+            "maxItems": 100,
+            "title": "Problem Clusters",
+            "type": "array"
+          },
+          "problems": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ProblemCandidate"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Problems",
+            "type": "array"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/V4_QuestionCandidate"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Questions",
+            "type": "array"
+          },
+          "request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "source_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Source Set Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "output_type",
+          "analyzer_run_id",
+          "context_id",
+          "request_hash",
+          "source_set_hash",
+          "based_on_case_revision",
+          "customer_promise_summary",
+          "evidence_candidates",
+          "problems",
+          "problem_clusters",
+          "questions",
+          "initial_runway",
+          "confirmation_checkpoints"
+        ],
+        "title": "InterviewBriefCandidate",
+        "type": "object"
+      },
+      "V4_InvalidateAnalyzerContextCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "INVALIDATE_ANALYZER_CONTEXT",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "reason_code": {
+            "enum": [
+              "SOURCE_SET_CHANGED",
+              "CONVERSATION_UNAVAILABLE",
+              "PROFILE_MISMATCH",
+              "ANALYZER_CONTRACT_CHANGED",
+              "CONTEXT_MISMATCH",
+              "WORKSHOP_CLOSED"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "context_id",
+          "reason_code"
+        ],
+        "title": "InvalidateAnalyzerContextCommand",
+        "type": "object"
+      },
+      "V4_JsonPointerLocator": {
+        "additionalProperties": false,
+        "properties": {
+          "locator_kind": {
+            "const": "JSON_POINTER",
+            "title": "Locator Kind",
+            "type": "string"
+          },
+          "pointer": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Pointer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "locator_kind",
+          "pointer"
+        ],
+        "title": "JsonPointerLocator",
+        "type": "object"
+      },
+      "V4_LowRiskFactCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "normalized_value": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Normalized Value",
+            "type": "string"
+          },
+          "source_question_ref": {
+            "discriminator": {
+              "mapping": {
+                "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+              },
+              "propertyName": "ref_kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_CandidateEntityRef"
+              },
+              {
+                "$ref": "#/components/schemas/V4_FoundationEntityRef"
+              }
+            ],
+            "title": "Source Question Ref"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          },
+          "value_type": {
+            "$ref": "#/components/schemas/V4_NormalizedScalarType"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "source_question_ref",
+          "transcript_event_id",
+          "value_type",
+          "normalized_value",
+          "confidence"
+        ],
+        "title": "LowRiskFactCandidate",
+        "type": "object"
+      },
+      "V4_MaterializeArtifactReviewCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "const": "SYSTEM",
+                "type": "string"
+              }
+            ],
+            "title": "Acting Actor Id"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "MATERIALIZE_ARTIFACT_REVIEW",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/V4_ArtifactReviewSubjectBinding"
+          },
+          "view_mode": {
+            "enum": [
+              "DRAFT",
+              "REVIEW",
+              "FINAL",
+              "DIFF"
+            ],
+            "title": "View Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "subject",
+          "view_mode"
+        ],
+        "title": "MaterializeArtifactReviewCommand",
+        "type": "object"
+      },
+      "V4_MaterializeDecisionBatchReviewCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "const": "SYSTEM",
+                "type": "string"
+              }
+            ],
+            "title": "Acting Actor Id"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "MATERIALIZE_DECISION_BATCH_REVIEW",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "derived_from_cluster_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Derived From Cluster Ids",
+            "type": "array"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "pending_decision_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 26,
+            "minItems": 1,
+            "title": "Pending Decision Ids",
+            "type": "array"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "pending_decision_ids",
+          "derived_from_cluster_ids"
+        ],
+        "title": "MaterializeDecisionBatchReviewCommand",
+        "type": "object"
+      },
+      "V4_NormalizedScalarType": {
+        "enum": [
+          "TEXT",
+          "BOOLEAN",
+          "INTEGER",
+          "DECIMAL",
+          "ENUM"
+        ],
+        "title": "NormalizedScalarType",
+        "type": "string"
+      },
+      "V4_PlannedArtifactIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "entity_kind": {
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+            "title": "Entity Kind",
+            "type": "string"
+          },
+          "foundation_id": {
+            "format": "uuid",
+            "title": "Foundation Id",
+            "type": "string"
+          },
+          "foundation_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Foundation Version",
+            "type": "integer"
+          },
+          "source_entity_refs": {
+            "items": {
+              "$ref": "#/components/schemas/V4_FoundationEntityRef"
+            },
+            "maxItems": 100,
+            "title": "Source Entity Refs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "foundation_id",
+          "foundation_version",
+          "entity_kind",
+          "source_entity_refs"
+        ],
+        "title": "PlannedArtifactIdentity",
+        "type": "object"
+      },
+      "V4_ProblemCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "consequence": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Consequence",
+            "type": "string"
+          },
+          "domain": {
+            "$ref": "#/components/schemas/V4_Domain"
+          },
+          "evidence_candidate_keys": {
+            "items": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Evidence Candidate Keys",
+            "type": "array"
+          },
+          "problem_kind": {
+            "$ref": "#/components/schemas/V4_ProblemKind"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/V4_Severity"
+          },
+          "statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "problem_kind",
+          "domain",
+          "severity",
+          "statement",
+          "consequence",
+          "evidence_candidate_keys"
+        ],
+        "title": "ProblemCandidate",
+        "type": "object"
+      },
+      "V4_ProblemClusterCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "coupling_reason": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Coupling Reason",
+            "type": "string"
+          },
+          "coupling_type": {
+            "$ref": "#/components/schemas/V4_ClusterCouplingType"
+          },
+          "problem_keys": {
+            "items": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 2,
+            "title": "Problem Keys",
+            "type": "array"
+          },
+          "suggested_confirmation_mode": {
+            "$ref": "#/components/schemas/V4_SuggestedConfirmationMode"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "title",
+          "problem_keys",
+          "coupling_type",
+          "coupling_reason",
+          "suggested_confirmation_mode"
+        ],
+        "title": "ProblemClusterCandidate",
+        "type": "object"
+      },
+      "V4_ProblemKind": {
+        "enum": [
+          "AMBIGUITY",
+          "MISSING_DECISION",
+          "CONTRADICTION",
+          "RISK",
+          "MISSING_ACCEPTANCE",
+          "MISSING_AUTHORITY",
+          "MISSING_EVIDENCE"
+        ],
+        "title": "ProblemKind",
+        "type": "string"
+      },
+      "V4_ProblemResolutionAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "assessment": {
+            "enum": [
+              "RESOLVED",
+              "PARTIALLY_RESOLVED",
+              "UNRESOLVED",
+              "CONTRADICTED"
+            ],
+            "title": "Assessment",
+            "type": "string"
+          },
+          "explanation": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "problem_ref": {
+            "discriminator": {
+              "mapping": {
+                "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+              },
+              "propertyName": "ref_kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_CandidateEntityRef"
+              },
+              {
+                "$ref": "#/components/schemas/V4_FoundationEntityRef"
+              }
+            ],
+            "title": "Problem Ref"
+          }
+        },
+        "required": [
+          "problem_ref",
+          "assessment",
+          "explanation"
+        ],
+        "title": "ProblemResolutionAssessment",
+        "type": "object"
+      },
+      "V4_ProblemResolutionKind": {
+        "enum": [
+          "FULL",
+          "PARTIAL",
+          "CONTRIBUTES",
+          "DOES_NOT_RESOLVE"
+        ],
+        "title": "ProblemResolutionKind",
+        "type": "string"
+      },
+      "V4_ProblemResolutionLink": {
+        "additionalProperties": false,
+        "properties": {
+          "problem_ref": {
+            "discriminator": {
+              "mapping": {
+                "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+              },
+              "propertyName": "ref_kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_CandidateEntityRef"
+              },
+              {
+                "$ref": "#/components/schemas/V4_FoundationEntityRef"
+              }
+            ],
+            "title": "Problem Ref"
+          },
+          "resolution_kind": {
+            "$ref": "#/components/schemas/V4_ProblemResolutionKind"
+          }
+        },
+        "required": [
+          "problem_ref",
+          "resolution_kind"
+        ],
+        "title": "ProblemResolutionLink",
+        "type": "object"
+      },
+      "V4_ProviderSourceBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "provider_file_id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$",
+            "title": "Provider File Id",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/V4_SourceIdentity"
+          }
+        },
+        "required": [
+          "source",
+          "provider_file_id"
+        ],
+        "title": "ProviderSourceBinding",
+        "type": "object"
+      },
+      "V4_QuestionCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "addresses_problem_keys": {
+            "items": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Addresses Problem Keys",
+            "type": "array"
+          },
+          "answer_options": {
+            "items": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Answer Options",
+            "type": "array"
+          },
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "capture_policy": {
+            "$ref": "#/components/schemas/V4_CapturePolicy"
+          },
+          "prerequisite_problem_keys": {
+            "items": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Prerequisite Problem Keys",
+            "type": "array"
+          },
+          "question_shape": {
+            "$ref": "#/components/schemas/V4_QuestionShape"
+          },
+          "rationale": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "safe_without_current_turn_interpretation": {
+            "title": "Safe Without Current Turn Interpretation",
+            "type": "boolean"
+          },
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "text",
+          "rationale",
+          "question_shape",
+          "capture_policy",
+          "answer_options",
+          "addresses_problem_keys",
+          "prerequisite_problem_keys",
+          "safe_without_current_turn_interpretation"
+        ],
+        "title": "QuestionCandidate",
+        "type": "object"
+      },
+      "V4_QuestionRunwayCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "do_not_ask_question_keys": {
+            "items": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 0,
+            "title": "Do Not Ask Question Keys",
+            "type": "array"
+          },
+          "recommended_question_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Recommended Question Key",
+            "type": "string"
+          },
+          "safe_alternate_question_keys": {
+            "items": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "maxItems": 5,
+            "minItems": 0,
+            "title": "Safe Alternate Question Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "recommended_question_key",
+          "safe_alternate_question_keys",
+          "do_not_ask_question_keys"
+        ],
+        "title": "QuestionRunwayCandidate",
+        "type": "object"
+      },
+      "V4_QuestionShape": {
+        "enum": [
+          "OPEN_TEXT",
+          "CLOSED_BOOLEAN",
+          "CLOSED_ENUM",
+          "CLOSED_INTEGER",
+          "CLOSED_DECIMAL",
+          "CLOSED_TEXT"
+        ],
+        "title": "QuestionShape",
+        "type": "string"
+      },
+      "V4_QuoteSearchLocator": {
+        "additionalProperties": false,
+        "properties": {
+          "exact_quote": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Exact Quote",
+            "type": "string"
+          },
+          "locator_kind": {
+            "const": "QUOTE_SEARCH",
+            "title": "Locator Kind",
+            "type": "string"
+          },
+          "occurrence": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Occurrence",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "locator_kind",
+          "exact_quote",
+          "occurrence"
+        ],
+        "title": "QuoteSearchLocator",
+        "type": "object"
+      },
+      "V4_RecordFinalTranscriptCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "const": "SYSTEM",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "RECORD_FINAL_TRANSCRIPT",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "transcript": {
+            "$ref": "#/components/schemas/V4_TranscriptFinalizedEvent"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "transcript"
+        ],
+        "title": "RecordFinalTranscriptCommand",
+        "type": "object"
+      },
+      "V4_ReviewConsideration": {
+        "additionalProperties": false,
+        "properties": {
+          "consideration_kind": {
+            "$ref": "#/components/schemas/V4_ReviewConsiderationKind"
+          },
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "consideration_kind",
+          "text"
+        ],
+        "title": "ReviewConsideration",
+        "type": "object"
+      },
+      "V4_ReviewConsiderationKind": {
+        "enum": [
+          "IMPACT",
+          "RISK",
+          "FUTURE_CONSEQUENCE"
+        ],
+        "title": "ReviewConsiderationKind",
+        "type": "string"
+      },
+      "V4_ReviewNarrationCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "based_on_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "decision_batch_view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Decision Batch View Hash",
+            "type": "string"
+          },
+          "decision_batch_view_id": {
+            "format": "uuid",
+            "title": "Decision Batch View Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ReviewNarrationItemCandidate"
+            },
+            "maxItems": 26,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "output_type": {
+            "const": "REVIEW_NARRATION_CANDIDATE",
+            "title": "Output Type",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "source_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Source Set Hash",
+            "type": "string"
+          },
+          "spoken_confirmation_question": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Spoken Confirmation Question",
+            "type": "string"
+          },
+          "spoken_opening": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Spoken Opening",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "output_type",
+          "analyzer_run_id",
+          "context_id",
+          "request_hash",
+          "source_set_hash",
+          "decision_batch_view_id",
+          "decision_batch_view_hash",
+          "based_on_case_revision",
+          "spoken_opening",
+          "items",
+          "spoken_confirmation_question"
+        ],
+        "title": "ReviewNarrationCandidate",
+        "type": "object"
+      },
+      "V4_ReviewNarrationItemCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "core_concept": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Core Concept",
+            "type": "string"
+          },
+          "handle": {
+            "pattern": "^[A-Z]{1,2}$",
+            "title": "Handle",
+            "type": "string"
+          },
+          "material_considerations": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ReviewConsideration"
+            },
+            "maxItems": 5,
+            "title": "Material Considerations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "handle",
+          "core_concept",
+          "material_considerations"
+        ],
+        "title": "ReviewNarrationItemCandidate",
+        "type": "object"
+      },
+      "V4_SemanticEvidenceFindingCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "assessment": {
+            "$ref": "#/components/schemas/V4_EvidenceAssessment"
+          },
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "claim_ref": {
+            "discriminator": {
+              "mapping": {
+                "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+              },
+              "propertyName": "ref_kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_CandidateEntityRef"
+              },
+              {
+                "$ref": "#/components/schemas/V4_FoundationEntityRef"
+              }
+            ],
+            "title": "Claim Ref"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "evidence_ref": {
+            "discriminator": {
+              "mapping": {
+                "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+              },
+              "propertyName": "ref_kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/V4_CandidateEntityRef"
+              },
+              {
+                "$ref": "#/components/schemas/V4_FoundationEntityRef"
+              }
+            ],
+            "title": "Evidence Ref"
+          },
+          "explanation": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Explanation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "claim_ref",
+          "evidence_ref",
+          "assessment",
+          "confidence",
+          "explanation"
+        ],
+        "title": "SemanticEvidenceFindingCandidate",
+        "type": "object"
+      },
+      "V4_Severity": {
+        "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH",
+          "CRITICAL"
+        ],
+        "title": "Severity",
+        "type": "string"
+      },
+      "V4_SourceIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_locator": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Canonical Locator",
+            "type": "string"
+          },
+          "filename": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          },
+          "media_type": {
+            "const": "text/markdown",
+            "title": "Media Type",
+            "type": "string"
+          },
+          "payload_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Payload Hash",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/V4_SourceRole"
+          },
+          "source_id": {
+            "format": "uuid",
+            "title": "Source Id",
+            "type": "string"
+          },
+          "version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source_id",
+          "role",
+          "version",
+          "payload_hash",
+          "canonical_locator",
+          "filename",
+          "media_type"
+        ],
+        "title": "SourceIdentity",
+        "type": "object"
+      },
+      "V4_SourceLineLocator": {
+        "additionalProperties": false,
+        "properties": {
+          "end_line": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "End Line",
+            "type": "integer"
+          },
+          "locator_kind": {
+            "const": "SOURCE_LINES",
+            "title": "Locator Kind",
+            "type": "string"
+          },
+          "start_line": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Start Line",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "locator_kind",
+          "start_line",
+          "end_line"
+        ],
+        "title": "SourceLineLocator",
+        "type": "object"
+      },
+      "V4_SourceRole": {
+        "enum": [
+          "PM_SPEC",
+          "TECHNICAL_CONTRACT"
+        ],
+        "title": "SourceRole",
+        "type": "string"
+      },
+      "V4_SourceSetBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "ordered_sources": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ProviderSourceBinding"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "title": "Ordered Sources",
+            "type": "array"
+          },
+          "source_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Source Set Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_set_hash",
+          "ordered_sources"
+        ],
+        "title": "SourceSetBinding",
+        "type": "object"
+      },
+      "V4_SpeakerAttributionMethod": {
+        "enum": [
+          "VERBAL_SELF_ASSERTION",
+          "ENTERPRISE_SSO",
+          "VOICE_SYSTEM"
+        ],
+        "title": "SpeakerAttributionMethod",
+        "type": "string"
+      },
+      "V4_SpecPackageSynthesisCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "based_on_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "candidate_payload_json": {
+            "maxLength": 2000000,
+            "minLength": 2,
+            "title": "Candidate Payload Json",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "foundation_artifact_id": {
+            "format": "uuid",
+            "title": "Foundation Artifact Id",
+            "type": "string"
+          },
+          "identity_plan_id": {
+            "format": "uuid",
+            "title": "Identity Plan Id",
+            "type": "string"
+          },
+          "identity_plan_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Identity Plan Version",
+            "type": "integer"
+          },
+          "output_type": {
+            "const": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+            "title": "Output Type",
+            "type": "string"
+          },
+          "payload_schema_id": {
+            "const": "spec-package-payload",
+            "title": "Payload Schema Id",
+            "type": "string"
+          },
+          "payload_schema_version": {
+            "const": "4.0.0",
+            "title": "Payload Schema Version",
+            "type": "string"
+          },
+          "request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "semantic_state_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Semantic State Hash",
+            "type": "string"
+          },
+          "source_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Source Set Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "analyzer_run_id",
+          "context_id",
+          "request_hash",
+          "source_set_hash",
+          "based_on_case_revision",
+          "foundation_artifact_id",
+          "identity_plan_id",
+          "identity_plan_version",
+          "semantic_state_hash",
+          "candidate_payload_json",
+          "output_type",
+          "payload_schema_id",
+          "payload_schema_version"
+        ],
+        "title": "SpecPackageSynthesisCandidate",
+        "type": "object"
+      },
+      "V4_SuggestedConfirmationMode": {
+        "enum": [
+          "TOGETHER",
+          "SEPARATE",
+          "CONDITIONAL"
+        ],
+        "title": "SuggestedConfirmationMode",
+        "type": "string"
+      },
+      "V4_TechnicalContractSynthesisCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "based_on_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "candidate_payload_json": {
+            "maxLength": 2000000,
+            "minLength": 2,
+            "title": "Candidate Payload Json",
+            "type": "string"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "foundation_artifact_id": {
+            "format": "uuid",
+            "title": "Foundation Artifact Id",
+            "type": "string"
+          },
+          "identity_plan_id": {
+            "format": "uuid",
+            "title": "Identity Plan Id",
+            "type": "string"
+          },
+          "identity_plan_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Identity Plan Version",
+            "type": "integer"
+          },
+          "output_type": {
+            "const": "TECHNICAL_CONTRACT_SYNTHESIS_CANDIDATE",
+            "title": "Output Type",
+            "type": "string"
+          },
+          "payload_schema_id": {
+            "const": "technical-contract-payload",
+            "title": "Payload Schema Id",
+            "type": "string"
+          },
+          "payload_schema_version": {
+            "const": "4.0.0",
+            "title": "Payload Schema Version",
+            "type": "string"
+          },
+          "request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "semantic_state_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Semantic State Hash",
+            "type": "string"
+          },
+          "source_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Source Set Hash",
+            "type": "string"
+          }
+        },
+        "required": [
+          "analyzer_run_id",
+          "context_id",
+          "request_hash",
+          "source_set_hash",
+          "based_on_case_revision",
+          "foundation_artifact_id",
+          "identity_plan_id",
+          "identity_plan_version",
+          "semantic_state_hash",
+          "candidate_payload_json",
+          "output_type",
+          "payload_schema_id",
+          "payload_schema_version"
+        ],
+        "title": "TechnicalContractSynthesisCandidate",
+        "type": "object"
+      },
+      "V4_TranscriptActor": {
+        "enum": [
+          "PM",
+          "DEV_LEAD",
+          "OTHER_PARTICIPANT",
+          "VOICE_AGENT"
+        ],
+        "title": "TranscriptActor",
+        "type": "string"
+      },
+      "V4_TranscriptFinalizedEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/V4_TranscriptActor"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_sequence": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Event Sequence",
+            "type": "integer"
+          },
+          "event_type": {
+            "const": "TRANSCRIPT_FINALIZED",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "observed_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Observed Case Revision",
+            "type": "integer"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "producer": {
+            "const": "VOICE",
+            "title": "Producer",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "sequence_number": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Sequence Number",
+            "type": "integer"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          },
+          "speaker_actor_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Speaker Actor Id"
+          },
+          "speaker_attribution_method": {
+            "$ref": "#/components/schemas/V4_SpeakerAttributionMethod"
+          },
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "transcript_artifact_id": {
+            "format": "uuid",
+            "title": "Transcript Artifact Id",
+            "type": "string"
+          },
+          "transcript_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Transcript Hash",
+            "type": "string"
+          },
+          "transcript_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Transcript Version",
+            "type": "integer"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "event_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "event_sequence",
+          "observed_case_revision",
+          "occurred_at",
+          "producer",
+          "event_type",
+          "turn_id",
+          "transcript_artifact_id",
+          "transcript_version",
+          "transcript_hash",
+          "actor",
+          "speaker_actor_id",
+          "speaker_attribution_method",
+          "sequence_number",
+          "text"
+        ],
+        "title": "TranscriptFinalizedEvent",
+        "type": "object"
+      },
+      "V4_TranscriptSpan": {
+        "additionalProperties": false,
+        "properties": {
+          "end_character_exclusive": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "End Character Exclusive",
+            "type": "integer"
+          },
+          "start_character": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Start Character",
+            "type": "integer"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transcript_event_id",
+          "start_character",
+          "end_character_exclusive"
+        ],
+        "title": "TranscriptSpan",
+        "type": "object"
+      },
+      "V4_TurnAnalysisCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "analyzer_run_id": {
+            "format": "uuid",
+            "title": "Analyzer Run Id",
+            "type": "string"
+          },
+          "based_on_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Based On Case Revision",
+            "type": "integer"
+          },
+          "context_id": {
+            "format": "uuid",
+            "title": "Context Id",
+            "type": "string"
+          },
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/V4_DecisionCandidate"
+            },
+            "maxItems": 50,
+            "title": "Decisions",
+            "type": "array"
+          },
+          "disposition": {
+            "$ref": "#/components/schemas/V4_TurnDisposition"
+          },
+          "evidence_candidates": {
+            "items": {
+              "$ref": "#/components/schemas/V4_EvidenceCandidate"
+            },
+            "maxItems": 200,
+            "title": "Evidence Candidates",
+            "type": "array"
+          },
+          "evidence_findings": {
+            "items": {
+              "$ref": "#/components/schemas/V4_SemanticEvidenceFindingCandidate"
+            },
+            "maxItems": 200,
+            "title": "Evidence Findings",
+            "type": "array"
+          },
+          "low_risk_facts": {
+            "items": {
+              "$ref": "#/components/schemas/V4_LowRiskFactCandidate"
+            },
+            "maxItems": 50,
+            "title": "Low Risk Facts",
+            "type": "array"
+          },
+          "new_problem_clusters": {
+            "items": {
+              "$ref": "#/components/schemas/V4_TurnProblemClusterCandidate"
+            },
+            "maxItems": 50,
+            "title": "New Problem Clusters",
+            "type": "array"
+          },
+          "new_problems": {
+            "items": {
+              "$ref": "#/components/schemas/V4_TurnProblemCandidate"
+            },
+            "maxItems": 100,
+            "title": "New Problems",
+            "type": "array"
+          },
+          "new_questions": {
+            "items": {
+              "$ref": "#/components/schemas/V4_TurnQuestionCandidate"
+            },
+            "maxItems": 100,
+            "title": "New Questions",
+            "type": "array"
+          },
+          "no_change_reason_code": {
+            "anyOf": [
+              {
+                "enum": [
+                  "SOCIAL_ONLY",
+                  "REPETITION",
+                  "NON_FINAL",
+                  "OUT_OF_SCOPE"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "No Change Reason Code"
+          },
+          "output_type": {
+            "const": "TURN_ANALYSIS_CANDIDATE",
+            "title": "Output Type",
+            "type": "string"
+          },
+          "problem_assessments": {
+            "items": {
+              "$ref": "#/components/schemas/V4_ProblemResolutionAssessment"
+            },
+            "maxItems": 100,
+            "title": "Problem Assessments",
+            "type": "array"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "request_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "revised_problem_clusters": {
+            "items": {
+              "$ref": "#/components/schemas/V4_TurnProblemClusterRevisionCandidate"
+            },
+            "maxItems": 50,
+            "title": "Revised Problem Clusters",
+            "type": "array"
+          },
+          "revised_questions": {
+            "items": {
+              "$ref": "#/components/schemas/V4_TurnQuestionRevisionCandidate"
+            },
+            "maxItems": 100,
+            "title": "Revised Questions",
+            "type": "array"
+          },
+          "source_set_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Source Set Hash",
+            "type": "string"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "output_type",
+          "analyzer_run_id",
+          "context_id",
+          "request_hash",
+          "source_set_hash",
+          "transcript_event_id",
+          "based_on_case_revision",
+          "disposition",
+          "no_change_reason_code",
+          "evidence_candidates",
+          "new_problems",
+          "new_problem_clusters",
+          "revised_problem_clusters",
+          "new_questions",
+          "revised_questions",
+          "low_risk_facts",
+          "decisions",
+          "problem_assessments",
+          "evidence_findings"
+        ],
+        "title": "TurnAnalysisCandidate",
+        "type": "object"
+      },
+      "V4_TurnDisposition": {
+        "enum": [
+          "NO_SEMANTIC_CHANGE",
+          "SUBSTANTIVE"
+        ],
+        "title": "TurnDisposition",
+        "type": "string"
+      },
+      "V4_TurnProblemCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "consequence": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Consequence",
+            "type": "string"
+          },
+          "domain": {
+            "$ref": "#/components/schemas/V4_Domain"
+          },
+          "evidence_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Evidence Refs",
+            "type": "array"
+          },
+          "problem_kind": {
+            "$ref": "#/components/schemas/V4_ProblemKind"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/V4_Severity"
+          },
+          "statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "problem_kind",
+          "domain",
+          "severity",
+          "statement",
+          "consequence",
+          "evidence_refs"
+        ],
+        "title": "TurnProblemCandidate",
+        "type": "object"
+      },
+      "V4_TurnProblemClusterCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "coupling_reason": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Coupling Reason",
+            "type": "string"
+          },
+          "coupling_type": {
+            "$ref": "#/components/schemas/V4_ClusterCouplingType"
+          },
+          "problem_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 20,
+            "minItems": 2,
+            "title": "Problem Refs",
+            "type": "array"
+          },
+          "suggested_confirmation_mode": {
+            "$ref": "#/components/schemas/V4_SuggestedConfirmationMode"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "title",
+          "problem_refs",
+          "coupling_type",
+          "coupling_reason",
+          "suggested_confirmation_mode"
+        ],
+        "title": "TurnProblemClusterCandidate",
+        "type": "object"
+      },
+      "V4_TurnProblemClusterRevisionCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster_ref": {
+            "$ref": "#/components/schemas/V4_FoundationEntityRef"
+          },
+          "coupling_reason": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Coupling Reason",
+            "type": "string"
+          },
+          "coupling_type": {
+            "$ref": "#/components/schemas/V4_ClusterCouplingType"
+          },
+          "problem_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 20,
+            "minItems": 2,
+            "title": "Problem Refs",
+            "type": "array"
+          },
+          "suggested_confirmation_mode": {
+            "$ref": "#/components/schemas/V4_SuggestedConfirmationMode"
+          },
+          "title": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "cluster_ref",
+          "title",
+          "problem_refs",
+          "coupling_type",
+          "coupling_reason",
+          "suggested_confirmation_mode"
+        ],
+        "title": "TurnProblemClusterRevisionCandidate",
+        "type": "object"
+      },
+      "V4_TurnQuestionCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "addresses_problem_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Addresses Problem Refs",
+            "type": "array"
+          },
+          "answer_options": {
+            "items": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Answer Options",
+            "type": "array"
+          },
+          "candidate_key": {
+            "maxLength": 96,
+            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "capture_policy": {
+            "$ref": "#/components/schemas/V4_CapturePolicy"
+          },
+          "prerequisite_problem_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 20,
+            "title": "Prerequisite Problem Refs",
+            "type": "array"
+          },
+          "question_shape": {
+            "$ref": "#/components/schemas/V4_QuestionShape"
+          },
+          "rationale": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "safe_without_current_turn_interpretation": {
+            "title": "Safe Without Current Turn Interpretation",
+            "type": "boolean"
+          },
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_key",
+          "text",
+          "rationale",
+          "question_shape",
+          "capture_policy",
+          "answer_options",
+          "addresses_problem_refs",
+          "prerequisite_problem_refs",
+          "safe_without_current_turn_interpretation"
+        ],
+        "title": "TurnQuestionCandidate",
+        "type": "object"
+      },
+      "V4_TurnQuestionRevisionCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "addresses_problem_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Addresses Problem Refs",
+            "type": "array"
+          },
+          "answer_options": {
+            "items": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Answer Options",
+            "type": "array"
+          },
+          "capture_policy": {
+            "$ref": "#/components/schemas/V4_CapturePolicy"
+          },
+          "prerequisite_problem_refs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "CANDIDATE_KEY": "#/components/schemas/V4_CandidateEntityRef",
+                  "FOUNDATION_ID": "#/components/schemas/V4_FoundationEntityRef"
+                },
+                "propertyName": "ref_kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/V4_CandidateEntityRef"
+                },
+                {
+                  "$ref": "#/components/schemas/V4_FoundationEntityRef"
+                }
+              ]
+            },
+            "maxItems": 20,
+            "title": "Prerequisite Problem Refs",
+            "type": "array"
+          },
+          "question_ref": {
+            "$ref": "#/components/schemas/V4_FoundationEntityRef"
+          },
+          "question_shape": {
+            "$ref": "#/components/schemas/V4_QuestionShape"
+          },
+          "rationale": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "safe_without_current_turn_interpretation": {
+            "title": "Safe Without Current Turn Interpretation",
+            "type": "boolean"
+          },
+          "text": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_ref",
+          "text",
+          "rationale",
+          "question_shape",
+          "capture_policy",
+          "answer_options",
+          "addresses_problem_refs",
+          "prerequisite_problem_refs",
+          "safe_without_current_turn_interpretation"
+        ],
+        "title": "TurnQuestionRevisionCandidate",
+        "type": "object"
+      },
+      "V4_VerbalSelfAssertion": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {
+            "format": "uuid",
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "asserted_display_name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Asserted Display Name",
+            "type": "string"
+          },
+          "assertion_transcript_event_id": {
+            "format": "uuid",
+            "title": "Assertion Transcript Event Id",
+            "type": "string"
+          },
+          "assurance_level": {
+            "const": "SELF_ASSERTED",
+            "title": "Assurance Level",
+            "type": "string"
+          },
+          "authentication_method": {
+            "const": "VERBAL_SELF_ASSERTION",
+            "title": "Authentication Method",
+            "type": "string"
+          },
+          "claimed_role": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Claimed Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authentication_method",
+          "assurance_level",
+          "actor_id",
+          "asserted_display_name",
+          "claimed_role",
+          "assertion_transcript_event_id"
+        ],
+        "title": "VerbalSelfAssertion",
+        "type": "object"
+      },
+      "V4_VoiceConfirmationSelectionCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "clarification_question": {
+            "anyOf": [
+              {
+                "maxLength": 20000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clarification Question"
+          },
+          "decision_batch_view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Decision Batch View Hash",
+            "type": "string"
+          },
+          "decision_batch_view_id": {
+            "format": "uuid",
+            "title": "Decision Batch View Id",
+            "type": "string"
+          },
+          "mapping_status": {
+            "$ref": "#/components/schemas/V4_ConfirmationMappingStatus"
+          },
+          "observed_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Observed Case Revision",
+            "type": "integer"
+          },
+          "output_type": {
+            "const": "VOICE_CONFIRMATION_SELECTION_CANDIDATE",
+            "title": "Output Type",
+            "type": "string"
+          },
+          "producer": {
+            "const": "VOICE",
+            "title": "Producer",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "selection_event_id": {
+            "format": "uuid",
+            "title": "Selection Event Id",
+            "type": "string"
+          },
+          "selections": {
+            "items": {
+              "$ref": "#/components/schemas/V4_VoiceConfirmationSelectionItemCandidate"
+            },
+            "maxItems": 26,
+            "title": "Selections",
+            "type": "array"
+          },
+          "speaker_actor_id": {
+            "format": "uuid",
+            "title": "Speaker Actor Id",
+            "type": "string"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          },
+          "unmentioned_item_policy": {
+            "const": "REMAIN_PENDING",
+            "title": "Unmentioned Item Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "output_type",
+          "producer",
+          "selection_event_id",
+          "mapping_status",
+          "decision_batch_view_id",
+          "decision_batch_view_hash",
+          "observed_case_revision",
+          "transcript_event_id",
+          "speaker_actor_id",
+          "selections",
+          "unmentioned_item_policy",
+          "clarification_question"
+        ],
+        "title": "VoiceConfirmationSelectionCandidate",
+        "type": "object"
+      },
+      "V4_VoiceConfirmationSelectionItemCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/V4_ConfirmationAction"
+          },
+          "handle": {
+            "pattern": "^[A-Z]{1,2}$",
+            "title": "Handle",
+            "type": "string"
+          },
+          "revision_span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/V4_TranscriptSpan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "handle",
+          "action",
+          "revision_span"
+        ],
+        "title": "VoiceConfirmationSelectionItemCandidate",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "SpecOps Workshop Protocol",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v4/cases/{case_id}/artifact-review": {
+      "get": {
+        "operationId": "current_artifact_review_api_v4_cases__case_id__artifact_review_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Case Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ArtifactReviewProjection"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Current Artifact Review Api V4 Cases  Case Id  Artifact Review Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Current Artifact Review",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/cases/{case_id}/artifacts/{artifact_type}": {
+      "get": {
+        "operationId": "confirmed_artifact_api_v4_cases__case_id__artifacts__artifact_type__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Case Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "artifact_type",
+            "required": true,
+            "schema": {
+              "pattern": "^(SPEC_PACKAGE|TECHNICAL_CONTRACT)$",
+              "title": "Artifact Type",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ConfirmedArtifactProjection"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Confirmed Artifact Api V4 Cases  Case Id  Artifacts  Artifact Type  Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirmed Artifact",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/cases/{case_id}/decision-review": {
+      "get": {
+        "operationId": "current_decision_review_api_v4_cases__case_id__decision_review_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "case_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Case Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/DecisionBatchReviewView"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Current Decision Review Api V4 Cases  Case Id  Decision Review Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Current Decision Review",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/foundation/commands": {
+      "post": {
+        "operationId": "execute_foundation_command_api_v4_foundation_commands_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "discriminator": {
+                  "mapping": {
+                    "ACTIVATE_ANALYZER_CONTEXT": "#/components/schemas/V4_ActivateAnalyzerContextCommand",
+                    "ADMIT_GUIDANCE": "#/components/schemas/V4_AdmitGuidanceCommand",
+                    "ADMIT_INTERVIEW_BRIEF": "#/components/schemas/V4_AdmitInterviewBriefCommand",
+                    "ADMIT_REVIEW_NARRATION": "#/components/schemas/V4_AdmitReviewNarrationCommand",
+                    "ADMIT_SPEC_PACKAGE_SYNTHESIS": "#/components/schemas/V4_AdmitSpecPackageSynthesisCommand",
+                    "ADMIT_TECHNICAL_CONTRACT_SYNTHESIS": "#/components/schemas/V4_AdmitTechnicalContractSynthesisCommand",
+                    "ADMIT_TURN_ANALYSIS": "#/components/schemas/V4_AdmitTurnAnalysisCommand",
+                    "APPLY_DECISION_BATCH_RESPONSE": "#/components/schemas/V4_ApplyDecisionBatchResponseCommand",
+                    "CAPTURE_LOW_RISK_FACT": "#/components/schemas/V4_CaptureLowRiskFactCommand",
+                    "CONFIRM_ARTIFACT": "#/components/schemas/V4_ConfirmArtifactCommand",
+                    "INVALIDATE_ANALYZER_CONTEXT": "#/components/schemas/V4_InvalidateAnalyzerContextCommand",
+                    "MATERIALIZE_ARTIFACT_REVIEW": "#/components/schemas/V4_MaterializeArtifactReviewCommand",
+                    "MATERIALIZE_DECISION_BATCH_REVIEW": "#/components/schemas/V4_MaterializeDecisionBatchReviewCommand",
+                    "RECORD_FINAL_TRANSCRIPT": "#/components/schemas/V4_RecordFinalTranscriptCommand"
+                  },
+                  "propertyName": "command_type"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/V4_ActivateAnalyzerContextCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_InvalidateAnalyzerContextCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_RecordFinalTranscriptCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_AdmitInterviewBriefCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_AdmitTurnAnalysisCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_AdmitGuidanceCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_AdmitReviewNarrationCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_AdmitSpecPackageSynthesisCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_AdmitTechnicalContractSynthesisCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_CaptureLowRiskFactCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_MaterializeDecisionBatchReviewCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_ApplyDecisionBatchResponseCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_MaterializeArtifactReviewCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_ConfirmArtifactCommand"
+                  }
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "ANALYZER_CONTEXT": "#/components/schemas/AnalyzerContextCommandReceipt",
+                      "ARTIFACT_CONFIRMATION": "#/components/schemas/ArtifactConfirmationReceipt",
+                      "ARTIFACT_REVIEW": "#/components/schemas/ArtifactReviewReceipt",
+                      "ARTIFACT_SYNTHESIS_ADMISSION": "#/components/schemas/ArtifactSynthesisAdmissionReceipt",
+                      "DECISION_BATCH_RESPONSE": "#/components/schemas/DecisionBatchResponseReceipt",
+                      "DECISION_BATCH_REVIEW": "#/components/schemas/DecisionBatchReviewReceipt",
+                      "LOW_RISK_FACT_CAPTURE": "#/components/schemas/LowRiskFactCaptureReceipt",
+                      "PROPOSAL_ADMISSION": "#/components/schemas/ProposalAdmissionReceipt",
+                      "REVIEW_NARRATION_ADMISSION": "#/components/schemas/ReviewNarrationAdmissionReceipt",
+                      "TRANSCRIPT_RECORDED": "#/components/schemas/TranscriptRecordedReceipt"
+                    },
+                    "propertyName": "receipt_type"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AnalyzerContextCommandReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/TranscriptRecordedReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ProposalAdmissionReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ArtifactSynthesisAdmissionReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ReviewNarrationAdmissionReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LowRiskFactCaptureReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DecisionBatchReviewReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DecisionBatchResponseReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ArtifactReviewReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ArtifactConfirmationReceipt"
+                    }
+                  ],
+                  "title": "Response Execute Foundation Command Api V4 Foundation Commands Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FoundationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractValidationEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Execute Foundation Command",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/voice/decision-responses": {
+      "post": {
+        "operationId": "apply_voice_decision_response_api_v4_voice_decision_responses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "acting_actor_id": {
+                    "anyOf": [
+                      {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      {
+                        "const": "SYSTEM",
+                        "type": "string"
+                      }
+                    ],
+                    "title": "Acting Actor Id"
+                  },
+                  "actor_authentication": {
+                    "discriminator": {
+                      "mapping": {
+                        "ENTERPRISE_SSO": "#/components/schemas/V4_EnterpriseSsoAuthentication",
+                        "VERBAL_SELF_ASSERTION": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      "propertyName": "authentication_method"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      {
+                        "$ref": "#/components/schemas/V4_EnterpriseSsoAuthentication"
+                      }
+                    ],
+                    "title": "Actor Authentication"
+                  },
+                  "case_id": {
+                    "format": "uuid",
+                    "title": "Case Id",
+                    "type": "string"
+                  },
+                  "causation_id": {
+                    "anyOf": [
+                      {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Causation Id"
+                  },
+                  "command_id": {
+                    "format": "uuid",
+                    "title": "Command Id",
+                    "type": "string"
+                  },
+                  "command_type": {
+                    "const": "APPLY_DECISION_BATCH_RESPONSE",
+                    "title": "Command Type",
+                    "type": "string"
+                  },
+                  "correlation_id": {
+                    "format": "uuid",
+                    "title": "Correlation Id",
+                    "type": "string"
+                  },
+                  "decision_batch_view_hash": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "title": "Decision Batch View Hash",
+                    "type": "string"
+                  },
+                  "decision_batch_view_id": {
+                    "format": "uuid",
+                    "title": "Decision Batch View Id",
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "issued_at": {
+                    "format": "date-time",
+                    "title": "Issued At",
+                    "type": "string"
+                  },
+                  "item_actions": {
+                    "items": {
+                      "$ref": "#/components/schemas/V4_DecisionBatchItemActionCommand"
+                    },
+                    "maxItems": 26,
+                    "minItems": 1,
+                    "title": "Item Actions",
+                    "type": "array"
+                  },
+                  "observed_case_revision": {
+                    "maximum": 9.223372036854776e+18,
+                    "minimum": 0.0,
+                    "title": "Observed Case Revision",
+                    "type": "integer"
+                  },
+                  "protocol_version": {
+                    "const": "1.0.0",
+                    "title": "Protocol Version",
+                    "type": "string"
+                  },
+                  "response_transcript_event_id": {
+                    "format": "uuid",
+                    "title": "Response Transcript Event Id",
+                    "type": "string"
+                  },
+                  "selection": {
+                    "$ref": "#/components/schemas/V4_VoiceConfirmationSelectionCandidate"
+                  },
+                  "session_id": {
+                    "format": "uuid",
+                    "title": "Session Id",
+                    "type": "string"
+                  },
+                  "unmentioned_item_policy": {
+                    "const": "REMAIN_PENDING",
+                    "title": "Unmentioned Item Policy",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "protocol_version",
+                  "command_id",
+                  "case_id",
+                  "session_id",
+                  "correlation_id",
+                  "causation_id",
+                  "idempotency_key",
+                  "issued_at",
+                  "acting_actor_id",
+                  "observed_case_revision",
+                  "command_type",
+                  "actor_authentication",
+                  "selection",
+                  "decision_batch_view_id",
+                  "decision_batch_view_hash",
+                  "response_transcript_event_id",
+                  "item_actions",
+                  "unmentioned_item_policy"
+                ],
+                "title": "ApplyDecisionBatchResponseCommand",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionBatchResponseReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FoundationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractValidationEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Apply Voice Decision Response",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/voice/final-transcripts": {
+      "post": {
+        "operationId": "record_voice_final_transcript_api_v4_voice_final_transcripts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "acting_actor_id": {
+                    "const": "SYSTEM",
+                    "title": "Acting Actor Id",
+                    "type": "string"
+                  },
+                  "case_id": {
+                    "format": "uuid",
+                    "title": "Case Id",
+                    "type": "string"
+                  },
+                  "causation_id": {
+                    "anyOf": [
+                      {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Causation Id"
+                  },
+                  "command_id": {
+                    "format": "uuid",
+                    "title": "Command Id",
+                    "type": "string"
+                  },
+                  "command_type": {
+                    "const": "RECORD_FINAL_TRANSCRIPT",
+                    "title": "Command Type",
+                    "type": "string"
+                  },
+                  "correlation_id": {
+                    "format": "uuid",
+                    "title": "Correlation Id",
+                    "type": "string"
+                  },
+                  "expected_case_revision": {
+                    "maximum": 9.223372036854776e+18,
+                    "minimum": 0.0,
+                    "title": "Expected Case Revision",
+                    "type": "integer"
+                  },
+                  "idempotency_key": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+                    "title": "Idempotency Key",
+                    "type": "string"
+                  },
+                  "issued_at": {
+                    "format": "date-time",
+                    "title": "Issued At",
+                    "type": "string"
+                  },
+                  "protocol_version": {
+                    "const": "1.0.0",
+                    "title": "Protocol Version",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "format": "uuid",
+                    "title": "Session Id",
+                    "type": "string"
+                  },
+                  "transcript": {
+                    "$ref": "#/components/schemas/V4_TranscriptFinalizedEvent"
+                  }
+                },
+                "required": [
+                  "protocol_version",
+                  "command_id",
+                  "case_id",
+                  "session_id",
+                  "correlation_id",
+                  "causation_id",
+                  "idempotency_key",
+                  "issued_at",
+                  "acting_actor_id",
+                  "expected_case_revision",
+                  "command_type",
+                  "transcript"
+                ],
+                "title": "RecordFinalTranscriptCommand",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptRecordedReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FoundationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractValidationEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Record Voice Final Transcript",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    }
+  }
+}

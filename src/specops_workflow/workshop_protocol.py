@@ -1,0 +1,1592 @@
+"""Foundation-owned Workshop Interaction Protocol command handlers.
+
+The handler is intentionally independent from provider and UI code.  It accepts
+only strict generated commands, owns the idempotency ledger, mints identities,
+persists immutable review projections, and performs confirmation validation in
+one transaction against the Foundation database.
+"""
+
+from __future__ import annotations
+
+import json
+import hashlib
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+from uuid import UUID, uuid4
+
+from jsonschema import Draft202012Validator
+from pydantic import TypeAdapter
+from referencing import Registry, Resource
+from sqlalchemy import and_, func, insert, select, update
+from sqlalchemy.exc import IntegrityError
+
+from specops_contracts import workshop_v1 as c
+from specops_contracts.canonical import (
+    canonical_bytes,
+    decision_view_hash,
+    domain_hash,
+    foundation_command_fingerprint,
+    payload_hash,
+    transcript_hash,
+)
+
+from .persistence import (
+    WORKSHOP_PROTOCOL_TABLES,
+    audit_events,
+    case_participants,
+    cases as foundation_cases,
+    delegations,
+    engine_for,
+    source_artifacts,
+)
+
+
+SCHEMA_ROOT = Path(__file__).resolve().parents[1] / "specops_contracts" / "schemas"
+SEMANTIC_ENTITY_KINDS = (
+    ("EVIDENCE", "evidence_candidates"),
+    ("PROBLEM", "problems"),
+    ("CLUSTER", "problem_clusters"),
+    ("QUESTION", "questions"),
+)
+TURN_ENTITY_KINDS = (
+    ("EVIDENCE", "evidence_candidates"),
+    ("PROBLEM", "new_problems"),
+    ("CLUSTER", "new_problem_clusters"),
+    ("QUESTION", "new_questions"),
+    ("FACT", "low_risk_facts"),
+    ("DECISION", "decisions"),
+    ("FINDING", "evidence_findings"),
+)
+
+
+class FoundationProtocolError(RuntimeError):
+    def __init__(self, code: c.FoundationRejectionCode) -> None:
+        super().__init__(code.value)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class ProtocolCase:
+    case_id: UUID
+    session_id: UUID
+    source_set_hash: str
+    active_context_id: UUID | None
+    readiness: c.Readiness
+    review_obligation: c.ReviewObligation
+
+
+def _instant(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _json(value: Any) -> str:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json", exclude_none=False)
+    return canonical_bytes(value).decode("utf-8")
+
+
+def _payload_validator(filename: str) -> Draft202012Validator:
+    path = SCHEMA_ROOT / filename
+    schema = json.loads(path.read_text(encoding="utf-8"))
+    registry = Registry()
+    for schema_path in SCHEMA_ROOT.glob("*.json"):
+        value = json.loads(schema_path.read_text(encoding="utf-8"))
+        resource = Resource.from_contents(value)
+        registry = registry.with_resource(value.get("$id", schema_path.as_uri()), resource)
+    return Draft202012Validator(schema, registry=registry)
+
+
+class WorkshopFoundationService:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        new_id: Callable[[], UUID] = uuid4,
+    ) -> None:
+        self.engine = engine_for(database_url)
+        self.now = now
+        self.new_id = new_id
+
+    def register_case(
+        self,
+        *,
+        case_id: UUID,
+        session_id: UUID,
+        source_set_hash: str,
+    ) -> ProtocolCase:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]
+        now = _instant(self.now())
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(table).where(table.c.case_id == str(case_id))
+            ).mappings().one_or_none()
+            if existing is None:
+                connection.execute(
+                    insert(table).values(
+                        case_id=str(case_id),
+                        session_id=str(session_id),
+                        source_set_hash=source_set_hash,
+                        active_context_id=None,
+                        readiness=c.Readiness.FORMULATING.value,
+                        review_obligation=c.ReviewObligation.NONE.value,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            elif (
+                existing["session_id"] != str(session_id)
+                or existing["source_set_hash"] != source_set_hash
+            ):
+                raise FoundationProtocolError(c.FoundationRejectionCode.DUPLICATE_CONFLICT)
+        return self.get_case(case_id)
+
+    def get_case(self, case_id: UUID) -> ProtocolCase:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table).where(table.c.case_id == str(case_id))
+            ).mappings().one()
+        return ProtocolCase(
+            case_id=UUID(row["case_id"]),
+            session_id=UUID(row["session_id"]),
+            source_set_hash=row["source_set_hash"],
+            active_context_id=UUID(row["active_context_id"]) if row["active_context_id"] else None,
+            readiness=c.Readiness(row["readiness"]),
+            review_obligation=c.ReviewObligation(row["review_obligation"]),
+        )
+
+    def execute(self, command: c.FoundationCommand) -> c.FoundationReceipt:
+        case = self.get_case(command.case_id)
+        if command.session_id != case.session_id:
+            raise FoundationProtocolError(c.FoundationRejectionCode.MALFORMED_COMMAND)
+        fingerprint = foundation_command_fingerprint(command.model_dump(mode="json"))
+        ledger = WORKSHOP_PROTOCOL_TABLES["workshop_command_ledger"]
+
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(ledger).where(
+                    ledger.c.case_id == str(command.case_id),
+                    ledger.c.idempotency_key == command.idempotency_key,
+                )
+            ).mappings().one_or_none()
+            if existing is not None:
+                if existing["command_fingerprint"] != fingerprint:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.DUPLICATE_CONFLICT)
+                return TypeAdapter(c.FoundationReceipt).validate_json(existing["receipt_json"])
+
+            current_revision = self._case_revision(connection, command.case_id)
+            self._validate_concurrency(command, current_revision)
+            receipt = self._dispatch(connection, command, current_revision)
+            occurred_at = receipt.command.occurred_at
+            connection.execute(
+                insert(ledger).values(
+                    case_id=str(command.case_id),
+                    idempotency_key=command.idempotency_key,
+                    command_id=str(command.command_id),
+                    command_type=command.command_type,
+                    command_fingerprint=fingerprint,
+                    receipt_json=receipt.model_dump_json(),
+                    recorded_at=_instant(occurred_at),
+                )
+            )
+            self._record_audit_and_event(
+                connection,
+                command=command,
+                fingerprint=fingerprint,
+                receipt=receipt,
+            )
+            return receipt
+
+    def _record_audit_and_event(self, connection, *, command, fingerprint, receipt) -> None:
+        """Append the protocol command to the one Foundation revision stream."""
+
+        prior = receipt.command.prior_case_revision
+        resulting = receipt.command.resulting_case_revision
+        connection.execute(
+            insert(audit_events).values(
+                event_id=str(self.new_id()),
+                case_id=str(command.case_id),
+                case_sequence=resulting,
+                command_id=str(command.command_id),
+                command_name=f"workshop.{command.command_type.lower()}",
+                command_fingerprint=fingerprint.removeprefix("sha256:"),
+                actor=str(command.acting_actor_id),
+                occurred_at=receipt.command.occurred_at,
+                target_ids="[]",
+                before_case_revision=prior,
+                after_case_revision=resulting,
+                metadata=_json(
+                    {
+                        "protocol_version": "1.0.0",
+                        "receipt_type": receipt.receipt_type,
+                    }
+                ),
+                result=receipt.model_dump_json(),
+            )
+        )
+        events = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_events"]
+        connection.execute(
+            insert(events).values(
+                event_id=str(self.new_id()),
+                case_id=str(command.case_id),
+                event_sequence=resulting,
+                event_type=f"{command.command_type}_APPLIED",
+                event_json=receipt.model_dump_json(),
+                occurred_at=_instant(receipt.command.occurred_at),
+            )
+        )
+
+    @staticmethod
+    def _case_revision(connection, case_id: UUID) -> int:
+        cases = connection.execute(
+            select(WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]).where(
+                WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"].c.case_id == str(case_id)
+            )
+        ).mappings().one()
+        from .persistence import cases as foundation_cases
+
+        revision = connection.execute(
+            select(foundation_cases.c.revision).where(foundation_cases.c.id == str(case_id))
+        ).scalar_one()
+        return revision
+
+    @staticmethod
+    def _validate_concurrency(command, revision: int) -> None:
+        expected = getattr(command, "expected_case_revision", None)
+        if expected is not None and expected != revision:
+            raise FoundationProtocolError(c.FoundationRejectionCode.STALE_STATE)
+        observed = getattr(command, "observed_case_revision", None)
+        if observed is not None and observed > revision:
+            raise FoundationProtocolError(c.FoundationRejectionCode.STALE_STATE)
+
+    def _dispatch(self, connection, command, prior_revision: int):
+        if isinstance(command, c.ActivateAnalyzerContextCommand):
+            return self._activate_context(connection, command, prior_revision)
+        if isinstance(command, c.InvalidateAnalyzerContextCommand):
+            return self._invalidate_context(connection, command, prior_revision)
+        if isinstance(command, c.RecordFinalTranscriptCommand):
+            return self._record_transcript(connection, command, prior_revision)
+        if isinstance(command, c.AdmitInterviewBriefCommand):
+            return self._admit_candidate(
+                connection,
+                command,
+                prior_revision,
+                SEMANTIC_ENTITY_KINDS,
+            )
+        if isinstance(command, c.AdmitTurnAnalysisCommand):
+            return self._admit_candidate(
+                connection,
+                command,
+                prior_revision,
+                TURN_ENTITY_KINDS,
+            )
+        if isinstance(command, c.AdmitGuidanceCommand):
+            return self._admit_guidance(connection, command, prior_revision)
+        if isinstance(command, c.AdmitReviewNarrationCommand):
+            return self._admit_narration(connection, command, prior_revision)
+        if isinstance(command, c.CaptureLowRiskFactCommand):
+            return self._capture_low_risk_fact(connection, command, prior_revision)
+        if isinstance(command, c.MaterializeDecisionBatchReviewCommand):
+            return self._materialize_decision_review(connection, command, prior_revision)
+        if isinstance(command, c.ApplyDecisionBatchResponseCommand):
+            return self._apply_decision_response(connection, command, prior_revision)
+        if isinstance(command, c.AdmitSpecPackageSynthesisCommand):
+            return self._admit_artifact(connection, command, prior_revision, "SPEC_PACKAGE")
+        if isinstance(command, c.AdmitTechnicalContractSynthesisCommand):
+            return self._admit_artifact(connection, command, prior_revision, "TECHNICAL_CONTRACT")
+        if isinstance(command, c.MaterializeArtifactReviewCommand):
+            return self._materialize_artifact_review(connection, command, prior_revision)
+        if isinstance(command, c.ConfirmArtifactCommand):
+            return self._confirm_artifact(connection, command, prior_revision)
+        raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+
+    def _base_receipt(self, command, prior_revision: int) -> c.FoundationCommandReceipt:
+        return c.FoundationCommandReceipt(
+            receipt_type="FOUNDATION_COMMAND",
+            command_id=command.command_id,
+            idempotency_key=command.idempotency_key,
+            outcome=c.CommandOutcome.APPLIED,
+            prior_case_revision=prior_revision,
+            resulting_case_revision=prior_revision + 1,
+            occurred_at=self.now(),
+            rejection_code=None,
+        )
+
+    def _advance_revision(self, connection, case_id: UUID, prior_revision: int) -> None:
+        from .persistence import cases as foundation_cases
+
+        result = connection.execute(
+            update(foundation_cases)
+            .where(
+                foundation_cases.c.id == str(case_id),
+                foundation_cases.c.revision == prior_revision,
+            )
+            .values(revision=prior_revision + 1)
+        )
+        if result.rowcount != 1:
+            raise FoundationProtocolError(c.FoundationRejectionCode.STALE_STATE)
+
+    def _activate_context(self, connection, command, prior_revision):
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        case_table = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]
+        existing = connection.execute(
+            select(table).where(table.c.context_id == str(command.context.context_id))
+        ).mappings().one_or_none()
+        if existing is not None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.DUPLICATE_CONFLICT)
+        case = connection.execute(
+            select(case_table).where(case_table.c.case_id == str(command.case_id))
+        ).mappings().one()
+        if command.context.source_set.source_set_hash != case["source_set_hash"]:
+            raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
+        connection.execute(
+            update(table)
+            .where(table.c.case_id == str(command.case_id), table.c.status == c.ContextStatus.ACTIVE.value)
+            .values(status=c.ContextStatus.REBUILD_REQUIRED.value, invalidated_at=_instant(self.now()))
+        )
+        connection.execute(
+            insert(table).values(
+                context_id=str(command.context.context_id),
+                case_id=str(command.case_id),
+                session_id=str(command.session_id),
+                source_set_hash=command.context.source_set.source_set_hash,
+                provider_conversation_id=command.context.provider_conversation_id,
+                status=command.context.status.value,
+                binding_json=command.context.model_dump_json(),
+                created_at=_instant(command.context.created_at),
+                invalidated_at=None,
+            )
+        )
+        connection.execute(
+            update(case_table)
+            .where(case_table.c.case_id == str(command.case_id))
+            .values(active_context_id=str(command.context.context_id), updated_at=_instant(self.now()))
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.AnalyzerContextCommandReceipt(
+            receipt_type="ANALYZER_CONTEXT",
+            command=self._base_receipt(command, prior_revision),
+            context_id=command.context.context_id,
+            context_status=c.ContextStatus.ACTIVE,
+        )
+
+    def _invalidate_context(self, connection, command, prior_revision):
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        result = connection.execute(
+            update(table)
+            .where(
+                table.c.context_id == str(command.context_id),
+                table.c.case_id == str(command.case_id),
+                table.c.status == c.ContextStatus.ACTIVE.value,
+            )
+            .values(status=c.ContextStatus.REBUILD_REQUIRED.value, invalidated_at=_instant(self.now()))
+        )
+        if result.rowcount != 1:
+            raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.AnalyzerContextCommandReceipt(
+            receipt_type="ANALYZER_CONTEXT",
+            command=self._base_receipt(command, prior_revision),
+            context_id=command.context_id,
+            context_status=c.ContextStatus.REBUILD_REQUIRED,
+        )
+
+    def _record_transcript(self, connection, command, prior_revision):
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"]
+        prior = connection.execute(
+            select(func.max(table.c.sequence_number)).where(
+                table.c.case_id == str(command.case_id),
+                table.c.session_id == str(command.session_id),
+            )
+        ).scalar_one()
+        expected = 1 if prior is None else prior + 1
+        if command.transcript.sequence_number != expected:
+            raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+        if command.transcript.transcript_hash != transcript_hash(command.transcript.text):
+            raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+        if command.transcript.speaker_actor_id is not None:
+            self._require_participant(
+                connection, command.case_id, command.transcript.speaker_actor_id
+            )
+        connection.execute(
+            insert(table).values(
+                event_id=str(command.transcript.event_id),
+                case_id=str(command.case_id),
+                session_id=str(command.session_id),
+                sequence_number=command.transcript.sequence_number,
+                transcript_hash=command.transcript.transcript_hash,
+                event_json=command.transcript.model_dump_json(),
+                recorded_at=_instant(self.now()),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.TranscriptRecordedReceipt(
+            receipt_type="TRANSCRIPT_RECORDED",
+            command=self._base_receipt(command, prior_revision),
+            transcript_event_id=command.transcript.event_id,
+            transcript_hash=command.transcript.transcript_hash,
+        )
+
+    def _active_context(self, connection, case_id: UUID, context_id: UUID):
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        return connection.execute(
+            select(table).where(
+                table.c.case_id == str(case_id),
+                table.c.context_id == str(context_id),
+                table.c.status == c.ContextStatus.ACTIVE.value,
+            )
+        ).mappings().one_or_none()
+
+    def _admit_candidate(self, connection, command, prior_revision, groups):
+        active_context = self._active_context(connection, command.case_id, command.context_id)
+        if active_context is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED)
+        mapping_table = WORKSHOP_PROTOCOL_TABLES["workshop_candidate_mappings"]
+        record_table = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        mappings = []
+        allocated: dict[str, tuple[str, UUID, int]] = {}
+        candidates: list[tuple[str, Any]] = []
+        for entity_kind, field_name in groups:
+            for candidate in getattr(command.candidate, field_name):
+                key = candidate.candidate_key
+                candidates.append((entity_kind, candidate))
+                existing = connection.execute(
+                    select(mapping_table).where(
+                        mapping_table.c.analyzer_run_id == str(command.analyzer_run_id),
+                        mapping_table.c.candidate_key == key,
+                    )
+                ).mappings().one_or_none()
+                if existing is not None:
+                    if existing["entity_kind"] != entity_kind:
+                        raise FoundationProtocolError(c.FoundationRejectionCode.DUPLICATE_CONFLICT)
+                    foundation_id = UUID(existing["foundation_id"])
+                    record_version = existing["record_version"]
+                else:
+                    foundation_id = self.new_id()
+                    record_version = 1
+                    connection.execute(
+                        insert(mapping_table).values(
+                            analyzer_run_id=str(command.analyzer_run_id),
+                            candidate_key=key,
+                            case_id=str(command.case_id),
+                            entity_kind=entity_kind,
+                            foundation_id=str(foundation_id),
+                            record_version=record_version,
+                        )
+                    )
+                allocated[key] = (entity_kind, foundation_id, record_version)
+                mappings.append(
+                    c.CandidateIdentityMapping(
+                        analyzer_run_id=command.analyzer_run_id,
+                        candidate_key=key,
+                        entity_kind=entity_kind,
+                        foundation_id=foundation_id,
+                        record_version=record_version,
+                    )
+                )
+        # Provider-local keys are transport-local only.  Resolve every nested
+        # reference before any semantic record enters Foundation storage.
+        for entity_kind, candidate in candidates:
+            key = candidate.candidate_key
+            _, foundation_id, record_version = allocated[key]
+            exists = connection.execute(
+                select(record_table.c.foundation_id).where(
+                    record_table.c.foundation_id == str(foundation_id),
+                    record_table.c.record_version == record_version,
+                )
+            ).scalar_one_or_none()
+            if exists is not None:
+                continue
+            if entity_kind == "EVIDENCE":
+                payload = self._admit_evidence_candidate(
+                    connection, command.case_id, candidate, active_context
+                )
+            else:
+                payload = self._resolve_provider_refs(
+                    connection,
+                    command.case_id,
+                    candidate.model_dump(mode="json", exclude_none=False),
+                    allocated,
+                )
+            if entity_kind == "FINDING":
+                payload = self._admitted_evidence_finding(
+                    connection,
+                    command,
+                    candidate,
+                    payload,
+                    foundation_id,
+                    record_version,
+                    active_context,
+                )
+            connection.execute(
+                insert(record_table).values(
+                    foundation_id=str(foundation_id),
+                    record_version=record_version,
+                    case_id=str(command.case_id),
+                    entity_kind=entity_kind,
+                    status=(
+                        c.SemanticRecordStatus.PENDING_CONFIRMATION.value
+                        if entity_kind == "DECISION"
+                        else c.SemanticRecordStatus.OPEN.value
+                    ),
+                    content_hash=payload_hash(payload),
+                    payload_json=_json(payload),
+                    analyzer_run_id=str(command.analyzer_run_id),
+                    candidate_key=key,
+                    created_at=_instant(self.now()),
+                )
+            )
+        if isinstance(command, c.AdmitTurnAnalysisCommand):
+            self._apply_turn_revisions(connection, command, allocated)
+            self._apply_problem_assessments(connection, command, allocated)
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.ProposalAdmissionReceipt(
+            receipt_type="PROPOSAL_ADMISSION",
+            command=self._base_receipt(command, prior_revision),
+            analyzer_run_id=command.analyzer_run_id,
+            identity_mappings=tuple(mappings),
+            admitted_guidance_id=None,
+        )
+
+    def _admit_evidence_candidate(self, connection, case_id, candidate, active_context):
+        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
+        source_binding = next(
+            (
+                item
+                for item in context.source_set.ordered_sources
+                if item.source.role is candidate.source_role
+            ),
+            None,
+        )
+        if source_binding is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
+        source = source_binding.source
+        registered = connection.execute(
+            select(source_artifacts).where(
+                source_artifacts.c.case_id == str(case_id),
+                source_artifacts.c.artifact_id == str(source.source_id),
+                source_artifacts.c.version == source.version,
+                source_artifacts.c.content_hash == source.payload_hash.removeprefix("sha256:"),
+                source_artifacts.c.canonical_locator == source.canonical_locator,
+            )
+        ).mappings().one_or_none()
+        if registered is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
+        try:
+            source_bytes = Path(source.canonical_locator).read_bytes()
+            source_text = source_bytes.decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED) from exc
+        if "sha256:" + hashlib.sha256(source_bytes).hexdigest() != source.payload_hash:
+            raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
+        locator = candidate.locator
+        if isinstance(locator, c.SourceLineLocator):
+            lines = source_text.splitlines()
+            if locator.end_line > len(lines):
+                raise FoundationProtocolError(c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED)
+            excerpt = "\n".join(lines[locator.start_line - 1 : locator.end_line])
+        elif isinstance(locator, c.JsonPointerLocator):
+            try:
+                value = json.loads(source_text)
+                for raw in locator.pointer.split("/")[1:]:
+                    token = raw.replace("~1", "/").replace("~0", "~")
+                    value = value[int(token)] if isinstance(value, list) else value[token]
+                excerpt = _json(value) if isinstance(value, (dict, list)) else str(value)
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise FoundationProtocolError(c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED) from exc
+        elif isinstance(locator, c.DocumentAnchorLocator):
+            matches = [line for line in source_text.splitlines() if locator.anchor in line]
+            if len(matches) != 1:
+                raise FoundationProtocolError(c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED)
+            excerpt = matches[0]
+        else:
+            assert isinstance(locator, c.QuoteSearchLocator)
+            starts = []
+            start = 0
+            while True:
+                found = source_text.find(locator.exact_quote, start)
+                if found < 0:
+                    break
+                starts.append(found)
+                start = found + 1
+            if len(starts) < locator.occurrence:
+                raise FoundationProtocolError(c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED)
+            excerpt = locator.exact_quote
+        if candidate.quoted_text_candidate is not None and candidate.quoted_text_candidate != excerpt:
+            raise FoundationProtocolError(c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED)
+        payload = candidate.model_dump(mode="json", exclude_none=False)
+        payload["source_binding"] = {
+            "source_id": str(source.source_id),
+            "source_version": source.version,
+            "source_hash": source.payload_hash,
+            "excerpt_hash": "sha256:" + hashlib.sha256(excerpt.encode("utf-8")).hexdigest(),
+        }
+        return payload
+
+    def _admitted_evidence_finding(
+        self,
+        connection,
+        command,
+        candidate,
+        payload,
+        foundation_id,
+        record_version,
+        active_context,
+    ):
+        claim = self._semantic_record_for_ref(connection, command.case_id, payload["claim_ref"])
+        evidence = self._semantic_record_for_ref(
+            connection, command.case_id, payload["evidence_ref"]
+        )
+        if evidence["entity_kind"] != "EVIDENCE":
+            raise FoundationProtocolError(c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED)
+        evidence_payload = json.loads(evidence["payload_json"])
+        source = evidence_payload.get("source_binding")
+        if source is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED)
+        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
+        admitted = c.AdmittedSemanticEvidenceFinding(
+            finding_id=foundation_id,
+            finding_version=record_version,
+            claim_id=UUID(claim["foundation_id"]),
+            claim_version=claim["record_version"],
+            claim_hash=claim["content_hash"],
+            evidence_id=UUID(evidence["foundation_id"]),
+            evidence_version=evidence["record_version"],
+            source_hash=source["source_hash"],
+            excerpt_hash=source["excerpt_hash"],
+            assessment=candidate.assessment,
+            confidence=candidate.confidence,
+            source_analyzer_run_id=command.analyzer_run_id,
+            analyzer_contract=context.analyzer_contract,
+            admitted_at=self.now(),
+        )
+        return admitted.model_dump(mode="json", exclude_none=False)
+
+    def _apply_turn_revisions(self, connection, command, allocated):
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        for entity_kind, revisions in (
+            ("CLUSTER", command.candidate.revised_problem_clusters),
+            ("QUESTION", command.candidate.revised_questions),
+        ):
+            for revision in revisions:
+                ref = revision.cluster_ref if entity_kind == "CLUSTER" else revision.question_ref
+                prior = self._semantic_record_for_ref(connection, command.case_id, ref)
+                if prior["entity_kind"] != entity_kind:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                latest = connection.execute(
+                    select(func.max(records.c.record_version)).where(
+                        records.c.foundation_id == str(ref.foundation_id)
+                    )
+                ).scalar_one()
+                if latest != ref.expected_version:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+                payload = revision.model_dump(mode="json", exclude_none=False)
+                payload.pop("cluster_ref" if entity_kind == "CLUSTER" else "question_ref")
+                payload = self._resolve_provider_refs(
+                    connection, command.case_id, payload, allocated
+                )
+                next_version = ref.expected_version + 1
+                connection.execute(
+                    update(records)
+                    .where(
+                        records.c.foundation_id == str(ref.foundation_id),
+                        records.c.record_version == ref.expected_version,
+                    )
+                    .values(status=c.SemanticRecordStatus.STALE.value)
+                )
+                connection.execute(
+                    insert(records).values(
+                        foundation_id=str(ref.foundation_id),
+                        record_version=next_version,
+                        case_id=str(command.case_id),
+                        entity_kind=entity_kind,
+                        status=c.SemanticRecordStatus.OPEN.value,
+                        content_hash=payload_hash(payload),
+                        payload_json=_json(payload),
+                        analyzer_run_id=str(command.analyzer_run_id),
+                        candidate_key=f"revision-{ref.foundation_id}-{next_version}",
+                        created_at=_instant(self.now()),
+                    )
+                )
+
+    def _apply_problem_assessments(self, connection, command, allocated):
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        for assessment in command.candidate.problem_assessments:
+            ref = self._resolve_provider_refs(
+                connection,
+                command.case_id,
+                assessment.problem_ref.model_dump(mode="json"),
+                allocated,
+            )
+            problem = self._semantic_record_for_ref(connection, command.case_id, ref)
+            if problem["entity_kind"] != "PROBLEM":
+                raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+            status = (
+                c.SemanticRecordStatus.RESOLVED
+                if assessment.assessment == "RESOLVED"
+                else c.SemanticRecordStatus.OPEN
+            )
+            connection.execute(
+                update(records)
+                .where(
+                    records.c.foundation_id == problem["foundation_id"],
+                    records.c.record_version == problem["record_version"],
+                )
+                .values(status=status.value)
+            )
+
+    def _resolve_provider_refs(self, connection, case_id: UUID, value, allocated):
+        if isinstance(value, dict):
+            if value.get("ref_kind") == "CANDIDATE_KEY":
+                key = value.get("candidate_key")
+                if key not in allocated:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                _, foundation_id, version = allocated[key]
+                return {
+                    "ref_kind": "FOUNDATION_ID",
+                    "foundation_id": str(foundation_id),
+                    "expected_version": version,
+                }
+            if value.get("ref_kind") == "FOUNDATION_ID":
+                self._semantic_record_for_ref(connection, case_id, value)
+                return dict(value)
+            return {
+                key: self._resolve_provider_refs(connection, case_id, item, allocated)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._resolve_provider_refs(connection, case_id, item, allocated) for item in value]
+        return value
+
+    @staticmethod
+    def _semantic_record_for_ref(connection, case_id: UUID, ref):
+        foundation_id = str(ref.foundation_id if hasattr(ref, "foundation_id") else ref["foundation_id"])
+        expected_version = (
+            ref.expected_version if hasattr(ref, "expected_version") else ref["expected_version"]
+        )
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        row = connection.execute(
+            select(table).where(
+                table.c.case_id == str(case_id),
+                table.c.foundation_id == foundation_id,
+                table.c.record_version == expected_version,
+                table.c.status != c.SemanticRecordStatus.STALE.value,
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+        return row
+
+    def _admit_guidance(self, connection, command, prior_revision):
+        if self._active_context(connection, command.case_id, command.context_id) is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED)
+        case = connection.execute(
+            select(WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]).where(
+                WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"].c.case_id
+                == str(command.case_id)
+            )
+        ).mappings().one()
+        if command.candidate.source_set_hash != case["source_set_hash"]:
+            raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
+
+        def admitted_question(question):
+            row = self._semantic_record_for_ref(connection, command.case_id, question.question_ref)
+            if row["entity_kind"] != "QUESTION":
+                raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+            payload = json.loads(row["payload_json"])
+            if payload.get("text") != question.exact_text:
+                raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+            return c.AdmittedGuidanceQuestion(
+                question_id=question.question_ref.foundation_id,
+                question_version=question.question_ref.expected_version,
+                exact_text=question.exact_text,
+                reason=question.reason,
+            )
+
+        recommended = admitted_question(command.candidate.recommended_question)
+        alternates = tuple(admitted_question(item) for item in command.candidate.safe_alternates)
+        for ref in command.candidate.do_not_ask_question_refs:
+            if self._semantic_record_for_ref(connection, command.case_id, ref)["entity_kind"] != "QUESTION":
+                raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+
+        dependencies = []
+        triggers = {
+            c.GuidanceInvalidationTrigger.GUIDANCE_SUPERSEDED,
+            c.GuidanceInvalidationTrigger.WORKSHOP_CLOSED,
+        }
+        for dependency in command.candidate.dependencies:
+            if dependency.dependency_kind is c.GuidanceDependencyKind.SOURCE_SET:
+                dependencies.append(
+                    c.AdmittedGuidanceDependency(
+                        dependency_kind=dependency.dependency_kind,
+                        entity_id=None,
+                        expected_version=None,
+                        source_set_hash=command.candidate.source_set_hash,
+                    )
+                )
+                triggers.add(c.GuidanceInvalidationTrigger.SOURCE_SET_CHANGED)
+                continue
+            assert dependency.entity_ref is not None
+            row = self._semantic_record_for_ref(connection, command.case_id, dependency.entity_ref)
+            expected_kind = {
+                c.GuidanceDependencyKind.QUESTION: "QUESTION",
+                c.GuidanceDependencyKind.PROBLEM: "PROBLEM",
+            }.get(dependency.dependency_kind)
+            if expected_kind is not None and row["entity_kind"] != expected_kind:
+                raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+            dependencies.append(
+                c.AdmittedGuidanceDependency(
+                    dependency_kind=dependency.dependency_kind,
+                    entity_id=dependency.entity_ref.foundation_id,
+                    expected_version=dependency.entity_ref.expected_version,
+                    source_set_hash=None,
+                )
+            )
+            triggers.add(c.GuidanceInvalidationTrigger.FOUNDATION_ENTITY_CHANGED)
+            if dependency.dependency_kind is c.GuidanceDependencyKind.QUESTION:
+                triggers.add(c.GuidanceInvalidationTrigger.QUESTION_ANSWERED)
+            if dependency.dependency_kind is c.GuidanceDependencyKind.PROBLEM:
+                triggers.add(c.GuidanceInvalidationTrigger.PROBLEM_RESOLVED)
+
+        guidance_id = self.new_id()
+        admitted = c.AdmittedGuidance(
+            guidance_id=guidance_id,
+            guidance_version=1,
+            source_analyzer_run_id=command.analyzer_run_id,
+            source_context_id=command.context_id,
+            source_request_hash=command.provider_request_hash,
+            based_on_case_revision=command.expected_case_revision,
+            source_set_hash=command.candidate.source_set_hash,
+            recommended_question=recommended,
+            safe_alternates=alternates,
+            do_not_ask_questions=command.candidate.do_not_ask_question_refs,
+            dependencies=tuple(dependencies),
+            acknowledgement_suggestion=command.candidate.acknowledgement_suggestion,
+            invalidation_triggers=tuple(sorted(triggers, key=lambda item: item.value)),
+            admitted_at=self.now(),
+        )
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        connection.execute(update(table).where(table.c.case_id == str(command.case_id)).values(valid=0))
+        connection.execute(
+            insert(table).values(
+                guidance_id=str(guidance_id),
+                guidance_version=1,
+                case_id=str(command.case_id),
+                payload_json=admitted.model_dump_json(),
+                valid=1,
+                admitted_at=_instant(admitted.admitted_at),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.ProposalAdmissionReceipt(
+            receipt_type="PROPOSAL_ADMISSION",
+            command=self._base_receipt(command, prior_revision),
+            analyzer_run_id=command.analyzer_run_id,
+            identity_mappings=(),
+            admitted_guidance_id=guidance_id,
+        )
+
+    def _capture_low_risk_fact(self, connection, command, prior_revision):
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        fact = connection.execute(
+            select(records).where(
+                records.c.case_id == str(command.case_id),
+                records.c.foundation_id == str(command.fact_proposal_id),
+                records.c.entity_kind == "FACT",
+                records.c.status == c.SemanticRecordStatus.OPEN.value,
+            ).order_by(records.c.record_version.desc()).limit(1)
+        ).mappings().one_or_none()
+        if fact is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+        payload = json.loads(fact["payload_json"])
+        source_question = payload.get("source_question_ref", {})
+        if (
+            source_question.get("foundation_id") != str(command.question_id)
+            or source_question.get("expected_version") != command.expected_question_version
+        ):
+            raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+        transcript = self._participant_transcript(
+            connection,
+            command.case_id,
+            command.transcript_event_id,
+            command.speaker_actor_id,
+        )
+        if transcript is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+        self._require_participant(connection, command.case_id, command.acting_actor_id)
+        connection.execute(
+            update(records)
+            .where(
+                records.c.foundation_id == str(command.fact_proposal_id),
+                records.c.record_version == fact["record_version"],
+            )
+            .values(status=c.SemanticRecordStatus.CONFIRMED.value)
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.LowRiskFactCaptureReceipt(
+            receipt_type="LOW_RISK_FACT_CAPTURE",
+            command=self._base_receipt(command, prior_revision),
+            fact_id=command.fact_proposal_id,
+            fact_version=fact["record_version"],
+            promoted_to_pending_decision_id=None,
+        )
+
+    def _participant_transcript(
+        self,
+        connection,
+        case_id: UUID,
+        transcript_event_id: UUID,
+        speaker_actor_id: UUID,
+    ):
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"]
+        row = connection.execute(
+            select(table).where(
+                table.c.case_id == str(case_id),
+                table.c.event_id == str(transcript_event_id),
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            return None
+        payload = json.loads(row["event_json"])
+        return row if payload.get("speaker_actor_id") == str(speaker_actor_id) else None
+
+    @staticmethod
+    def _require_participant(connection, case_id: UUID, actor_id: UUID) -> None:
+        exists = connection.execute(
+            select(case_participants.c.actor_id).where(
+                case_participants.c.case_id == str(case_id),
+                case_participants.c.actor_id == str(actor_id),
+            )
+        ).scalar_one_or_none()
+        if exists is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.AUTHORITY_FAILED)
+
+    def _has_domain_authority(self, connection, case_id: UUID, actor_id: UUID, domain: str) -> bool:
+        case = connection.execute(
+            select(foundation_cases).where(foundation_cases.c.id == str(case_id))
+        ).mappings().one()
+        if domain in {"BUSINESS", "PRODUCT", "CROSS_DOMAIN", "POLICY", "product", "policy"}:
+            return case["pm_actor_id"] == str(actor_id)
+        if domain in {"TECHNICAL", "technical"} and case["dev_lead_actor_id"] == str(actor_id):
+            return True
+        now = self.now()
+        rows = connection.execute(
+            select(delegations).where(
+                delegations.c.case_id == str(case_id),
+                delegations.c.delegate_id == str(actor_id),
+                delegations.c.revoked_at.is_(None),
+                delegations.c.domain == "TECHNICAL",
+            )
+        ).mappings()
+        return any(row["valid_from"] <= now <= row["valid_until"] for row in rows)
+
+    def _admit_narration(self, connection, command, prior_revision):
+        view = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        row = connection.execute(
+            select(view).where(
+                view.c.view_id == str(command.candidate.decision_batch_view_id),
+                view.c.case_id == str(command.case_id),
+                view.c.view_hash == command.candidate.decision_batch_view_hash,
+                view.c.current == 1,
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.STALE_VIEW)
+        expected_handles = {item["handle"] for item in json.loads(row["view_json"])["items"]}
+        actual_handles = {item.handle for item in command.candidate.items}
+        if actual_handles != expected_handles:
+            raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_review_narrations"]
+        narration_id = self.new_id()
+        connection.execute(
+            insert(table).values(
+                narration_id=str(narration_id),
+                narration_version=1,
+                case_id=str(command.case_id),
+                decision_batch_view_id=str(command.candidate.decision_batch_view_id),
+                payload_json=command.candidate.model_dump_json(),
+                valid=1,
+                admitted_at=_instant(self.now()),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.ReviewNarrationAdmissionReceipt(
+            receipt_type="REVIEW_NARRATION_ADMISSION",
+            command=self._base_receipt(command, prior_revision),
+            narration_id=narration_id,
+            narration_version=1,
+            decision_batch_view_id=command.candidate.decision_batch_view_id,
+        )
+
+    def _materialize_decision_review(self, connection, command, prior_revision):
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        rows = []
+        for decision_id in command.pending_decision_ids:
+            row = connection.execute(
+                select(records).where(
+                    records.c.case_id == str(command.case_id),
+                    records.c.foundation_id == str(decision_id),
+                    records.c.entity_kind == "DECISION",
+                    records.c.status == c.SemanticRecordStatus.PENDING_CONFIRMATION.value,
+                )
+                .order_by(records.c.record_version.desc())
+                .limit(1)
+            ).mappings().one_or_none()
+            if row is None:
+                raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+            rows.append(row)
+        view_id = self.new_id()
+        items = []
+        for index, row in enumerate(rows):
+            payload = json.loads(row["payload_json"])
+            handle = chr(ord("A") + index)
+            origins = []
+            for link in payload["problem_links"]:
+                if link["problem_ref"]["ref_kind"] == "FOUNDATION_ID":
+                    problem_id = link["problem_ref"]["foundation_id"]
+                    problem_version = link["problem_ref"]["expected_version"]
+                else:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                problem = connection.execute(
+                    select(records).where(
+                        records.c.case_id == str(command.case_id),
+                        records.c.foundation_id == problem_id,
+                        records.c.record_version == problem_version,
+                    )
+                ).mappings().one_or_none()
+                if problem is None:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                problem_payload = json.loads(problem["payload_json"])
+                origins.append(
+                    c.ProblemOriginView(
+                        problem_id=UUID(problem_id),
+                        problem_version=problem_version,
+                        problem_statement=problem_payload["statement"],
+                        resolution_kind=c.ProblemResolutionKind(link["resolution_kind"]),
+                        evidence_summary=problem_payload["consequence"],
+                    )
+                )
+            items.append(
+                c.DecisionReviewItemView(
+                    review_item_id=self.new_id(),
+                    handle=handle,
+                    pending_decision_id=UUID(row["foundation_id"]),
+                    pending_decision_version=row["record_version"],
+                    classification=c.Domain(payload["classification"]),
+                    exact_statement=payload["statement"],
+                    rationale=payload["rationale"],
+                    problem_origins=tuple(origins),
+                )
+            )
+        base = {
+            "protocol_version": "1.0.0",
+            "view_type": "DECISION_BATCH_REVIEW",
+            "view_id": view_id,
+            "view_hash": "sha256:" + "0" * 64,
+            "session_id": command.session_id,
+            "based_on_case_revision": prior_revision,
+            "derived_from_cluster_ids": command.derived_from_cluster_ids,
+            "items": tuple(items),
+            "generated_at": self.now(),
+        }
+        base["view_hash"] = decision_view_hash(base)
+        view = c.DecisionBatchReviewView(**base)
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        connection.execute(
+            update(table).where(table.c.case_id == str(command.case_id)).values(current=0)
+        )
+        connection.execute(
+            insert(table).values(
+                view_id=str(view_id),
+                case_id=str(command.case_id),
+                view_hash=view.view_hash,
+                based_on_case_revision=prior_revision,
+                view_json=view.model_dump_json(),
+                current=1,
+                generated_at=_instant(view.generated_at),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.DecisionBatchReviewReceipt(
+            receipt_type="DECISION_BATCH_REVIEW",
+            command=self._base_receipt(command, prior_revision),
+            view_id=view_id,
+            view_hash=view.view_hash,
+        )
+
+    def _apply_decision_response(self, connection, command, prior_revision):
+        views = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        view = connection.execute(
+            select(views).where(
+                views.c.view_id == str(command.decision_batch_view_id),
+                views.c.view_hash == command.decision_batch_view_hash,
+                views.c.case_id == str(command.case_id),
+                views.c.current == 1,
+            )
+        ).mappings().one_or_none()
+        if view is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.STALE_VIEW)
+        self._require_participant(connection, command.case_id, command.acting_actor_id)
+        if self._participant_transcript(
+            connection,
+            command.case_id,
+            command.response_transcript_event_id,
+            command.acting_actor_id,
+        ) is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+        view_items = {
+            (
+                item["review_item_id"],
+                item["handle"],
+                item["pending_decision_id"],
+                item["pending_decision_version"],
+            )
+            for item in json.loads(view["view_json"])["items"]
+        }
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        results = []
+        for action in command.item_actions:
+            action_binding = (
+                str(action.review_item_id),
+                action.handle,
+                str(action.pending_decision_id),
+                action.expected_pending_decision_version,
+            )
+            if action_binding not in view_items:
+                raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+            row = connection.execute(
+                select(records).where(
+                    records.c.case_id == str(command.case_id),
+                    records.c.foundation_id == str(action.pending_decision_id),
+                    records.c.record_version == action.expected_pending_decision_version,
+                    records.c.status == c.SemanticRecordStatus.PENDING_CONFIRMATION.value,
+                )
+            ).mappings().one_or_none()
+            if row is None:
+                results.append(
+                    c.DecisionBatchItemReceipt(
+                        review_item_id=action.review_item_id,
+                        pending_decision_id=action.pending_decision_id,
+                        outcome=c.DecisionItemOutcome.REJECTED_STALE,
+                        committed_decision_id=None,
+                        revision_request_id=None,
+                    )
+                )
+                continue
+            decision_payload = json.loads(row["payload_json"])
+            if not self._has_domain_authority(
+                connection,
+                command.case_id,
+                command.acting_actor_id,
+                decision_payload["classification"],
+            ):
+                results.append(
+                    c.DecisionBatchItemReceipt(
+                        review_item_id=action.review_item_id,
+                        pending_decision_id=action.pending_decision_id,
+                        outcome=c.DecisionItemOutcome.REJECTED_AUTHORITY,
+                        committed_decision_id=None,
+                        revision_request_id=None,
+                    )
+                )
+                continue
+            outcome = {
+                c.ConfirmationAction.CONFIRM: c.DecisionItemOutcome.COMMITTED,
+                c.ConfirmationAction.REVISE: c.DecisionItemOutcome.REVISION_REQUESTED,
+                c.ConfirmationAction.REJECT: c.DecisionItemOutcome.REJECTED,
+                c.ConfirmationAction.DEFER: c.DecisionItemOutcome.DEFERRED,
+            }[action.action]
+            status = {
+                c.ConfirmationAction.CONFIRM: c.SemanticRecordStatus.CONFIRMED,
+                c.ConfirmationAction.REVISE: c.SemanticRecordStatus.OPEN,
+                c.ConfirmationAction.REJECT: c.SemanticRecordStatus.REJECTED,
+                c.ConfirmationAction.DEFER: c.SemanticRecordStatus.DEFERRED,
+            }[action.action]
+            connection.execute(
+                update(records)
+                .where(
+                    records.c.foundation_id == str(action.pending_decision_id),
+                    records.c.record_version == action.expected_pending_decision_version,
+                )
+                .values(status=status.value)
+            )
+            results.append(
+                c.DecisionBatchItemReceipt(
+                    review_item_id=action.review_item_id,
+                    pending_decision_id=action.pending_decision_id,
+                    outcome=outcome,
+                    committed_decision_id=(
+                        action.pending_decision_id if outcome is c.DecisionItemOutcome.COMMITTED else None
+                    ),
+                    revision_request_id=(self.new_id() if outcome is c.DecisionItemOutcome.REVISION_REQUESTED else None),
+                )
+            )
+        connection.execute(update(views).where(views.c.view_id == str(command.decision_batch_view_id)).values(current=0))
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.DecisionBatchResponseReceipt(
+            receipt_type="DECISION_BATCH_RESPONSE",
+            command=self._base_receipt(command, prior_revision),
+            decision_batch_view_id=command.decision_batch_view_id,
+            item_results=tuple(results),
+            resulting_readiness=c.Readiness.FORMULATING,
+            resulting_review_obligation=c.ReviewObligation.NONE,
+        )
+
+    def _admit_artifact(self, connection, command, prior_revision, artifact_type):
+        if self._active_context(connection, command.case_id, command.candidate.context_id) is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED)
+        protocol_case = connection.execute(
+            select(WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]).where(
+                WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"].c.case_id == str(command.case_id)
+            )
+        ).mappings().one()
+        if command.candidate.source_set_hash != protocol_case["source_set_hash"]:
+            raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
+        schema_name = (
+            "spec-package-payload.schema.json"
+            if artifact_type == "SPEC_PACKAGE"
+            else "technical-contract-payload.schema.json"
+        )
+        try:
+            payload = json.loads(
+                command.candidate.candidate_payload_json,
+                object_pairs_hook=self._reject_duplicate_keys,
+            )
+        except ValueError as exc:
+            raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED) from exc
+        errors = list(_payload_validator(schema_name).iter_errors(payload))
+        if errors:
+            raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED)
+        if artifact_type == "TECHNICAL_CONTRACT":
+            self._validate_confirmed_spec_lineage(connection, command, prior_revision)
+        planned = {str(item.foundation_id): item.entity_kind for item in command.identity_plan.planned_identities}
+        payload_text = command.candidate.candidate_payload_json
+        missing = [identity for identity in planned if identity not in payload_text]
+        if missing:
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+        identifier = self._artifact_identities(payload)
+        if not identifier.issubset(planned):
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+        for item in command.identity_plan.planned_identities:
+            for ref in item.source_entity_refs:
+                self._semantic_record_for_ref(connection, command.case_id, ref)
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+        prior_artifact = connection.execute(
+            select(records).where(
+                records.c.case_id == str(command.case_id),
+                records.c.artifact_key == command.target.artifact_key,
+            ).order_by(records.c.artifact_version.desc()).limit(1)
+        ).mappings().one_or_none()
+        if prior_artifact is None:
+            if command.target.next_artifact_version != 1:
+                raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+        elif (
+            prior_artifact["artifact_id"] != str(command.target.foundation_artifact_id)
+            or command.target.next_artifact_version != prior_artifact["artifact_version"] + 1
+        ):
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+        plan_table = WORKSHOP_PROTOCOL_TABLES["workshop_identity_plans"]
+        try:
+            connection.execute(
+                insert(plan_table).values(
+                    identity_plan_id=str(command.identity_plan.identity_plan_id),
+                    identity_plan_version=command.identity_plan.identity_plan_version,
+                    case_id=str(command.case_id),
+                    artifact_id=str(command.target.foundation_artifact_id),
+                    artifact_version=command.target.next_artifact_version,
+                    semantic_state_hash=command.identity_plan.semantic_state_hash,
+                    plan_json=command.identity_plan.model_dump_json(),
+                    status="CONSUMED",
+                    created_at=_instant(self.now()),
+                )
+            )
+        except IntegrityError as exc:
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED) from exc
+        digest = payload_hash(payload)
+        connection.execute(
+            insert(records).values(
+                artifact_id=str(command.target.foundation_artifact_id),
+                artifact_version=command.target.next_artifact_version,
+                case_id=str(command.case_id),
+                artifact_type=artifact_type,
+                artifact_key=command.target.artifact_key,
+                record_revision=1,
+                payload_hash=digest,
+                payload_json=_json(payload),
+                governance_json="{}",
+                status="DRAFT",
+                confirmed_from_json=(
+                    _json(command.confirmed_spec.model_dump(mode="json"))
+                    if artifact_type == "TECHNICAL_CONTRACT"
+                    else None
+                ),
+                created_at=_instant(self.now()),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.ArtifactSynthesisAdmissionReceipt(
+            receipt_type="ARTIFACT_SYNTHESIS_ADMISSION",
+            command=self._base_receipt(command, prior_revision),
+            analyzer_run_id=command.candidate.analyzer_run_id,
+            artifact_type=artifact_type,
+            artifact_id=command.target.foundation_artifact_id,
+            artifact_key=command.target.artifact_key,
+            artifact_version=command.target.next_artifact_version,
+            record_revision=1,
+            payload_hash=digest,
+        )
+
+    def _validate_confirmed_spec_lineage(self, connection, command, prior_revision):
+        binding = command.confirmed_spec
+        confirmations = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_confirmations"]
+        confirmation = connection.execute(
+            select(confirmations).where(
+                confirmations.c.case_id == str(command.case_id),
+                confirmations.c.confirmation_id == str(binding.confirmation_id),
+                confirmations.c.artifact_id == str(binding.foundation_artifact_id),
+                confirmations.c.artifact_version == binding.artifact_version,
+                confirmations.c.record_revision == binding.record_revision,
+                confirmations.c.payload_hash == binding.payload_hash,
+                confirmations.c.confirmed_case_revision == binding.confirmed_case_revision,
+                confirmations.c.revoked_at.is_(None),
+                confirmations.c.superseded_by_confirmation_id.is_(None),
+            )
+        ).mappings().one_or_none()
+        if confirmation is None or prior_revision < binding.confirmed_case_revision:
+            raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+        record = connection.execute(
+            select(records).where(
+                records.c.case_id == str(command.case_id),
+                records.c.artifact_id == str(binding.foundation_artifact_id),
+                records.c.artifact_key == binding.artifact_key,
+                records.c.artifact_version == binding.artifact_version,
+                records.c.record_revision == binding.record_revision,
+                records.c.payload_hash == binding.payload_hash,
+                records.c.artifact_type == "SPEC_PACKAGE",
+                records.c.status == "CONFIRMED",
+            )
+        ).mappings().one_or_none()
+        if record is None or _json(json.loads(binding.canonical_payload_json)) != record["payload_json"]:
+            raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+
+    @staticmethod
+    def _reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    @staticmethod
+    def _artifact_identities(value: Any) -> set[str]:
+        result = set()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key.endswith("_id") and isinstance(item, str):
+                    try:
+                        UUID(item)
+                    except ValueError:
+                        pass
+                    else:
+                        result.add(item)
+                result.update(WorkshopFoundationService._artifact_identities(item))
+        elif isinstance(value, list):
+            for item in value:
+                result.update(WorkshopFoundationService._artifact_identities(item))
+        return result
+
+    def _materialize_artifact_review(self, connection, command, prior_revision):
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+        record = connection.execute(
+            select(records).where(
+                records.c.case_id == str(command.case_id),
+                records.c.artifact_type == command.subject.artifact_type,
+                records.c.artifact_id == str(command.subject.artifact_id),
+                records.c.artifact_key == command.subject.artifact_key,
+                records.c.artifact_version == command.subject.artifact_version,
+                records.c.record_revision == command.subject.record_revision,
+                records.c.payload_hash == command.subject.payload_hash,
+            )
+        ).mappings().one_or_none()
+        if record is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+        view_id = self.new_id()
+        confirmation_id = self.new_id()
+        view = {
+            "view_schema_version": "3.0.0",
+            "view_type": f"{command.subject.artifact_type}_REVIEW",
+            "view_id": str(view_id),
+            "mode": command.view_mode,
+            "source": command.subject.model_dump(mode="json"),
+            "payload": json.loads(record["payload_json"]),
+            "governance": json.loads(record["governance_json"]),
+            "generated_at": _instant(self.now()),
+        }
+        view_hash = domain_hash("SPECOPS:ARTIFACT_REVIEW_VIEW:v1", view)
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"]
+        connection.execute(
+            update(table)
+            .where(table.c.case_id == str(command.case_id), table.c.artifact_id == str(command.subject.artifact_id))
+            .values(current=0)
+        )
+        connection.execute(
+            insert(table).values(
+                view_id=str(view_id),
+                confirmation_id=str(confirmation_id),
+                case_id=str(command.case_id),
+                artifact_id=str(command.subject.artifact_id),
+                artifact_version=command.subject.artifact_version,
+                record_revision=command.subject.record_revision,
+                payload_hash=command.subject.payload_hash,
+                view_hash=view_hash,
+                view_mode=command.view_mode,
+                view_json=_json(view),
+                current=1,
+                confirmed=0,
+                generated_at=_instant(self.now()),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.ArtifactReviewReceipt(
+            receipt_type="ARTIFACT_REVIEW",
+            command=self._base_receipt(command, prior_revision),
+            confirmation_id=confirmation_id,
+            view_id=view_id,
+            view_hash=view_hash,
+        )
+
+    def _confirm_artifact(self, connection, command, prior_revision):
+        views = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"]
+        row = connection.execute(
+            select(views).where(
+                views.c.view_id == str(command.binding.view_id),
+                views.c.confirmation_id == str(command.binding.confirmation_id),
+                views.c.case_id == str(command.case_id),
+                views.c.artifact_id == str(command.binding.artifact_id),
+                views.c.artifact_version == command.binding.artifact_version,
+                views.c.record_revision == command.binding.record_revision,
+                views.c.payload_hash == command.binding.payload_hash,
+                views.c.view_hash == command.binding.view_hash,
+                views.c.current == 1,
+                views.c.confirmed == 0,
+            )
+        ).mappings().one_or_none()
+        if row is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+        self._require_participant(connection, command.case_id, command.acting_actor_id)
+        if self._participant_transcript(
+            connection,
+            command.case_id,
+            command.confirmation_transcript_event_id,
+            command.acting_actor_id,
+        ) is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+        if command.approved_exception_ids:
+            raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+        artifact = connection.execute(
+            select(records).where(
+                records.c.case_id == str(command.case_id),
+                records.c.artifact_id == str(command.binding.artifact_id),
+                records.c.artifact_version == command.binding.artifact_version,
+                records.c.record_revision == command.binding.record_revision,
+            )
+        ).mappings().one()
+        required_domain = "BUSINESS" if artifact["artifact_type"] == "SPEC_PACKAGE" else "TECHNICAL"
+        if not self._has_domain_authority(
+            connection, command.case_id, command.acting_actor_id, required_domain
+        ):
+            raise FoundationProtocolError(c.FoundationRejectionCode.AUTHORITY_FAILED)
+        confirmations = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_confirmations"]
+        connection.execute(
+            insert(confirmations).values(
+                confirmation_id=str(command.binding.confirmation_id),
+                case_id=str(command.case_id),
+                artifact_id=str(command.binding.artifact_id),
+                artifact_version=command.binding.artifact_version,
+                record_revision=command.binding.record_revision,
+                payload_hash=command.binding.payload_hash,
+                view_id=str(command.binding.view_id),
+                view_hash=command.binding.view_hash,
+                actor_id=str(command.acting_actor_id),
+                confirmation_transcript_event_id=str(command.confirmation_transcript_event_id),
+                authority_snapshot_json=command.actor_authentication.model_dump_json(),
+                confirmed_case_revision=prior_revision + 1,
+                confirmed_at=_instant(self.now()),
+                revoked_at=None,
+                superseded_by_confirmation_id=None,
+            )
+        )
+        connection.execute(update(views).where(views.c.view_id == str(command.binding.view_id)).values(confirmed=1))
+        connection.execute(
+            update(records)
+            .where(
+                records.c.artifact_id == str(command.binding.artifact_id),
+                records.c.artifact_version == command.binding.artifact_version,
+                records.c.record_revision == command.binding.record_revision,
+            )
+            .values(status="CONFIRMED")
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.ArtifactConfirmationReceipt(
+            receipt_type="ARTIFACT_CONFIRMATION",
+            command=self._base_receipt(command, prior_revision),
+            binding=command.binding,
+        )
+
+    def current_decision_view(self, case_id: UUID) -> c.DecisionBatchReviewView | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.view_json).where(
+                    table.c.case_id == str(case_id),
+                    table.c.current == 1,
+                )
+            ).scalar_one_or_none()
+        return None if row is None else c.DecisionBatchReviewView.model_validate_json(row)
+
+    def current_artifact_review(self, case_id: UUID) -> dict[str, Any] | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table).where(table.c.case_id == str(case_id), table.c.current == 1)
+                .order_by(table.c.generated_at.desc())
+                .limit(1)
+            ).mappings().one_or_none()
+        if row is None:
+            return None
+        return {
+            "confirmation_id": UUID(row["confirmation_id"]),
+            "view_id": UUID(row["view_id"]),
+            "view_hash": row["view_hash"],
+            "view": json.loads(row["view_json"]),
+            "confirmed": bool(row["confirmed"]),
+        }
+
+    def confirmed_artifact(self, case_id: UUID, artifact_type: str) -> dict[str, Any] | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table).where(
+                    table.c.case_id == str(case_id),
+                    table.c.artifact_type == artifact_type,
+                    table.c.status == "CONFIRMED",
+                )
+                .order_by(table.c.artifact_version.desc())
+                .limit(1)
+            ).mappings().one_or_none()
+        if row is None:
+            return None
+        return {
+            "artifact_id": UUID(row["artifact_id"]),
+            "artifact_key": row["artifact_key"],
+            "artifact_version": row["artifact_version"],
+            "record_revision": row["record_revision"],
+            "payload_hash": row["payload_hash"],
+            "payload": json.loads(row["payload_json"]),
+        }

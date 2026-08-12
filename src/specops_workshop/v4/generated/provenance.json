@@ -1,0 +1,19 @@
+{
+  "artifact_schema_versions": {
+    "envelope": "2.0.0",
+    "read_models": "3.0.0",
+    "spec_package": "4.0.0",
+    "technical_contract": "4.0.0"
+  },
+  "contract_sha256": "0df1d5e45aa7ad693f39e7525762a7bd79426887148567aa74711aa0bb46e985",
+  "contract_source": "workshop_interaction_protocol_v1.py",
+  "openai_operations": [
+    "BOOTSTRAP",
+    "GUIDANCE",
+    "REVIEW_NARRATION",
+    "SPEC_PACKAGE_SYNTHESIS",
+    "TECHNICAL_CONTRACT_SYNTHESIS",
+    "TURN_ANALYSIS"
+  ],
+  "protocol_version": "1.0.0"
+}

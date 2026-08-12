@@ -1,0 +1,770 @@
+{
+  "$defs": {
+    "auditRuleResult": {
+      "additionalProperties": false,
+      "properties": {
+        "explanation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "finding_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "fail",
+            "not_applicable"
+          ]
+        },
+        "rule_id": {
+          "pattern": "^SPEC-Q-[0-9]{3}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "result",
+        "finding_refs",
+        "explanation"
+      ],
+      "type": "object"
+    },
+    "itemApproval": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_ref": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authority_validation_id": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confirmed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "approved",
+            "approved_under_delegation",
+            "pending",
+            "rejected",
+            "not_required"
+          ]
+        }
+      },
+      "required": [
+        "domain",
+        "status",
+        "actor_ref",
+        "authority_validation_id",
+        "confirmed_at"
+      ],
+      "type": "object"
+    },
+    "itemGovernance": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "readiness": {
+                "const": "READY"
+              }
+            },
+            "required": [
+              "readiness"
+            ]
+          },
+          "then": {
+            "properties": {
+              "review_obligation": {
+                "not": {
+                  "const": "DECISION_REQUIRED"
+                }
+              },
+              "review_obligations": {
+                "not": {
+                  "contains": {
+                    "properties": {
+                      "blocking": {
+                        "const": true
+                      },
+                      "status": {
+                        "const": "open"
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "blocking"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "review_obligation": {
+                "const": "DECISION_REQUIRED"
+              }
+            },
+            "required": [
+              "review_obligation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "readiness": {
+                "const": "NEEDS_CLARIFICATION"
+              },
+              "review_obligations": {
+                "contains": {
+                  "properties": {
+                    "status": {
+                      "const": "open"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                },
+                "minContains": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "review_obligation": {
+                "const": "LATER_REVIEW"
+              }
+            },
+            "required": [
+              "review_obligation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "review_obligations": {
+                "contains": {
+                  "properties": {
+                    "blocking": {
+                      "const": false
+                    },
+                    "status": {
+                      "const": "open"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "blocking"
+                  ]
+                },
+                "minContains": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "readiness": {
+                "const": "FORMULATING"
+              }
+            },
+            "required": [
+              "readiness"
+            ]
+          },
+          "then": {
+            "properties": {
+              "review_obligation": {
+                "const": "NONE"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/itemApproval"
+          },
+          "type": "array"
+        },
+        "foundation_record_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "item_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "item_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "last_committed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "readiness": {
+          "enum": [
+            "READY",
+            "NEEDS_CLARIFICATION",
+            "BLOCKED",
+            "FORMULATING"
+          ]
+        },
+        "review_obligation": {
+          "enum": [
+            "NONE",
+            "LATER_REVIEW",
+            "DECISION_REQUIRED"
+          ]
+        },
+        "review_obligations": {
+          "items": {
+            "$ref": "#/$defs/itemReviewObligation"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "item_ref",
+        "item_version",
+        "foundation_record_version",
+        "readiness",
+        "review_obligation",
+        "approvals",
+        "review_obligations",
+        "last_committed_at"
+      ],
+      "type": "object"
+    },
+    "itemReviewObligation": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "type": "boolean"
+        },
+        "due_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "obligation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "related_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "required_evidence": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "satisfied",
+            "waived",
+            "rejected"
+          ]
+        },
+        "type": {
+          "enum": [
+            "dev_lead_review",
+            "engineering_validation",
+            "security_review",
+            "privacy_review",
+            "compliance_review",
+            "dependency_confirmation",
+            "other"
+          ]
+        }
+      },
+      "required": [
+        "obligation_id",
+        "type",
+        "status",
+        "blocking",
+        "owner",
+        "due_date",
+        "required_evidence",
+        "related_refs"
+      ],
+      "type": "object"
+    },
+    "nonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "qualityContractPointer": {
+      "additionalProperties": false,
+      "properties": {
+        "content_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "contract_id": {
+          "const": "SEMANTIC-QUALITY-CONTRACT"
+        },
+        "version": {
+          "const": "2.0.0"
+        }
+      },
+      "required": [
+        "contract_id",
+        "version",
+        "content_hash"
+      ],
+      "type": "object"
+    },
+    "readinessAudit": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguity_findings": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "blocking": {
+                "type": "boolean"
+              },
+              "kind": {
+                "enum": [
+                  "undefined_entity",
+                  "unspecified_action",
+                  "unbounded_qualifier",
+                  "contradiction",
+                  "missing_decision"
+                ]
+              },
+              "location_ref": {
+                "format": "uuid",
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/nonEmptyString"
+              }
+            },
+            "required": [
+              "kind",
+              "location_ref",
+              "reason",
+              "blocking"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "audit_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "based_on_artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "blocker_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "quality_contract_version": {
+          "const": "2.0.0"
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "needs_clarification",
+            "blocked"
+          ]
+        },
+        "rule_results": {
+          "items": {
+            "$ref": "#/$defs/auditRuleResult"
+          },
+          "type": "array"
+        },
+        "run_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "audit_id",
+        "quality_contract_version",
+        "based_on_artifact_version",
+        "run_at",
+        "ambiguity_findings",
+        "rule_results",
+        "blocker_refs",
+        "result"
+      ],
+      "type": "object"
+    },
+    "reviewViewBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^SPEC-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "draft",
+            "review",
+            "final",
+            "diff"
+          ]
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "profile_id": {
+          "const": "artifact-review-view"
+        },
+        "profile_version": {
+          "const": "3.0.0"
+        },
+        "record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "view_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "view_id": {
+          "description": "Foundation-minted immutable identifier for this materialized review projection. It is unique even when two projections contain identical content.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_id",
+        "profile_version",
+        "view_id",
+        "mode",
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "payload_hash",
+        "view_hash",
+        "generated_at"
+      ],
+      "type": "object"
+    },
+    "specConfirmation": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^SPEC-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "authority_validation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confirmation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confirmed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "confirmed_case_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "confirmer_actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "exceptions": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "review_view": {
+          "$ref": "#/$defs/reviewViewBinding"
+        },
+        "transcript_ref": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "confirmation_id",
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "confirmed_case_revision",
+        "payload_hash",
+        "confirmer_actor_ref",
+        "authority_validation_id",
+        "transcript_ref",
+        "review_view",
+        "confirmed_at",
+        "exceptions"
+      ],
+      "type": "object"
+    },
+    "specGovernance": {
+      "additionalProperties": false,
+      "properties": {
+        "authority_validation_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "confirmation": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/specConfirmation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "item_governance": {
+          "items": {
+            "$ref": "#/$defs/itemGovernance"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "latest_review_view": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/reviewViewBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quality_contract": {
+          "$ref": "#/$defs/qualityContractPointer"
+        },
+        "readiness_audit": {
+          "$ref": "#/$defs/readinessAudit"
+        }
+      },
+      "required": [
+        "quality_contract",
+        "readiness_audit",
+        "item_governance",
+        "authority_validation_ids",
+        "latest_review_view",
+        "confirmation"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.local/schemas/spec-package.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "$ref": "artifact-envelope.schema.json"
+    },
+    {
+      "if": {
+        "properties": {
+          "envelope": {
+            "properties": {
+              "lifecycle_status": {
+                "const": "confirmed"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "governance": {
+            "properties": {
+              "confirmation": {
+                "$ref": "#/$defs/specConfirmation"
+              },
+              "item_governance": {
+                "not": {
+                  "contains": {
+                    "anyOf": [
+                      {
+                        "properties": {
+                          "readiness": {
+                            "enum": [
+                              "NEEDS_CLARIFICATION",
+                              "BLOCKED",
+                              "FORMULATING"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "readiness"
+                        ]
+                      },
+                      {
+                        "properties": {
+                          "review_obligation": {
+                            "const": "DECISION_REQUIRED"
+                          }
+                        },
+                        "required": [
+                          "review_obligation"
+                        ]
+                      },
+                      {
+                        "properties": {
+                          "review_obligations": {
+                            "contains": {
+                              "properties": {
+                                "blocking": {
+                                  "const": true
+                                },
+                                "status": {
+                                  "const": "open"
+                                }
+                              },
+                              "required": [
+                                "status",
+                                "blocking"
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "review_obligations"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              },
+              "readiness_audit": {
+                "properties": {
+                  "result": {
+                    "const": "pass"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "description": "Canonical JSON artifact exchanged with Foundation. The payload is product semantics; governance carries audit and confirmation state.",
+  "properties": {
+    "envelope": {
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^SPEC-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "spec_package"
+        },
+        "lifecycle_status": {
+          "enum": [
+            "draft",
+            "in_review",
+            "confirmed",
+            "superseded"
+          ]
+        },
+        "schema_id": {
+          "const": "spec-package"
+        },
+        "schema_version": {
+          "const": "4.0.0"
+        }
+      }
+    },
+    "governance": {
+      "$ref": "#/$defs/specGovernance"
+    },
+    "payload": {
+      "$ref": "spec-package-payload.schema.json"
+    }
+  },
+  "title": "PM Spec Workshop Spec Package Artifact"
+}

@@ -1,0 +1,357 @@
+{
+  "$defs": {
+    "artifactPointer": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "artifact_type": {
+          "enum": [
+            "business_spec_draft",
+            "technical_spec_draft",
+            "spec_package",
+            "technical_contract",
+            "policy",
+            "evidence_source",
+            "workshop_transcript",
+            "quality_contract"
+          ]
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "payload_hash"
+      ],
+      "type": "object"
+    },
+    "confirmedFromLineageEdge": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/confirmedSpecPointer"
+        },
+        "relation": {
+          "const": "confirmed_from"
+        }
+      },
+      "required": [
+        "relation",
+        "artifact"
+      ],
+      "type": "object"
+    },
+    "confirmedSpecPointer": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^SPEC-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_type": {
+          "const": "spec_package"
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "confirmation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_type",
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "payload_hash",
+        "confirmation_id"
+      ],
+      "type": "object"
+    },
+    "envelope": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "artifact_type": {
+          "enum": [
+            "spec_package",
+            "technical_contract"
+          ]
+        },
+        "artifact_version": {
+          "description": "Increments only when payload semantics change.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "content_type": {
+          "const": "application/json"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "foundation": {
+          "$ref": "#/$defs/foundationBinding"
+        },
+        "generated_by": {
+          "$ref": "#/$defs/generatedBy"
+        },
+        "integrity": {
+          "$ref": "#/$defs/integrity"
+        },
+        "language": {
+          "pattern": "^[a-z]{2}(-[A-Z]{2})?$",
+          "type": "string"
+        },
+        "lifecycle_status": {
+          "enum": [
+            "draft",
+            "in_review",
+            "confirmed",
+            "conditional",
+            "approved",
+            "superseded"
+          ]
+        },
+        "lineage": {
+          "items": {
+            "$ref": "#/$defs/lineageEdge"
+          },
+          "type": "array"
+        },
+        "protocol_version": {
+          "const": "2.0.0"
+        },
+        "record_revision": {
+          "description": "Increments when envelope or governance changes without changing payload semantics.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "schema_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "schema_version": {
+          "pattern": "^[1-9][0-9]*\\.[0-9]+\\.[0-9]+$",
+          "type": "string"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "content_type",
+        "schema_id",
+        "schema_version",
+        "artifact_type",
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "lifecycle_status",
+        "title",
+        "language",
+        "created_at",
+        "updated_at",
+        "foundation",
+        "generated_by",
+        "integrity",
+        "lineage"
+      ],
+      "type": "object"
+    },
+    "foundationBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "based_on_case_revision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "case_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "committed_case_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "correlation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "mutation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "session_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "session_id",
+        "based_on_case_revision",
+        "committed_case_revision",
+        "mutation_id",
+        "idempotency_key",
+        "correlation_id"
+      ],
+      "type": "object"
+    },
+    "generatedBy": {
+      "additionalProperties": false,
+      "description": "Execution provenance for the software component that generated or serialized this artifact revision. This does not confer ownership, decision authority, approval, or authorship on behalf of a human.",
+      "properties": {
+        "component": {
+          "enum": [
+            "analyzer",
+            "foundation",
+            "migration"
+          ]
+        },
+        "component_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "component_version",
+        "run_id",
+        "model"
+      ],
+      "type": "object"
+    },
+    "integrity": {
+      "additionalProperties": false,
+      "properties": {
+        "canonicalization": {
+          "const": "RFC8785_JCS"
+        },
+        "hash_algorithm": {
+          "const": "sha256"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hash_algorithm",
+        "canonicalization",
+        "payload_hash"
+      ],
+      "type": "object"
+    },
+    "lineageEdge": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ordinaryLineageEdge"
+        },
+        {
+          "$ref": "#/$defs/confirmedFromLineageEdge"
+        }
+      ]
+    },
+    "nonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "ordinaryLineageEdge": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/artifactPointer"
+        },
+        "relation": {
+          "enum": [
+            "input",
+            "derived_from",
+            "supersedes",
+            "audited_against"
+          ]
+        }
+      },
+      "required": [
+        "relation",
+        "artifact"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.local/schemas/artifact-envelope.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Common JSON transport envelope for Foundation-managed artifacts. Pydantic models should mirror these snake_case fields directly.",
+  "properties": {
+    "envelope": {
+      "$ref": "#/$defs/envelope"
+    },
+    "governance": {
+      "type": "object"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "envelope",
+    "payload",
+    "governance"
+  ],
+  "title": "Foundation Artifact Envelope",
+  "type": "object"
+}

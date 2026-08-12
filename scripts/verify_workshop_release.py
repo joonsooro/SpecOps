@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -16,8 +17,17 @@ sys.path.insert(0, str(BACKEND / "tests/workshop"))
 from sw_release_contract import SW_EVIDENCE, SW_IDS  # noqa: E402
 
 
-def run(name: str, command: list[str], cwd: Path) -> dict[str, object]:
-    completed = subprocess.run(command, cwd=cwd, check=False)
+def run(
+    name: str,
+    command: list[str],
+    cwd: Path,
+    *,
+    unset_environment: tuple[str, ...] = (),
+) -> dict[str, object]:
+    environment = os.environ.copy()
+    for key in unset_environment:
+        environment.pop(key, None)
+    completed = subprocess.run(command, cwd=cwd, check=False, env=environment)
     return {"name": name, "status": "PASS" if completed.returncode == 0 else "FAIL"}
 
 
@@ -33,7 +43,16 @@ def main() -> int:
     if args.live and args.live_receipt:
         parser.error("choose either --live or --live-receipt")
     checks = [
-        run("pytest", [str(BACKEND / ".venv/bin/pytest"), "-q"], BACKEND),
+        # Make exports default runtime database URLs for ``make dev``.  A test
+        # process must not inherit those shared files: unit tests that omit a
+        # database URL intentionally exercise the in-memory Foundation, while
+        # persistence tests create and migrate their own isolated databases.
+        run(
+            "pytest",
+            [str(BACKEND / ".venv/bin/pytest"), "-q"],
+            BACKEND,
+            unset_environment=("SPECOPS_DATABASE_URL", "WORKSHOP_DATABASE_URL"),
+        ),
         run("vitest", ["npm", "test"], FRONTEND),
         run("frontend-build", ["npm", "run", "build"], FRONTEND),
         run("playwright", ["npm", "run", "test:e2e"], FRONTEND),

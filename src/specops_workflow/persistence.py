@@ -69,6 +69,13 @@ traceability_edges = owned("traceability_edges", Column("id", UUIDText, primary_
 drift_findings = owned("drift_findings", Column("id", UUIDText, primary_key=True), Column("case_id", UUIDText, nullable=False), Column("category", EnumText, nullable=False), Column("affected_binding", JSONText, nullable=False), Column("expected_value", JSONText, nullable=False), Column("observed_value", JSONText, nullable=False), Column("active", Integer, nullable=False), Column("created_at", UTCText(), nullable=False), Column("resolved_at", UTCText()))
 audit_events = owned("audit_events", Column("event_id", UUIDText, primary_key=True), Column("case_id", UUIDText, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False), Column("case_sequence", Integer, nullable=False), Column("command_id", UUIDText, nullable=False), Column("command_name", Text, nullable=False), Column("command_fingerprint", HashText, nullable=False), Column("actor", Text, nullable=False), Column("occurred_at", UTCText(), nullable=False), Column("target_ids", JSONText, nullable=False), Column("before_case_revision", Integer, nullable=False), Column("after_case_revision", Integer, nullable=False), Column("metadata", JSONText, nullable=False), Column("result", JSONText, nullable=False), UniqueConstraint("case_id", "case_sequence"), UniqueConstraint("case_id", "command_id"), CheckConstraint("case_sequence = after_case_revision"))
 
+# Workshop Protocol 1.0.0 is an additive Foundation capability.  It registers
+# its tables on this same metadata graph so Alembic, fresh-database creation,
+# and the canonical Foundation repository cannot silently diverge.
+from .workshop_protocol_storage import define_workshop_protocol_tables
+
+WORKSHOP_PROTOCOL_TABLES = define_workshop_protocol_tables(metadata)
+
 # Relationally expressible references are composite and case-scoped.  Cyclic
 # root/current-version constraints are deferred so a root and version can be
 # inserted atomically in either statement order within one unit of work.
@@ -121,6 +128,11 @@ BOOLEAN_COLUMNS = {
     ("projection_items", "implementation_required"),
     ("approvals", "later_review_required"),
     ("drift_findings", "active"),
+    ("workshop_guidance", "valid"),
+    ("workshop_review_narrations", "valid"),
+    ("workshop_decision_views", "current"),
+    ("workshop_artifact_reviews", "current"),
+    ("workshop_artifact_reviews", "confirmed"),
 }
 for table_name, column_name in BOOLEAN_COLUMNS:
     metadata.tables[table_name].append_constraint(CheckConstraint(f"{column_name} IN (0, 1)"))
@@ -535,6 +547,12 @@ class SqlAlchemyStore:
             "reconcile_operation": OperationResult, "submit_remote_snapshot": SnapshotResult,
         }
         for row in connection.execute(select(audit_events).where(audit_events.c.case_id == cid).order_by(audit_events.c.case_sequence)).mappings():
+            # Workshop Protocol 1.0.0 commands use their own generated receipt
+            # union and replay ledger.  They still share this canonical audit
+            # sequence, but must not be coerced into the legacy command-result
+            # models during restart hydration.
+            if row["command_name"].startswith("workshop."):
+                continue
             result = result_models[row["command_name"]].model_validate_json(row["result"])
             case.command_results[UUID(row["command_id"])] = (row["command_fingerprint"], result)
             if isinstance(result, OperationResult) and result.operation_id in case.operations:

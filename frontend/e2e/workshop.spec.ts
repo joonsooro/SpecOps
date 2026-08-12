@@ -77,6 +77,45 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/bootstrap", (route) => route.fulfill({ json: bootstrap }));
   await page.route("**/api/workshop", (route) => route.fulfill({ json: workshop }));
   await page.route("**/api/proposals/control", (route) => route.fulfill({ json: { status: "COMMITTED" } }));
+  await page.route("**/api/v4/cases/*/decision-review", (route) => route.fulfill({ json: null }));
+});
+
+test("renders the exact Foundation decision view used by Voice confirmation", async ({ page }) => {
+  const decisionReview = {
+    protocol_version: "1.0.0",
+    view_type: "DECISION_BATCH_REVIEW",
+    view_id: "99999999-9999-4999-8999-999999999999",
+    view_hash: `sha256:${"d".repeat(64)}`,
+    session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    based_on_case_revision: 12,
+    derived_from_cluster_ids: [],
+    items: [{
+      review_item_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      handle: "A",
+      pending_decision_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      pending_decision_version: 1,
+      classification: "PRODUCT",
+      exact_statement: "Use UTF-8 for every CSV export.",
+      rationale: "Consumers need one stable encoding.",
+      problem_origins: [{
+        problem_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        problem_version: 1,
+        problem_statement: "The export encoding was not confirmed.",
+        resolution_kind: "FULL",
+        evidence_summary: "The technical source specifies UTF-8.",
+      }],
+    }],
+    generated_at: "2026-08-12T12:00:00Z",
+  };
+  await page.unroute("**/api/v4/cases/*/decision-review");
+  await page.route("**/api/v4/cases/*/decision-review", (route) => route.fulfill({ json: decisionReview }));
+  await page.goto("/");
+  const review = page.getByRole("region", { name: "Decision batch" });
+  await expect(review).toBeVisible();
+  await expect(review.getByText("Use UTF-8 for every CSV export.")).toBeVisible();
+  await expect(review.getByText("The export encoding was not confirmed.")).toBeVisible();
+  await expect(review.getByText("VOICE BOUND")).toBeVisible();
+  await expect(review.getByRole("button")).toHaveCount(0);
 });
 
 test("renders the governed three-panel projection and focuses exact evidence", async ({ page }, testInfo) => {

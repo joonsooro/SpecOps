@@ -3,13 +3,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
+from pydantic import ValidationError
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from specops_workflow import SystemClock
 from specops_workflow.errors import DomainError
 from specops_workflow.models import QueryOne, UUIDListQuery
+from specops_workflow.workshop_protocol import WorkshopFoundationService
 
 from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
 from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
@@ -35,6 +37,9 @@ from .projections import PendingProposalView, ProposalControlInput, WorkshopProj
 from .sessions import WorkshopStore
 from .sources import SourceCatalog, SourceName
 from .telemetry import BrowserSpanInput, LatencySpan, TelemetryRecorder
+from .v4 import contracts as v4_contracts
+from .v4.api import install_workshop_protocol_api
+from .v4.openai_adapter import ProviderSourceUpload, StoredConversationOpenAIAdapter
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -91,6 +96,40 @@ def create_app(
     evidence_index = EvidenceIndexer().build(
         case_id=bootstrap.case_id,
         snapshots=evidence_snapshots,
+    )
+    v4_sources = tuple(
+        ProviderSourceUpload(
+            source=v4_contracts.SourceIdentity(
+                source_id=source_id,
+                role=role,
+                version=1,
+                payload_hash="sha256:" + catalog.digest(name),
+                canonical_locator=str(catalog.document(name).path),
+                filename=catalog.document(name).path.name,
+                media_type="text/markdown",
+            ),
+            content=catalog.read_bytes(name),
+        )
+        for source_id, role, name in (
+            (bootstrap.pm_source_id, v4_contracts.SourceRole.PM_SPEC, SourceName.PM_SPEC),
+            (
+                bootstrap.v4_technical_contract_source_id,
+                v4_contracts.SourceRole.TECHNICAL_CONTRACT,
+                SourceName.TECHNICAL_CONTRACT,
+            ),
+        )
+    )
+    v4_source_set_hash = StoredConversationOpenAIAdapter.source_set_hash(
+        tuple(item.source for item in v4_sources)
+    )
+    workshop_protocol_foundation = WorkshopFoundationService(
+        runtime_settings.specops_database_url,
+        now=runtime_clock.now,
+    )
+    workshop_protocol_foundation.register_case(
+        case_id=bootstrap.case_id,
+        session_id=DEMO_SESSION_ID,
+        source_set_hash=v4_source_set_hash,
     )
     voice_provider = live_provider or GeminiLiveProvider(
         api_key=runtime_settings.gemini_api_key.get_secret_value(),
@@ -160,6 +199,9 @@ def create_app(
     app.state.analyzer_business_context = analyzer_business_context
     app.state.finish_coordinator = finish_coordinator
     app.state.telemetry = telemetry
+    app.state.v4_source_uploads = v4_sources
+    app.state.v4_source_set_hash = v4_source_set_hash
+    install_workshop_protocol_api(app, workshop_protocol_foundation)
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:
@@ -186,8 +228,28 @@ def create_app(
         )
         return processed.committed
 
-    @app.post("/api/telemetry/spans", response_model=LatencySpan)
-    async def browser_latency_span(value: BrowserSpanInput) -> LatencySpan:
+    @app.post(
+        "/api/telemetry/spans",
+        response_model=LatencySpan,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {"schema": BrowserSpanInput.model_json_schema()}
+                },
+            }
+        },
+    )
+    async def browser_latency_span(request: Request) -> LatencySpan:
+        # FastAPI parses JSON into a Python dict before Pydantic validation.
+        # Strict UUID fields intentionally reject strings in that mode, while
+        # the same strict contract correctly accepts UUID JSON strings through
+        # ``model_validate_json``.  Parse the wire bytes at this boundary so a
+        # real browser request follows the same contract as generated clients.
+        try:
+            value = BrowserSpanInput.model_validate_json(await request.body(), strict=True)
+        except ValidationError:
+            raise HTTPException(status_code=422, detail="Invalid browser latency span") from None
         return app.state.telemetry.record_browser(app.state.session_id, value)
 
     @app.get("/api/workshop", response_model=WorkshopProjection)

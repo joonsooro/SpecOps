@@ -1,0 +1,985 @@
+{
+  "$defs": {
+    "CandidateEntityRef": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "ref_kind": {
+          "const": "CANDIDATE_KEY",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref_kind",
+        "candidate_key"
+      ],
+      "type": "object"
+    },
+    "CapturePolicy": {
+      "enum": [
+        "CLARIFICATION_ONLY",
+        "LOW_RISK_FACT",
+        "BINDING_DECISION"
+      ],
+      "type": "string"
+    },
+    "ClusterCouplingType": {
+      "enum": [
+        "SHARED_OUTCOME",
+        "SHARED_CONSTRAINT",
+        "DECISION_DEPENDENCY",
+        "MUTUAL_EXCLUSION",
+        "COMMON_EVIDENCE",
+        "WORKFLOW_SEQUENCE"
+      ],
+      "type": "string"
+    },
+    "DecisionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "alternatives_considered": {
+          "items": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "classification": {
+          "$ref": "#/$defs/Domain"
+        },
+        "evidence_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array"
+        },
+        "existing_decision_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FoundationEntityRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "problem_links": {
+          "items": {
+            "$ref": "#/$defs/ProblemResolutionLink"
+          },
+          "maxItems": 25,
+          "minItems": 1,
+          "type": "array"
+        },
+        "rationale": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "requires_human_confirmation": {
+          "const": true,
+          "type": "boolean"
+        },
+        "statement": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "existing_decision_ref",
+        "classification",
+        "statement",
+        "rationale",
+        "alternatives_considered",
+        "problem_links",
+        "evidence_refs",
+        "requires_human_confirmation"
+      ],
+      "type": "object"
+    },
+    "DocumentAnchorLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "locator_kind": {
+          "const": "DOCUMENT_ANCHOR",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "anchor"
+      ],
+      "type": "object"
+    },
+    "Domain": {
+      "enum": [
+        "PRODUCT",
+        "TECHNICAL",
+        "CROSS_DOMAIN",
+        "POLICY",
+        "SECURITY",
+        "PRIVACY",
+        "DATA",
+        "ACCEPTANCE"
+      ],
+      "type": "string"
+    },
+    "EvidenceAssessment": {
+      "enum": [
+        "SUPPORTS",
+        "SUGGESTS",
+        "CONTRADICTS",
+        "INSUFFICIENT",
+        "AMBIGUOUS"
+      ],
+      "type": "string"
+    },
+    "EvidenceCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceLineLocator"
+            },
+            {
+              "$ref": "#/$defs/JsonPointerLocator"
+            },
+            {
+              "$ref": "#/$defs/DocumentAnchorLocator"
+            },
+            {
+              "$ref": "#/$defs/QuoteSearchLocator"
+            }
+          ]
+        },
+        "quoted_text_candidate": {
+          "anyOf": [
+            {
+              "maxLength": 8000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relevance_claim": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_role": {
+          "$ref": "#/$defs/SourceRole"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "source_role",
+        "locator",
+        "relevance_claim",
+        "quoted_text_candidate"
+      ],
+      "type": "object"
+    },
+    "FoundationEntityRef": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_version": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "foundation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ref_kind": {
+          "const": "FOUNDATION_ID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref_kind",
+        "foundation_id",
+        "expected_version"
+      ],
+      "type": "object"
+    },
+    "JsonPointerLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "locator_kind": {
+          "const": "JSON_POINTER",
+          "type": "string"
+        },
+        "pointer": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "pointer"
+      ],
+      "type": "object"
+    },
+    "LowRiskFactCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "normalized_value": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_question_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateEntityRef"
+            },
+            {
+              "$ref": "#/$defs/FoundationEntityRef"
+            }
+          ]
+        },
+        "transcript_event_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "value_type": {
+          "$ref": "#/$defs/NormalizedScalarType"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "source_question_ref",
+        "transcript_event_id",
+        "value_type",
+        "normalized_value",
+        "confidence"
+      ],
+      "type": "object"
+    },
+    "NormalizedScalarType": {
+      "enum": [
+        "TEXT",
+        "BOOLEAN",
+        "INTEGER",
+        "DECIMAL",
+        "ENUM"
+      ],
+      "type": "string"
+    },
+    "ProblemKind": {
+      "enum": [
+        "AMBIGUITY",
+        "MISSING_DECISION",
+        "CONTRADICTION",
+        "RISK",
+        "MISSING_ACCEPTANCE",
+        "MISSING_AUTHORITY",
+        "MISSING_EVIDENCE"
+      ],
+      "type": "string"
+    },
+    "ProblemResolutionAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "assessment": {
+          "enum": [
+            "RESOLVED",
+            "PARTIALLY_RESOLVED",
+            "UNRESOLVED",
+            "CONTRADICTED"
+          ],
+          "type": "string"
+        },
+        "explanation": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "problem_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateEntityRef"
+            },
+            {
+              "$ref": "#/$defs/FoundationEntityRef"
+            }
+          ]
+        }
+      },
+      "required": [
+        "problem_ref",
+        "assessment",
+        "explanation"
+      ],
+      "type": "object"
+    },
+    "ProblemResolutionKind": {
+      "enum": [
+        "FULL",
+        "PARTIAL",
+        "CONTRIBUTES",
+        "DOES_NOT_RESOLVE"
+      ],
+      "type": "string"
+    },
+    "ProblemResolutionLink": {
+      "additionalProperties": false,
+      "properties": {
+        "problem_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateEntityRef"
+            },
+            {
+              "$ref": "#/$defs/FoundationEntityRef"
+            }
+          ]
+        },
+        "resolution_kind": {
+          "$ref": "#/$defs/ProblemResolutionKind"
+        }
+      },
+      "required": [
+        "problem_ref",
+        "resolution_kind"
+      ],
+      "type": "object"
+    },
+    "QuestionShape": {
+      "enum": [
+        "OPEN_TEXT",
+        "CLOSED_BOOLEAN",
+        "CLOSED_ENUM",
+        "CLOSED_INTEGER",
+        "CLOSED_DECIMAL",
+        "CLOSED_TEXT"
+      ],
+      "type": "string"
+    },
+    "QuoteSearchLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "exact_quote": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "locator_kind": {
+          "const": "QUOTE_SEARCH",
+          "type": "string"
+        },
+        "occurrence": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "exact_quote",
+        "occurrence"
+      ],
+      "type": "object"
+    },
+    "SemanticEvidenceFindingCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "assessment": {
+          "$ref": "#/$defs/EvidenceAssessment"
+        },
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "claim_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateEntityRef"
+            },
+            {
+              "$ref": "#/$defs/FoundationEntityRef"
+            }
+          ]
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "evidence_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CandidateEntityRef"
+            },
+            {
+              "$ref": "#/$defs/FoundationEntityRef"
+            }
+          ]
+        },
+        "explanation": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "claim_ref",
+        "evidence_ref",
+        "assessment",
+        "confidence",
+        "explanation"
+      ],
+      "type": "object"
+    },
+    "Severity": {
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ],
+      "type": "string"
+    },
+    "SourceLineLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "end_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "locator_kind": {
+          "const": "SOURCE_LINES",
+          "type": "string"
+        },
+        "start_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "locator_kind",
+        "start_line",
+        "end_line"
+      ],
+      "type": "object"
+    },
+    "SourceRole": {
+      "enum": [
+        "PM_SPEC",
+        "TECHNICAL_CONTRACT"
+      ],
+      "type": "string"
+    },
+    "SuggestedConfirmationMode": {
+      "enum": [
+        "TOGETHER",
+        "SEPARATE",
+        "CONDITIONAL"
+      ],
+      "type": "string"
+    },
+    "TurnDisposition": {
+      "enum": [
+        "NO_SEMANTIC_CHANGE",
+        "SUBSTANTIVE"
+      ],
+      "type": "string"
+    },
+    "TurnProblemCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "consequence": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "domain": {
+          "$ref": "#/$defs/Domain"
+        },
+        "evidence_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 25,
+          "minItems": 1,
+          "type": "array"
+        },
+        "problem_kind": {
+          "$ref": "#/$defs/ProblemKind"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "statement": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "problem_kind",
+        "domain",
+        "severity",
+        "statement",
+        "consequence",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "TurnProblemClusterCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "coupling_reason": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "coupling_type": {
+          "$ref": "#/$defs/ClusterCouplingType"
+        },
+        "problem_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 20,
+          "minItems": 2,
+          "type": "array"
+        },
+        "suggested_confirmation_mode": {
+          "$ref": "#/$defs/SuggestedConfirmationMode"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "problem_refs",
+        "coupling_type",
+        "coupling_reason",
+        "suggested_confirmation_mode"
+      ],
+      "type": "object"
+    },
+    "TurnProblemClusterRevisionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "cluster_ref": {
+          "$ref": "#/$defs/FoundationEntityRef"
+        },
+        "coupling_reason": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "coupling_type": {
+          "$ref": "#/$defs/ClusterCouplingType"
+        },
+        "problem_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 20,
+          "minItems": 2,
+          "type": "array"
+        },
+        "suggested_confirmation_mode": {
+          "$ref": "#/$defs/SuggestedConfirmationMode"
+        }
+      },
+      "required": [
+        "cluster_ref",
+        "problem_refs",
+        "coupling_type",
+        "coupling_reason",
+        "suggested_confirmation_mode"
+      ],
+      "type": "object"
+    },
+    "TurnQuestionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "addresses_problem_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "answer_options": {
+          "items": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "candidate_key": {
+          "maxLength": 96,
+          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+          "type": "string"
+        },
+        "capture_policy": {
+          "$ref": "#/$defs/CapturePolicy"
+        },
+        "prerequisite_problem_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "question_shape": {
+          "$ref": "#/$defs/QuestionShape"
+        },
+        "rationale": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "safe_without_current_turn_interpretation": {
+          "type": "boolean"
+        },
+        "text": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "text",
+        "rationale",
+        "question_shape",
+        "capture_policy",
+        "answer_options",
+        "addresses_problem_refs",
+        "prerequisite_problem_refs",
+        "safe_without_current_turn_interpretation"
+      ],
+      "type": "object"
+    },
+    "TurnQuestionRevisionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "addresses_problem_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "answer_options": {
+          "items": {
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "capture_policy": {
+          "$ref": "#/$defs/CapturePolicy"
+        },
+        "prerequisite_problem_refs": {
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CandidateEntityRef"
+              },
+              {
+                "$ref": "#/$defs/FoundationEntityRef"
+              }
+            ]
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "question_ref": {
+          "$ref": "#/$defs/FoundationEntityRef"
+        },
+        "question_shape": {
+          "$ref": "#/$defs/QuestionShape"
+        },
+        "rationale": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "safe_without_current_turn_interpretation": {
+          "type": "boolean"
+        },
+        "text": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_ref",
+        "text",
+        "rationale",
+        "question_shape",
+        "capture_policy",
+        "answer_options",
+        "addresses_problem_refs",
+        "prerequisite_problem_refs",
+        "safe_without_current_turn_interpretation"
+      ],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "analyzer_run_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "based_on_case_revision": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "context_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "decisions": {
+      "items": {
+        "$ref": "#/$defs/DecisionCandidate"
+      },
+      "maxItems": 50,
+      "type": "array"
+    },
+    "disposition": {
+      "$ref": "#/$defs/TurnDisposition"
+    },
+    "evidence_candidates": {
+      "items": {
+        "$ref": "#/$defs/EvidenceCandidate"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "evidence_findings": {
+      "items": {
+        "$ref": "#/$defs/SemanticEvidenceFindingCandidate"
+      },
+      "maxItems": 200,
+      "type": "array"
+    },
+    "low_risk_facts": {
+      "items": {
+        "$ref": "#/$defs/LowRiskFactCandidate"
+      },
+      "maxItems": 50,
+      "type": "array"
+    },
+    "new_problem_clusters": {
+      "items": {
+        "$ref": "#/$defs/TurnProblemClusterCandidate"
+      },
+      "maxItems": 50,
+      "type": "array"
+    },
+    "new_problems": {
+      "items": {
+        "$ref": "#/$defs/TurnProblemCandidate"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "new_questions": {
+      "items": {
+        "$ref": "#/$defs/TurnQuestionCandidate"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "no_change_reason_code": {
+      "anyOf": [
+        {
+          "enum": [
+            "SOCIAL_ONLY",
+            "REPETITION",
+            "NON_FINAL",
+            "OUT_OF_SCOPE"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "output_type": {
+      "const": "TURN_ANALYSIS_CANDIDATE",
+      "type": "string"
+    },
+    "problem_assessments": {
+      "items": {
+        "$ref": "#/$defs/ProblemResolutionAssessment"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "type": "string"
+    },
+    "request_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "revised_problem_clusters": {
+      "items": {
+        "$ref": "#/$defs/TurnProblemClusterRevisionCandidate"
+      },
+      "maxItems": 50,
+      "type": "array"
+    },
+    "revised_questions": {
+      "items": {
+        "$ref": "#/$defs/TurnQuestionRevisionCandidate"
+      },
+      "maxItems": 100,
+      "type": "array"
+    },
+    "source_set_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "transcript_event_id": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "output_type",
+    "analyzer_run_id",
+    "context_id",
+    "request_hash",
+    "source_set_hash",
+    "transcript_event_id",
+    "based_on_case_revision",
+    "disposition",
+    "no_change_reason_code",
+    "evidence_candidates",
+    "new_problems",
+    "new_problem_clusters",
+    "revised_problem_clusters",
+    "new_questions",
+    "revised_questions",
+    "low_risk_facts",
+    "decisions",
+    "problem_assessments",
+    "evidence_findings"
+  ],
+  "type": "object"
+}

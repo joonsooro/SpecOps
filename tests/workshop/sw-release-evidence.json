@@ -15,10 +15,6 @@
     {
       "name": "playwright",
       "status": "PASS"
-    },
-    {
-      "name": "SW-EV-024-live",
-      "status": "PASS"
     }
   ],
   "evidence": {
@@ -33,15 +29,9 @@
     "SW-EV-002": [
       {
         "kind": "pytest",
-        "name": "test_authorized_terra_context_is_exact_and_excludes_contract",
+        "name": "test_s2_c1_native_schemas_and_two_block_egress_are_identity_free",
         "outcome": "PASS",
-        "path": "tests/workshop/test_feature_20_release.py"
-      },
-      {
-        "kind": "pytest",
-        "name": "test_terra_gateway_minimizes_committed_governance_identifiers",
-        "outcome": "PASS",
-        "path": "tests/workshop/test_feature_20_release.py"
+        "path": "tests/workshop/test_feature_24_productive_turn.py"
       }
     ],
     "SW-EV-003": [
@@ -276,12 +266,12 @@
       {
         "kind": "live",
         "name": "real Gemini audio plus Terra decision and explicit governed commit",
-        "outcome": "PASS",
+        "outcome": "NOT_RUN",
         "path": "tests/workshop/live_workshop_probe.py"
       }
     ]
   },
-  "generated_at": "2026-08-09T12:49:56.058269Z",
+  "generated_at": "2026-08-12T22:07:32.615386Z",
   "inventory": [
     "SW-EV-001",
     "SW-EV-002",
@@ -308,7 +298,7 @@
     "SW-EV-023",
     "SW-EV-024"
   ],
-  "mode": "credentialed",
+  "mode": "deterministic",
   "passed": true,
   "schema_version": 1
 }

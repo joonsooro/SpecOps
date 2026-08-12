@@ -104,6 +104,19 @@ h3, h4 { font-weight: 650; }
 .rollup > div:last-child { border: 0; }
 .rollup span { display: block; color: var(--muted); font: 700 .55rem "SFMono-Regular", Menlo, monospace; text-transform: uppercase; }
 .rollup strong { display: block; margin-top: .25rem; font: 500 1.6rem "Iowan Old Style", Charter, serif; }
+.decision-review-view { margin: 1rem 0 1.35rem; border: 1px solid var(--binding-blue); background: #f6f8ff; }
+.decision-review-view > header { display: flex; justify-content: space-between; gap: .7rem; padding: .75rem; border-bottom: 1px solid #b9c8e5; }
+.decision-review-view > header p { margin: 0; color: var(--binding-blue); font: 800 .54rem "SFMono-Regular", Menlo, monospace; text-transform: uppercase; }
+.decision-review-view > header h3 { margin: .25rem 0 0; font: 600 1rem "Iowan Old Style", Charter, serif; }
+.decision-review-view > header span { color: var(--decision-ochre); font: 800 .54rem "SFMono-Regular", Menlo, monospace; }
+.decision-review-view ol { list-style: none; margin: 0; padding: 0; }
+.decision-review-view li { display: grid; grid-template-columns: 2rem 1fr; gap: .6rem; padding: .75rem; border-bottom: 1px solid #d6ddec; }
+.decision-review-view li > strong { display: grid; place-items: center; width: 1.75rem; height: 1.75rem; background: var(--binding-blue); color: white; font: 800 .72rem "SFMono-Regular", Menlo, monospace; }
+.decision-review-view li p { margin: 0; font-size: .74rem; font-weight: 700; }
+.decision-review-view li small, .decision-review-view li em { display: block; margin-top: .3rem; color: var(--muted); font-size: .62rem; line-height: 1.4; }
+.decision-review-view li em { padding-left: .45rem; border-left: .14rem solid var(--evidence-cyan); font-style: normal; }
+.decision-review-view footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .35rem; padding: .5rem .75rem; }
+.decision-review-view footer code { color: var(--muted); font: .52rem "SFMono-Regular", Menlo, monospace; }
 .proposal-sheet { position: relative; margin: 1.15rem 0 1.65rem; padding: 1rem .85rem 1rem 1.15rem; background: #fff; border: 1px solid #93a5a0; clip-path: polygon(0 0, calc(100% - 1rem) 0, 100% 1rem, 100% 100%, 0 100%); }
 .proposal-sheet::after { content: ""; position: absolute; top: 0; right: 0; width: 1rem; height: 1rem; background: #dfe7e4; border-left: 1px solid #93a5a0; border-bottom: 1px solid #93a5a0; }
 .proposal-binding { position: absolute; left: -.2rem; top: 1rem; bottom: 1rem; width: .4rem; display: flex; flex-direction: column; justify-content: space-around; }

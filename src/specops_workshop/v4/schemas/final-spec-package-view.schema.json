@@ -1,0 +1,994 @@
+{
+  "$defs": {
+    "acceptanceCheckView": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_pointer": {
+          "$ref": "#/$defs/canonicalPointer"
+        },
+        "evidence_method": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefList"
+        },
+        "given": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "negative_assertions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "then": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "when": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "type",
+        "given",
+        "when",
+        "then",
+        "negative_assertions",
+        "evidence_method",
+        "evidence_refs",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "approvalView": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_ref": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confirmed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "domain",
+        "status",
+        "actor_ref",
+        "confirmed_at"
+      ],
+      "type": "object"
+    },
+    "canonicalPointer": {
+      "pattern": "^/payload/",
+      "type": "string"
+    },
+    "decisionView": {
+      "additionalProperties": false,
+      "properties": {
+        "alternatives_considered": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "canonical_pointer": {
+          "$ref": "#/$defs/canonicalPointer"
+        },
+        "classification": {
+          "enum": [
+            "product",
+            "technical",
+            "cross_domain",
+            "policy"
+          ]
+        },
+        "confirmation_binding": {
+          "oneOf": [
+            {
+              "$ref": "spec-package-payload.schema.json#/$defs/decisionConfirmationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "decision_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefList"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "question": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "confirmed",
+            "deferred",
+            "superseded"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "decision_version",
+        "classification",
+        "domains",
+        "question",
+        "decision",
+        "rationale",
+        "alternatives_considered",
+        "status",
+        "confirmation_binding",
+        "evidence_refs",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "dependencyView": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_pointer": {
+          "$ref": "#/$defs/canonicalPointer"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefList"
+        },
+        "failure_impact": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "purpose": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "type",
+        "purpose",
+        "status",
+        "owner",
+        "failure_impact",
+        "evidence_refs",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "evidenceRefList": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "evidenceView": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evidence_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "focus_target": {
+          "$ref": "#/$defs/focusTarget"
+        },
+        "locator_label": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "semantic_assessments": {
+          "items": {
+            "$ref": "#/$defs/semanticAssessmentView"
+          },
+          "type": "array"
+        },
+        "source_document_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "source_document_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "source_document_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_document_version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "source_document_id",
+        "source_document_name",
+        "source_document_version",
+        "source_document_hash",
+        "locator_label",
+        "claim_refs",
+        "semantic_assessments",
+        "focus_target"
+      ],
+      "type": "object"
+    },
+    "focusTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "end_line": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "json_pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "enum": [
+            "source_lines",
+            "json_pointer",
+            "document_anchor",
+            "quote_search"
+          ]
+        },
+        "quote": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_line": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "start_line",
+        "end_line",
+        "json_pointer",
+        "anchor",
+        "quote"
+      ],
+      "type": "object"
+    },
+    "itemGovernanceView": {
+      "additionalProperties": false,
+      "properties": {
+        "approvals": {
+          "items": {
+            "$ref": "#/$defs/approvalView"
+          },
+          "type": "array"
+        },
+        "last_committed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "readiness": {
+          "enum": [
+            "READY",
+            "NEEDS_CLARIFICATION",
+            "BLOCKED",
+            "FORMULATING"
+          ]
+        },
+        "review_obligation": {
+          "enum": [
+            "NONE",
+            "LATER_REVIEW",
+            "DECISION_REQUIRED"
+          ]
+        },
+        "review_obligations": {
+          "items": {
+            "$ref": "#/$defs/reviewObligationView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "readiness",
+        "review_obligation",
+        "approvals",
+        "review_obligations",
+        "last_committed_at"
+      ],
+      "type": "object"
+    },
+    "itemView": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_checks": {
+          "items": {
+            "$ref": "#/$defs/acceptanceCheckView"
+          },
+          "type": "array"
+        },
+        "canonical_pointer": {
+          "$ref": "#/$defs/canonicalPointer"
+        },
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/decisionView"
+          },
+          "type": "array"
+        },
+        "dependencies": {
+          "items": {
+            "$ref": "#/$defs/dependencyView"
+          },
+          "type": "array"
+        },
+        "display_order": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefList"
+        },
+        "governance": {
+          "$ref": "#/$defs/itemGovernanceView"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "item_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "requirements": {
+          "items": {
+            "$ref": "#/$defs/requirementView"
+          },
+          "type": "array"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "item_version",
+        "title",
+        "summary",
+        "domains",
+        "display_order",
+        "requirements",
+        "decisions",
+        "acceptance_checks",
+        "dependencies",
+        "governance",
+        "evidence_refs",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "nonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "packageHeader": {
+      "additionalProperties": false,
+      "properties": {
+        "last_confirmed_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overall_readiness": {
+          "enum": [
+            "READY",
+            "NEEDS_CLARIFICATION",
+            "BLOCKED",
+            "FORMULATING"
+          ]
+        },
+        "package_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "readiness_counts": {
+          "$ref": "#/$defs/readinessCounts"
+        },
+        "review_obligation_counts": {
+          "$ref": "#/$defs/reviewObligationCounts"
+        },
+        "short_payload_hash": {
+          "pattern": "^[a-f0-9]{8,16}$",
+          "type": "string"
+        },
+        "version_label": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "package_name",
+        "version_label",
+        "overall_readiness",
+        "last_confirmed_at",
+        "readiness_counts",
+        "review_obligation_counts",
+        "short_payload_hash"
+      ],
+      "type": "object"
+    },
+    "productThesisView": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_pointer": {
+          "$ref": "#/$defs/canonicalPointer"
+        },
+        "customer_promise": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "feature": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "negative_contract": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "opportunity": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "primary_customer": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "problem_statement": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "product": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "product",
+        "feature",
+        "primary_customer",
+        "problem_statement",
+        "opportunity",
+        "customer_promise",
+        "negative_contract",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "projectionIntegrity": {
+      "additionalProperties": false,
+      "properties": {
+        "all_material_items_included": {
+          "type": "boolean"
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "profile_id": {
+          "const": "artifact-review-view"
+        },
+        "profile_version": {
+          "const": "3.0.0"
+        },
+        "view_hash": {
+          "description": "SHA-256 over the RFC 8785 canonical form of the complete read model except projection_integrity.view_hash. The hashed content includes view_id.",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "view_id": {
+          "description": "Must equal the top-level view_id.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_id",
+        "profile_version",
+        "view_id",
+        "payload_hash",
+        "view_hash",
+        "all_material_items_included"
+      ],
+      "type": "object"
+    },
+    "queueEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_pointer": {
+          "$ref": "#/$defs/canonicalPointer"
+        },
+        "due_date": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "related_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "reason",
+        "owner",
+        "due_date",
+        "related_refs",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "queues": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking_ambiguities": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        },
+        "decisions_requiring_answers": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        },
+        "excluded_or_deferred_scope": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        },
+        "later_review": {
+          "items": {
+            "$ref": "#/$defs/queueEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "blocking_ambiguities",
+        "decisions_requiring_answers",
+        "later_review",
+        "excluded_or_deferred_scope"
+      ],
+      "type": "object"
+    },
+    "readinessCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "blocked": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "formulating": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "needs_clarification": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ready": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ready",
+        "needs_clarification",
+        "blocked",
+        "formulating"
+      ],
+      "type": "object"
+    },
+    "requirementView": {
+      "additionalProperties": false,
+      "properties": {
+        "behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "canonical_pointer": {
+          "$ref": "#/$defs/canonicalPointer"
+        },
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefList"
+        },
+        "exclusions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "preconditions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "priority": {
+          "enum": [
+            "must",
+            "should",
+            "could"
+          ]
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "trigger": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "priority",
+        "domains",
+        "trigger",
+        "preconditions",
+        "behaviour",
+        "outcome",
+        "exclusions",
+        "evidence_refs",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "reviewObligationCounts": {
+      "additionalProperties": false,
+      "properties": {
+        "decision_required": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "later_review": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "none": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "none",
+        "later_review",
+        "decision_required"
+      ],
+      "type": "object"
+    },
+    "reviewObligationView": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "type": "boolean"
+        },
+        "due_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "obligation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "required_evidence": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "obligation_id",
+        "type",
+        "status",
+        "blocking",
+        "owner",
+        "due_date",
+        "required_evidence"
+      ],
+      "type": "object"
+    },
+    "semanticAssessmentView": {
+      "additionalProperties": false,
+      "properties": {
+        "assessment": {
+          "enum": [
+            "SUPPORTS",
+            "SUGGESTS",
+            "CONTRADICTS",
+            "INSUFFICIENT",
+            "AMBIGUOUS"
+          ]
+        },
+        "claim_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "finding_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "finding_version": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "finding_id",
+        "finding_version",
+        "claim_ref",
+        "assessment",
+        "confidence"
+      ],
+      "type": "object"
+    },
+    "sourceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "artifact_key": {
+          "pattern": "^SPEC-[A-Z0-9][A-Z0-9-]*$",
+          "type": "string"
+        },
+        "artifact_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "case_revision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lifecycle_status": {
+          "enum": [
+            "draft",
+            "in_review",
+            "confirmed",
+            "superseded"
+          ]
+        },
+        "payload_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "record_revision": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "artifact_key",
+        "artifact_version",
+        "record_revision",
+        "payload_hash",
+        "lifecycle_status",
+        "case_revision"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.local/schemas/final-spec-package-view.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Read-only, denormalized JSON projection for the existing FastAPI-to-React runtime. It is never canonical state and contains no UI component instructions.",
+  "properties": {
+    "evidence_index": {
+      "items": {
+        "$ref": "#/$defs/evidenceView"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "header": {
+      "$ref": "#/$defs/packageHeader"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/itemView"
+      },
+      "type": "array"
+    },
+    "mode": {
+      "enum": [
+        "draft",
+        "review",
+        "final",
+        "diff"
+      ]
+    },
+    "product_thesis": {
+      "$ref": "#/$defs/productThesisView"
+    },
+    "projection_integrity": {
+      "$ref": "#/$defs/projectionIntegrity"
+    },
+    "queues": {
+      "$ref": "#/$defs/queues"
+    },
+    "source": {
+      "$ref": "#/$defs/sourceBinding"
+    },
+    "view_id": {
+      "description": "Foundation-minted immutable identifier for this materialized projection. A regenerated projection receives a new view_id and therefore a new view_hash even when its displayed semantic content is unchanged.",
+      "format": "uuid",
+      "type": "string"
+    },
+    "view_schema_version": {
+      "const": "3.0.0"
+    },
+    "view_type": {
+      "const": "spec_package_view"
+    }
+  },
+  "required": [
+    "view_schema_version",
+    "view_type",
+    "view_id",
+    "mode",
+    "source",
+    "generated_at",
+    "header",
+    "product_thesis",
+    "items",
+    "queues",
+    "evidence_index",
+    "projection_integrity"
+  ],
+  "title": "Spec Package Read Model",
+  "type": "object"
+}

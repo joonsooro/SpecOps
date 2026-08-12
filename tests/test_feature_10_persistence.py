@@ -17,7 +17,7 @@ def test_fresh_migration_fk_schema_and_committed_reload(tmp_path):
     engine = engine_for(url)
     names = set(inspect(engine).get_table_names())
     assert set(metadata.tables) == names - {"alembic_version"}
-    assert len(metadata.tables) == 25
+    assert len(metadata.tables) == 39
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         triggers = {row[0] for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
@@ -30,4 +30,3 @@ def test_fresh_migration_fk_schema_and_committed_reload(tmp_path):
     view = reopened.get_workflow_view(QueryOne(case_id=case_id, acting_actor_id=pm))
     assert view.case_id == case_id and view.revision == 1
     assert len(reopened.list_audit_events(AuditQuery(case_id=case_id, acting_actor_id=pm)).items) == 1
-

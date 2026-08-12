@@ -1,0 +1,76 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "analyzer_run_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "based_on_case_revision": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "candidate_payload_json": {
+      "maxLength": 2000000,
+      "minLength": 2,
+      "type": "string"
+    },
+    "context_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "foundation_artifact_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "identity_plan_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "identity_plan_version": {
+      "maximum": 9223372036854775807,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "output_type": {
+      "const": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+      "type": "string"
+    },
+    "payload_schema_id": {
+      "const": "spec-package-payload",
+      "type": "string"
+    },
+    "payload_schema_version": {
+      "const": "4.0.0",
+      "type": "string"
+    },
+    "request_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "semantic_state_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_set_hash": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "analyzer_run_id",
+    "context_id",
+    "request_hash",
+    "source_set_hash",
+    "based_on_case_revision",
+    "foundation_artifact_id",
+    "identity_plan_id",
+    "identity_plan_version",
+    "semantic_state_hash",
+    "candidate_payload_json",
+    "output_type",
+    "payload_schema_id",
+    "payload_schema_version"
+  ],
+  "type": "object"
+}

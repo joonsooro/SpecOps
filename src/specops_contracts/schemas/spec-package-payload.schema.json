@@ -1,0 +1,1834 @@
+{
+  "$defs": {
+    "acceptanceCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_method": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "given": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "negative_assertions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "requirement_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scenario_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "then": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "enum": [
+            "scenario",
+            "invariant",
+            "boundary",
+            "security",
+            "quality"
+          ]
+        },
+        "when": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "type",
+        "given",
+        "when",
+        "then",
+        "negative_assertions",
+        "requirement_refs",
+        "scenario_refs",
+        "evidence_method"
+      ],
+      "type": "object"
+    },
+    "actor": {
+      "additionalProperties": false,
+      "properties": {
+        "authority_domains": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "description": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "permissions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "responsibilities": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "responsibilities",
+        "permissions",
+        "authority_domains",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "artifactRef": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "artifactRefs": {
+      "items": {
+        "$ref": "#/$defs/artifactRef"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "behaviourContract": {
+      "additionalProperties": false,
+      "properties": {
+        "always": {
+          "items": {
+            "$ref": "#/$defs/behaviourRule"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "ask_first": {
+          "items": {
+            "$ref": "#/$defs/behaviourRule"
+          },
+          "type": "array"
+        },
+        "never": {
+          "items": {
+            "$ref": "#/$defs/behaviourRule"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "always",
+        "ask_first",
+        "never"
+      ],
+      "type": "object"
+    },
+    "behaviourRule": {
+      "additionalProperties": false,
+      "properties": {
+        "decision_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "always",
+            "ask_first",
+            "never"
+          ]
+        },
+        "obligation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "requirement_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "subject": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "trigger": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "mode",
+        "subject",
+        "trigger",
+        "obligation",
+        "reason",
+        "requirement_refs",
+        "decision_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "boundary": {
+      "additionalProperties": false,
+      "properties": {
+        "dimension": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "inside": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "outside": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "dimension",
+        "inside",
+        "outside",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "constraint": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "business",
+            "technical",
+            "compliance",
+            "operational",
+            "platform"
+          ]
+        },
+        "decision_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "negotiability": {
+          "enum": [
+            "binding",
+            "reviewable"
+          ]
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "statement": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "statement",
+        "rationale",
+        "negotiability",
+        "decision_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "dataRule": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_check_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "classification": {
+          "enum": [
+            "public",
+            "internal",
+            "confidential",
+            "restricted"
+          ]
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "null_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "requirement_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "retention_expectation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "semantic_rule": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_of_truth": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "subject": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "subject",
+        "semantic_rule",
+        "source_of_truth",
+        "classification",
+        "null_behaviour",
+        "retention_expectation",
+        "requirement_refs",
+        "acceptance_check_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "decision": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "confirmation_binding": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "status": {
+                "const": "confirmed"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "confirmation_binding": {
+                "$ref": "#/$defs/decisionConfirmationBinding"
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "affected_refs": {
+          "$ref": "#/$defs/artifactRefs"
+        },
+        "alternatives_considered": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "authority": {
+          "$ref": "#/$defs/decisionAuthority"
+        },
+        "classification": {
+          "enum": [
+            "product",
+            "technical",
+            "cross_domain",
+            "policy"
+          ]
+        },
+        "confirmation_binding": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/decisionConfirmationBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "decision_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "domains": {
+          "items": {
+            "enum": [
+              "business",
+              "product",
+              "experience",
+              "data",
+              "technical",
+              "security",
+              "privacy",
+              "compliance",
+              "operations",
+              "cross_domain"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "question": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "confirmed",
+            "deferred",
+            "superseded"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "decision_version",
+        "question",
+        "decision",
+        "classification",
+        "domains",
+        "rationale",
+        "alternatives_considered",
+        "status",
+        "authority",
+        "confirmation_binding",
+        "affected_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "decisionAuthority": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "delegation_ref": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "foundation_validation_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "actor_ref",
+        "domain",
+        "delegation_ref",
+        "foundation_validation_id"
+      ],
+      "type": "object"
+    },
+    "decisionConfirmationBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "authority_validation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confirmation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confirmed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "confirmed_case_revision": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "confirmed_decision_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confirmed_decision_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "decision_batch_view_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "decision_batch_view_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "review_item_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "transcript_event_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "confirmation_id",
+        "confirmed_decision_id",
+        "confirmed_decision_version",
+        "decision_batch_view_id",
+        "decision_batch_view_hash",
+        "review_item_id",
+        "confirmed_case_revision",
+        "actor_ref",
+        "authority_validation_id",
+        "transcript_event_id",
+        "confirmed_at"
+      ],
+      "type": "object"
+    },
+    "dependency": {
+      "additionalProperties": false,
+      "properties": {
+        "constraint_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "due_date": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "failure_impact": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "purpose": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "confirmed",
+            "assumed",
+            "unavailable",
+            "open"
+          ]
+        },
+        "type": {
+          "enum": [
+            "system",
+            "team",
+            "vendor",
+            "data",
+            "policy",
+            "credential"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "type",
+        "purpose",
+        "status",
+        "owner",
+        "due_date",
+        "failure_impact",
+        "constraint_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "evidenceItem": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "excerpt_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "locator": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "source_id": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "source_id",
+        "source_hash",
+        "locator",
+        "excerpt_hash",
+        "claim_refs"
+      ],
+      "type": "object"
+    },
+    "evidenceRefs": {
+      "items": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "experienceState": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_condition": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "recovery": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "requirement_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scenario_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "state": {
+          "enum": [
+            "initial",
+            "loading",
+            "empty",
+            "success",
+            "partial",
+            "failure",
+            "unauthorized",
+            "expired",
+            "disabled"
+          ]
+        },
+        "surface": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "user_visible_behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "surface",
+        "state",
+        "entry_condition",
+        "user_visible_behaviour",
+        "recovery",
+        "requirement_refs",
+        "scenario_refs"
+      ],
+      "type": "object"
+    },
+    "glossaryTerm": {
+      "additionalProperties": false,
+      "properties": {
+        "boundaries": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "definition": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "term": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "term",
+        "definition",
+        "boundaries",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "journey": {
+      "additionalProperties": false,
+      "properties": {
+        "alternative_scenario_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "preconditions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "primary_actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "requirement_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/journeyStep"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "successful_outcome": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "trigger": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "primary_actor_ref",
+        "trigger",
+        "preconditions",
+        "steps",
+        "successful_outcome",
+        "alternative_scenario_refs",
+        "requirement_refs"
+      ],
+      "type": "object"
+    },
+    "journeyStep": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "observable_result": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "sequence": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "actor_ref",
+        "action",
+        "observable_result"
+      ],
+      "type": "object"
+    },
+    "metric": {
+      "additionalProperties": false,
+      "properties": {
+        "baseline": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "direction": {
+          "enum": [
+            "increase",
+            "decrease",
+            "maintain",
+            "equal"
+          ]
+        },
+        "measure": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "measurement_window": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "target": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "unit": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "measure",
+        "direction",
+        "target",
+        "unit",
+        "measurement_window"
+      ],
+      "type": "object"
+    },
+    "nonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "openItem": {
+      "additionalProperties": false,
+      "properties": {
+        "blocking": {
+          "type": "boolean"
+        },
+        "downstream_effect": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "due_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "question": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "related_refs": {
+          "$ref": "#/$defs/artifactRefs"
+        },
+        "required_approval_domain": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved",
+            "waived"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "status",
+        "blocking",
+        "reason",
+        "required_approval_domain",
+        "owner",
+        "due_date",
+        "downstream_effect",
+        "related_refs"
+      ],
+      "type": "object"
+    },
+    "outcome": {
+      "additionalProperties": false,
+      "properties": {
+        "beneficiary_actor_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "metric": {
+          "$ref": "#/$defs/metric"
+        },
+        "statement": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "beneficiary_actor_ref",
+        "metric",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "packageItem": {
+      "additionalProperties": false,
+      "description": "Stable aggregate for item-level Foundation versioning and human review. Content remains normalized in the referenced arrays.",
+      "properties": {
+        "acceptance_check_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "constraint_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "decision_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dependency_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "display_order": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "domains": {
+          "items": {
+            "enum": [
+              "business",
+              "product",
+              "experience",
+              "data",
+              "technical",
+              "security",
+              "privacy",
+              "compliance",
+              "operations",
+              "cross_domain"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "item_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "open_item_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "requirement_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "risk_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "item_version",
+        "title",
+        "summary",
+        "domains",
+        "display_order",
+        "requirement_refs",
+        "decision_refs",
+        "acceptance_check_refs",
+        "dependency_refs",
+        "constraint_refs",
+        "risk_refs",
+        "open_item_refs"
+      ],
+      "type": "object"
+    },
+    "productThesis": {
+      "additionalProperties": false,
+      "properties": {
+        "customer_promise": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "feature": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "negative_contract": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "opportunity": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "outcome_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "primary_customer": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "problem_statement": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "product": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "product",
+        "feature",
+        "primary_customer",
+        "problem_statement",
+        "opportunity",
+        "customer_promise",
+        "negative_contract",
+        "outcome_refs"
+      ],
+      "type": "object"
+    },
+    "qualityAttribute": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_check_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "category": {
+          "enum": [
+            "performance",
+            "availability",
+            "reliability",
+            "security",
+            "privacy",
+            "accessibility",
+            "observability",
+            "operability",
+            "scalability",
+            "interoperability"
+          ]
+        },
+        "consequence_if_missed": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "environment": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "measure": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "measurement_window": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "stimulus": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "target": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "stimulus",
+        "environment",
+        "measure",
+        "target",
+        "measurement_window",
+        "consequence_if_missed",
+        "acceptance_check_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "requirement": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_check_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "actor_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "behaviour": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "decision_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "domains": {
+          "items": {
+            "enum": [
+              "business",
+              "product",
+              "experience",
+              "data",
+              "technical",
+              "security",
+              "privacy",
+              "compliance",
+              "operations",
+              "cross_domain"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "exclusions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "outcome_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "preconditions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "priority": {
+          "enum": [
+            "must",
+            "should",
+            "could"
+          ]
+        },
+        "source_evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "trigger": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "enum": [
+            "functional",
+            "business_rule",
+            "data",
+            "experience",
+            "compliance"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "type",
+        "domains",
+        "priority",
+        "actor_refs",
+        "trigger",
+        "preconditions",
+        "behaviour",
+        "outcome",
+        "exclusions",
+        "outcome_refs",
+        "source_evidence_refs",
+        "decision_refs",
+        "acceptance_check_refs"
+      ],
+      "type": "object"
+    },
+    "risk": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "impact": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "likelihood": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "mitigation": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "related_refs": {
+          "$ref": "#/$defs/artifactRefs"
+        },
+        "statement": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "trigger": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "likelihood",
+        "impact",
+        "trigger",
+        "mitigation",
+        "owner",
+        "related_refs",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "scenario": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptance_check_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "actor_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "expected_outcome": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "expected_steps": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "preconditions": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "prohibited_outcomes": {
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          },
+          "type": "array"
+        },
+        "requirement_refs": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "title": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "trigger": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "type": {
+          "enum": [
+            "happy",
+            "edge",
+            "failure",
+            "abuse",
+            "recovery"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "title",
+        "actor_refs",
+        "preconditions",
+        "trigger",
+        "expected_steps",
+        "expected_outcome",
+        "prohibited_outcomes",
+        "requirement_refs",
+        "acceptance_check_refs"
+      ],
+      "type": "object"
+    },
+    "scope": {
+      "additionalProperties": false,
+      "properties": {
+        "boundaries": {
+          "items": {
+            "$ref": "#/$defs/boundary"
+          },
+          "type": "array"
+        },
+        "in_scope": {
+          "items": {
+            "$ref": "#/$defs/scopeItem"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "non_goals": {
+          "items": {
+            "$ref": "#/$defs/scopeItem"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "in_scope",
+        "non_goals",
+        "boundaries"
+      ],
+      "type": "object"
+    },
+    "scopeItem": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceRefs"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "rationale": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "statement": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "required": [
+        "id",
+        "statement",
+        "rationale",
+        "evidence_refs"
+      ],
+      "type": "object"
+    },
+    "semanticEvidenceFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "analyzer_contract_version": {
+          "const": "1.0.0"
+        },
+        "analyzer_run_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "assessment": {
+          "enum": [
+            "SUPPORTS",
+            "SUGGESTS",
+            "CONTRADICTS",
+            "INSUFFICIENT",
+            "AMBIGUOUS"
+          ]
+        },
+        "claim_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "claim_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "evidence_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "excerpt_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        },
+        "finding_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "finding_version": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "source_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding_id",
+        "finding_version",
+        "claim_ref",
+        "claim_hash",
+        "evidence_ref",
+        "source_hash",
+        "excerpt_hash",
+        "assessment",
+        "confidence",
+        "analyzer_run_id",
+        "analyzer_contract_version"
+      ],
+      "type": "object"
+    },
+    "traceEdge": {
+      "additionalProperties": false,
+      "properties": {
+        "from_ref": {
+          "$ref": "#/$defs/artifactRef"
+        },
+        "relation": {
+          "enum": [
+            "derived_from",
+            "supports",
+            "validated_by",
+            "covered_by",
+            "depends_on",
+            "constrains",
+            "mitigates",
+            "decided_by",
+            "applies_to"
+          ]
+        },
+        "to_ref": {
+          "$ref": "#/$defs/artifactRef"
+        }
+      },
+      "required": [
+        "from_ref",
+        "relation",
+        "to_ref"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.local/schemas/spec-package-payload.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Canonical product semantics carried in the payload field of a Foundation Artifact Envelope.",
+  "properties": {
+    "acceptance_checks": {
+      "items": {
+        "$ref": "#/$defs/acceptanceCheck"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "actors": {
+      "items": {
+        "$ref": "#/$defs/actor"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "behaviour_contract": {
+      "$ref": "#/$defs/behaviourContract"
+    },
+    "constraints": {
+      "items": {
+        "$ref": "#/$defs/constraint"
+      },
+      "type": "array"
+    },
+    "data_rules": {
+      "items": {
+        "$ref": "#/$defs/dataRule"
+      },
+      "type": "array"
+    },
+    "decisions": {
+      "items": {
+        "$ref": "#/$defs/decision"
+      },
+      "type": "array"
+    },
+    "dependencies": {
+      "items": {
+        "$ref": "#/$defs/dependency"
+      },
+      "type": "array"
+    },
+    "evidence_catalog": {
+      "items": {
+        "$ref": "#/$defs/evidenceItem"
+      },
+      "type": "array"
+    },
+    "experience_states": {
+      "items": {
+        "$ref": "#/$defs/experienceState"
+      },
+      "type": "array"
+    },
+    "glossary": {
+      "items": {
+        "$ref": "#/$defs/glossaryTerm"
+      },
+      "type": "array"
+    },
+    "journeys": {
+      "items": {
+        "$ref": "#/$defs/journey"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "open_items": {
+      "items": {
+        "$ref": "#/$defs/openItem"
+      },
+      "type": "array"
+    },
+    "outcomes": {
+      "items": {
+        "$ref": "#/$defs/outcome"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "package_items": {
+      "items": {
+        "$ref": "#/$defs/packageItem"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "product_thesis": {
+      "$ref": "#/$defs/productThesis"
+    },
+    "quality_attributes": {
+      "items": {
+        "$ref": "#/$defs/qualityAttribute"
+      },
+      "type": "array"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/requirement"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "risks": {
+      "items": {
+        "$ref": "#/$defs/risk"
+      },
+      "type": "array"
+    },
+    "scenarios": {
+      "items": {
+        "$ref": "#/$defs/scenario"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "scope": {
+      "$ref": "#/$defs/scope"
+    },
+    "semantic_evidence_findings": {
+      "items": {
+        "$ref": "#/$defs/semanticEvidenceFinding"
+      },
+      "type": "array"
+    },
+    "traceability": {
+      "items": {
+        "$ref": "#/$defs/traceEdge"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "product_thesis",
+    "package_items",
+    "evidence_catalog",
+    "semantic_evidence_findings",
+    "actors",
+    "glossary",
+    "outcomes",
+    "scope",
+    "journeys",
+    "behaviour_contract",
+    "requirements",
+    "data_rules",
+    "experience_states",
+    "scenarios",
+    "quality_attributes",
+    "constraints",
+    "dependencies",
+    "risks",
+    "decisions",
+    "open_items",
+    "acceptance_checks",
+    "traceability"
+  ],
+  "title": "PM Spec Workshop Spec Package Payload",
+  "type": "object"
+}

@@ -31,6 +31,9 @@ CASE_ID = stable_id("csv-export-workshop:case")
 DELEGATION_ID = stable_id("csv-export-workshop:delegation")
 PM_SOURCE_ID = stable_id("csv-export-workshop:source:pm-spec")
 TECHNICAL_SOURCE_ID = stable_id("csv-export-workshop:source:technical-spec")
+V4_TECHNICAL_CONTRACT_SOURCE_ID = stable_id(
+    "csv-export-workshop:v4-source:technical-contract"
+)
 
 
 class BootstrapView(BaseModel):
@@ -47,6 +50,7 @@ class BootstrapView(BaseModel):
     delegation_later_review_required: Literal[True]
     pm_source_id: UUID
     technical_source_id: UUID
+    v4_technical_contract_source_id: UUID = Field(exclude=True, repr=False)
     technical_source_lines: tuple[tuple[int, str], ...]
     registered_source_identities: tuple[SourceArtifactIdentity, ...] = Field(
         exclude=True, repr=False
@@ -106,11 +110,30 @@ def bootstrap_foundation(
         actor=PM_ACTOR_ID,
         revision=revision,
     )
+    revision = (
+        technical_source.stored_result.receipt.revision
+        if not technical_source.mutated
+        else technical_source.receipt.revision
+    )
+    v4_technical_contract = _register(
+        service,
+        catalog,
+        SourceName.TECHNICAL_CONTRACT,
+        source_id=V4_TECHNICAL_CONTRACT_SOURCE_ID,
+        source_type=SourceArtifactType.TECHNICAL_CONTRACT,
+        actor=PM_ACTOR_ID,
+        revision=revision,
+    )
     pm_identity = pm_source.identity if pm_source.mutated else pm_source.stored_result.identity
     technical_identity = (
         technical_source.identity
         if technical_source.mutated
         else technical_source.stored_result.identity
+    )
+    v4_technical_contract_identity = (
+        v4_technical_contract.identity
+        if v4_technical_contract.mutated
+        else v4_technical_contract.stored_result.identity
     )
     return service, BootstrapView(
         case_id=CASE_ID,
@@ -124,8 +147,13 @@ def bootstrap_foundation(
         delegation_later_review_required=fixture.later_review_required,
         pm_source_id=PM_SOURCE_ID,
         technical_source_id=TECHNICAL_SOURCE_ID,
+        v4_technical_contract_source_id=V4_TECHNICAL_CONTRACT_SOURCE_ID,
         technical_source_lines=tuple(catalog.numbered_lines(SourceName.TECHNICAL_SPEC)),
-        registered_source_identities=(pm_identity, technical_identity),
+        registered_source_identities=(
+            pm_identity,
+            technical_identity,
+            v4_technical_contract_identity,
+        ),
     )
 
 

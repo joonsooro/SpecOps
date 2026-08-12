@@ -1,6 +1,9 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LiveAudioClient } from "./audio/liveClient";
+import type { components as WorkshopProtocolComponents } from "./generated/workshopProtocol";
 import { formulationEnabled, proposalControlPayload } from "./uiModel";
+
+type DecisionBatchReviewView = WorkshopProtocolComponents["schemas"]["DecisionBatchReviewView"];
 
 type LineRange = { kind: "LINE_RANGE"; start: number; end: number };
 type SourceRef = { artifact_id: string; version: number; content_hash: string; location: LineRange };
@@ -125,7 +128,17 @@ export function App() {
   const [boundLine, setBoundLine] = useState<number | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editInstruction, setEditInstruction] = useState("");
+  const [decisionReview, setDecisionReview] = useState<DecisionBatchReviewView | null>(null);
   const live = useRef<LiveAudioClient | null>(null);
+
+  const loadDecisionReview = async (caseId: string) => {
+    try {
+      const response = await fetch(`/api/v4/cases/${caseId}/decision-review`);
+      setDecisionReview(response.ok ? await response.json() as DecisionBatchReviewView | null : null);
+    } catch {
+      setDecisionReview(null);
+    }
+  };
 
   const refresh = async () => {
     const response = await fetch("/api/workshop");
@@ -133,6 +146,7 @@ export function App() {
     const value = await response.json() as WorkshopProjection;
     setWorkshop(value);
     setCallState(value.session.call_state);
+    if (bootstrap?.case_id) await loadDecisionReview(bootstrap.case_id);
   };
 
   useEffect(() => {
@@ -152,6 +166,7 @@ export function App() {
         setWorkshop(nextWorkshop);
         setCallState(nextWorkshop.session.call_state);
         setNotice("Foundation and delegation verified");
+        void loadDecisionReview(nextBootstrap.case_id);
         reportBrowserSpan(startedAt, "OK");
       })
       .catch(() => {
@@ -396,6 +411,36 @@ export function App() {
           <div><span>Ready</span><strong>{workshop?.governance?.items.filter((item) => item.readiness === "READY").length ?? 0}</strong></div>
           <div><span>Decisions</span><strong>{blocked.length}</strong></div>
         </div>
+
+        {decisionReview && (
+          <section className="decision-review-view" aria-labelledby="decision-review-title">
+            <header>
+              <div>
+                <p>Foundation review · exact displayed content</p>
+                <h3 id="decision-review-title">Decision batch</h3>
+              </div>
+              <span>VOICE BOUND</span>
+            </header>
+            <ol>
+              {decisionReview.items.map((item) => (
+                <li key={item.review_item_id}>
+                  <strong>{item.handle}</strong>
+                  <div>
+                    <p>{item.exact_statement}</p>
+                    <small>{item.rationale}</small>
+                    {item.problem_origins.map((origin) => (
+                      <em key={origin.problem_id}>{origin.problem_statement}</em>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <footer>
+              <code>VIEW {shortId(decisionReview.view_id)}</code>
+              <code>HASH {decisionReview.view_hash.slice(7, 19)}…</code>
+            </footer>
+          </section>
+        )}
 
         {workshop?.pending_proposal && proposed && (
           <section className="proposal-sheet" aria-labelledby="proposal-title">

@@ -224,6 +224,44 @@ class FakeOpenAI:
         self.responses = _FakeResponses(self)
 
 
+class _ManualMonotonic:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    async def advance(self, _seconds: float) -> None:
+        self.value += 10.0
+
+
+class _BackgroundResponses:
+    def __init__(self, *, cancel_wait_once: bool = False) -> None:
+        self.create_calls: list[dict] = []
+        self.retrieve_ids: list[str] = []
+        self.cancel_wait_once = cancel_wait_once
+        self.output_text = ""
+
+    async def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        return SimpleNamespace(
+            id="resp_background_bootstrap",
+            status="queued",
+            output_text="",
+            _request_id="req_background_create",
+        )
+
+    async def retrieve(self, response_id):
+        self.retrieve_ids.append(response_id)
+        completed = len(self.retrieve_ids) >= 4 or self.cancel_wait_once
+        return SimpleNamespace(
+            id=response_id,
+            status="completed" if completed else "in_progress",
+            output_text=self.output_text if completed else "",
+            _request_id=f"req_background_retrieve_{len(self.retrieve_ids)}",
+        )
+
+
 def test_all_six_native_schemas_are_openai_strict_root_objects():
     assert len(NATIVE_SCHEMA_SPECS) == 6
     for spec in NATIVE_SCHEMA_SPECS:
@@ -365,6 +403,113 @@ async def _stored_conversation_bootstrap_case():
     assert [item["type"] for item in turn_call["input"][0]["content"]] == ["input_text"]
 
 
+def test_background_bootstrap_polls_one_stored_response_past_slow_observation():
+    async def scenario():
+        clock = _ManualMonotonic()
+        responses = _BackgroundResponses()
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=responses),
+            now=lambda: NOW,
+            monotonic=clock,
+            sleep=clock.advance,
+        )
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+            _source(
+                c.SourceRole.TECHNICAL_CONTRACT,
+                11,
+                "technical-contract.md",
+                b"private technical source",
+            ),
+        )
+        prepared = adapter.prepared_from_ids(
+            sources, ("file_pm", "file_technical"), "conv_background"
+        )
+        request = _bootstrap_request(prepared)
+        responses.output_text = _brief(request).model_dump_json()
+
+        response_id = await adapter.start_bootstrap(request, prepared=prepared)
+        result = await adapter.finish_bootstrap(
+            request,
+            prepared=prepared,
+            session_id=SESSION_ID,
+            response_id=response_id,
+        )
+
+        assert result.context.bootstrap_response_id == response_id
+        assert len(responses.create_calls) == 1
+        assert responses.create_calls[0]["background"] is True
+        assert responses.retrieve_ids == [response_id] * 4
+        assert [event.event for event in adapter.lifecycle_events] == [
+            "provider_request.started",
+            "provider_request.accepted",
+            "provider_request.timeout",
+            "provider_request.completed",
+        ]
+        assert adapter.lifecycle_events[-1].duration_ms == 40_000
+        encoded = json.dumps([event.__dict__ for event in adapter.lifecycle_events])
+        assert "private PM source" not in encoded
+        assert "private technical source" not in encoded
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_background_wait_resumes_the_same_response_without_recreate():
+    async def scenario():
+        clock = _ManualMonotonic()
+        responses = _BackgroundResponses(cancel_wait_once=True)
+        cancelled = False
+
+        async def cancel_once(seconds: float) -> None:
+            nonlocal cancelled
+            if not cancelled:
+                cancelled = True
+                raise asyncio.CancelledError
+            await clock.advance(seconds)
+
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=responses),
+            now=lambda: NOW,
+            monotonic=clock,
+            sleep=cancel_once,
+        )
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+            _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical.md", b"Technical"),
+        )
+        prepared = adapter.prepared_from_ids(
+            sources, ("file_pm", "file_technical"), "conv_background"
+        )
+        request = _bootstrap_request(prepared)
+        responses.output_text = _brief(request).model_dump_json()
+        response_id = await adapter.start_bootstrap(request, prepared=prepared)
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.finish_bootstrap(
+                request,
+                prepared=prepared,
+                session_id=SESSION_ID,
+                response_id=response_id,
+            )
+        result = await adapter.finish_bootstrap(
+            request,
+            prepared=prepared,
+            session_id=SESSION_ID,
+            response_id=response_id,
+        )
+
+        assert result.context.bootstrap_response_id == response_id
+        assert len(responses.create_calls) == 1
+        cancelled_event = next(
+            event for event in adapter.lifecycle_events if event.event == "provider_request.cancelled"
+        )
+        assert cancelled_event.response_id == response_id
+
+    asyncio.run(scenario())
+
+
 def test_installed_openai_sdk_serializes_the_native_stored_conversation_contract():
     """Exercise SDK request serialization without making a network call.
 
@@ -475,6 +620,7 @@ async def _sdk_serialization_case():
     assert response_body["conversation"] == "conv_sdk"
     assert response_body["reasoning"] == {"context": "all_turns", "effort": "medium"}
     assert response_body["store"] is True
+    assert response_body["background"] is True
     assert response_body["text"]["format"]["strict"] is True
     assert [item["type"] for item in response_body["input"][0]["content"]] == [
         "input_file",

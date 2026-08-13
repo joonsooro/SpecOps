@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from uuid import UUID
 
 from openai import AsyncOpenAI
@@ -24,6 +27,7 @@ from .schema_compiler import native_schema_for
 
 
 REQUEST_TIMEOUT_SECONDS = 30.0
+BACKGROUND_POLL_SECONDS = 1.0
 MAX_OUTPUT_TOKENS = {
     contracts.AnalyzerOperation.BOOTSTRAP: 24_000,
     contracts.AnalyzerOperation.TURN_ANALYSIS: 20_000,
@@ -50,6 +54,19 @@ class PreparedProviderContext:
 class BootstrapResult:
     context: contracts.AnalyzerContextBinding
     candidate: contracts.InterviewBriefCandidate
+
+
+@dataclass(frozen=True)
+class ProviderLifecycleEvent:
+    """Content-free correlation for one logical provider request."""
+
+    event: str
+    operation: str
+    client_request_id: str
+    response_id: str | None
+    provider_request_id: str | None
+    status: str | None
+    duration_ms: int
 
 
 class ProviderAdapterError(RuntimeError):
@@ -170,6 +187,9 @@ class StoredConversationOpenAIAdapter:
         api_key: str,
         client: Any | None = None,
         now: Callable[[], datetime] = _utc_now,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._client = client or AsyncOpenAI(
             api_key=api_key,
@@ -177,11 +197,21 @@ class StoredConversationOpenAIAdapter:
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         self._now = now
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._logger = logger or logging.getLogger("specops.workshop.provider")
         self._failures: deque[contracts.ProviderFailureReceipt] = deque(maxlen=32)
+        self._lifecycle_events: deque[ProviderLifecycleEvent] = deque(maxlen=128)
+        self._background_responses: dict[str, Any] = {}
+        self._background_started_at: dict[str, float] = {}
 
     @property
     def failure_receipts(self) -> tuple[contracts.ProviderFailureReceipt, ...]:
         return tuple(self._failures)
+
+    @property
+    def lifecycle_events(self) -> tuple[ProviderLifecycleEvent, ...]:
+        return tuple(self._lifecycle_events)
 
     async def prepare_context(
         self,
@@ -290,11 +320,172 @@ class StoredConversationOpenAIAdapter:
         prepared: PreparedProviderContext,
         session_id: UUID,
     ) -> BootstrapResult:
+        response_id = await self.start_bootstrap(request, prepared=prepared)
+        return await self.finish_bootstrap(
+            request,
+            prepared=prepared,
+            session_id=session_id,
+            response_id=response_id,
+        )
+
+    async def start_bootstrap(
+        self,
+        request: contracts.BootstrapAnalyzerRequest,
+        *,
+        prepared: PreparedProviderContext,
+    ) -> str:
+        """Create one stored background Response and return its durable identity."""
+
         if request.provider_conversation_id != prepared.provider_conversation_id:
             raise ValueError("bootstrap request does not bind the prepared Conversation")
         if request.source_set != prepared.source_set:
             raise ValueError("bootstrap request does not bind the two uploaded sources")
-        candidate, response_id = await self._execute(request, bootstrap=True)
+        operation = contracts.AnalyzerOperation.BOOTSTRAP
+        started_at = self._monotonic()
+        self._emit_lifecycle(
+            event="provider_request.started",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+        )
+        arguments = self._response_arguments(request, bootstrap=True)
+        arguments["background"] = True
+        try:
+            response = await asyncio.wait_for(
+                self._client.responses.create(**arguments),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            self._emit_lifecycle(
+                event="provider_request.cancelled",
+                operation=operation,
+                client_request_id=request.client_request_id,
+                started_at=started_at,
+                status="CREATE_CANCELLED",
+            )
+            raise
+        except TimeoutError as exc:
+            self._emit_lifecycle(
+                event="provider_request.timeout",
+                operation=operation,
+                client_request_id=request.client_request_id,
+                started_at=started_at,
+                status="CREATE_ID_UNCERTAIN",
+            )
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage.BOOTSTRAP,
+                client_request_id=request.client_request_id,
+            ) from exc
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage.BOOTSTRAP,
+                client_request_id=request.client_request_id,
+            ) from exc
+        response_id = _safe_provider_identifier(getattr(response, "id", None))
+        if response_id is None:
+            raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
+        self._background_responses[response_id] = response
+        self._background_started_at[response_id] = started_at
+        self._emit_lifecycle(
+            event="provider_request.accepted",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+            response=response,
+        )
+        return response_id
+
+    async def finish_bootstrap(
+        self,
+        request: contracts.BootstrapAnalyzerRequest,
+        *,
+        prepared: PreparedProviderContext,
+        session_id: UUID,
+        response_id: str,
+    ) -> BootstrapResult:
+        """Poll the known Response; never create a replacement after uncertainty."""
+
+        if request.provider_conversation_id != prepared.provider_conversation_id:
+            raise ValueError("bootstrap request does not bind the prepared Conversation")
+        if request.source_set != prepared.source_set:
+            raise ValueError("bootstrap request does not bind the two uploaded sources")
+        if _safe_provider_identifier(response_id) != response_id:
+            raise ValueError("unsafe stored bootstrap response identifier")
+        operation = contracts.AnalyzerOperation.BOOTSTRAP
+        started_at = self._background_started_at.setdefault(response_id, self._monotonic())
+        response = self._background_responses.get(response_id)
+        slow_observed = False
+        try:
+            while True:
+                if response is None:
+                    response = await asyncio.wait_for(
+                        self._client.responses.retrieve(response_id),
+                        timeout=REQUEST_TIMEOUT_SECONDS,
+                    )
+                returned_id = _safe_provider_identifier(getattr(response, "id", None))
+                if returned_id != response_id:
+                    raise ValueError("retrieved Response identity changed")
+                self._background_responses[response_id] = response
+                status = getattr(response, "status", None) or "completed"
+                if not slow_observed and self._monotonic() - started_at >= REQUEST_TIMEOUT_SECONDS:
+                    slow_observed = True
+                    self._emit_lifecycle(
+                        event="provider_request.timeout",
+                        operation=operation,
+                        client_request_id=request.client_request_id,
+                        started_at=started_at,
+                        response=response,
+                    )
+                if status not in {"queued", "in_progress"}:
+                    break
+                await self._sleep(BACKGROUND_POLL_SECONDS)
+                response = None
+        except asyncio.CancelledError:
+            self._emit_lifecycle(
+                event="provider_request.cancelled",
+                operation=operation,
+                client_request_id=request.client_request_id,
+                started_at=started_at,
+                response=self._background_responses.get(response_id),
+            )
+            raise
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage.BOOTSTRAP,
+                client_request_id=request.client_request_id,
+            ) from exc
+
+        self._emit_lifecycle(
+            event="provider_request.completed",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+            response=response,
+        )
+        if status != "completed":
+            raise self._provider_error(
+                RuntimeError(f"safe terminal response status: {status}"),
+                stage=contracts.ProviderProcessingStage.BOOTSTRAP,
+                client_request_id=request.client_request_id,
+            )
+        try:
+            candidate = contracts.InterviewBriefCandidate.model_validate_json(
+                response.output_text
+            )
+            self._validate_candidate_echo(request, candidate)
+        except Exception as exc:
+            raise self._output_error(
+                request.client_request_id,
+                exc,
+                provider_request_id=_safe_provider_identifier(
+                    getattr(response, "_request_id", None)
+                ),
+            ) from exc
+        self._background_responses.pop(response_id, None)
+        self._background_started_at.pop(response_id, None)
         assert isinstance(candidate, contracts.InterviewBriefCandidate)
         context = contracts.AnalyzerContextBinding(
             protocol_version=contracts.PROTOCOL_VERSION,
@@ -401,7 +592,76 @@ class StoredConversationOpenAIAdapter:
 
     async def _execute(self, request: contracts.AnalyzerProviderRequest, *, bootstrap: bool):
         operation = contracts.AnalyzerOperation(request.request_type)
-        schema_name, schema, candidate_type = native_schema_for(operation)
+        _, _, candidate_type = native_schema_for(operation)
+        arguments = self._response_arguments(request, bootstrap=bootstrap)
+        started_at = self._monotonic()
+        self._emit_lifecycle(
+            event="provider_request.started",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+        )
+        try:
+            response = await asyncio.wait_for(
+                self._client.responses.create(**arguments),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            self._emit_lifecycle(
+                event="provider_request.cancelled",
+                operation=operation,
+                client_request_id=request.client_request_id,
+                started_at=started_at,
+                status="CREATE_CANCELLED",
+            )
+            raise
+        except TimeoutError as exc:
+            self._emit_lifecycle(
+                event="provider_request.timeout",
+                operation=operation,
+                client_request_id=request.client_request_id,
+                started_at=started_at,
+                status="CREATE_ID_UNCERTAIN",
+            )
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage(operation.value),
+                client_request_id=request.client_request_id,
+            ) from exc
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage(operation.value),
+                client_request_id=request.client_request_id,
+            ) from exc
+
+        self._emit_lifecycle(
+            event="provider_request.completed",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+            response=response,
+        )
+
+        response_id = _safe_provider_identifier(getattr(response, "id", None))
+        if response_id is None:
+            raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
+        try:
+            candidate = candidate_type.model_validate_json(response.output_text)
+            self._validate_candidate_echo(request, candidate)
+        except Exception as exc:
+            raise self._output_error(
+                request.client_request_id,
+                exc,
+                provider_request_id=_safe_provider_identifier(getattr(response, "_request_id", None)),
+            ) from exc
+        return candidate, response_id
+
+    def _response_arguments(
+        self, request: contracts.AnalyzerProviderRequest, *, bootstrap: bool
+    ) -> dict[str, Any]:
+        operation = contracts.AnalyzerOperation(request.request_type)
+        schema_name, schema, _ = native_schema_for(operation)
         content: list[dict[str, str]] = []
         if bootstrap:
             assert isinstance(request, contracts.BootstrapAnalyzerRequest)
@@ -415,7 +675,7 @@ class StoredConversationOpenAIAdapter:
                 "text": request.model_dump_json(exclude_none=False),
             }
         )
-        arguments = {
+        return {
             "model": "gpt-5.6-terra",
             "reasoning": {"effort": "medium", "context": "all_turns"},
             "store": True,
@@ -433,31 +693,32 @@ class StoredConversationOpenAIAdapter:
             },
             "max_output_tokens": MAX_OUTPUT_TOKENS[operation],
         }
-        try:
-            response = await asyncio.wait_for(
-                self._client.responses.create(**arguments),
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            raise self._provider_error(
-                exc,
-                stage=contracts.ProviderProcessingStage(operation.value),
-                client_request_id=request.client_request_id,
-            ) from exc
 
-        response_id = _safe_provider_identifier(getattr(response, "id", None))
-        if response_id is None:
-            raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
-        try:
-            candidate = candidate_type.model_validate_json(response.output_text)
-            self._validate_candidate_echo(request, candidate)
-        except Exception as exc:
-            raise self._output_error(
-                request.client_request_id,
-                exc,
-                provider_request_id=_safe_provider_identifier(getattr(response, "_request_id", None)),
-            ) from exc
-        return candidate, response_id
+    def _emit_lifecycle(
+        self,
+        *,
+        event: str,
+        operation: contracts.AnalyzerOperation,
+        client_request_id: str,
+        started_at: float,
+        response: Any | None = None,
+        status: str | None = None,
+    ) -> None:
+        value = ProviderLifecycleEvent(
+            event=event,
+            operation=operation.value,
+            client_request_id=client_request_id,
+            response_id=_safe_provider_identifier(getattr(response, "id", None)),
+            provider_request_id=_safe_provider_identifier(
+                getattr(response, "_request_id", None)
+            ),
+            status=status or _safe_provider_identifier(getattr(response, "status", None)),
+            duration_ms=max(0, int((self._monotonic() - started_at) * 1000)),
+        )
+        self._lifecycle_events.append(value)
+        self._logger.info(
+            json.dumps(value.__dict__, sort_keys=True, separators=(",", ":"))
+        )
 
     @staticmethod
     def _instructions(operation: contracts.AnalyzerOperation) -> str:

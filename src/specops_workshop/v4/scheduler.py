@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import TypeAdapter
 from specops_contracts import workshop_v1 as c
 
+from .openai_adapter import ProviderAdapterError
 from .orchestrator import V4ProductionOrchestrator, _request
 
 
@@ -71,13 +72,55 @@ class DurableAnalyzerWorker:
         try:
             await self._run_job(job)
         except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            if job["attempt_count"] >= 3:
+            current = self._job(job["job_id"])
+            if (
+                current["state"] == "PROVIDER_REQUESTED"
+                and current["candidate_json"] is None
+            ):
                 self.foundation.fail_analyzer_job(
                     job["job_id"],
                     worker_id=self.worker_id,
-                    error_code=f"RETRY_EXHAUSTED_{type(exc).__name__}",
+                    error_code="PROVIDER_OUTCOME_UNCERTAIN_CANCELLED",
+                )
+            raise
+        except ProviderAdapterError as exc:
+            uncertain = exc.receipt.code in {
+                c.ProviderFailureCode.TIMEOUT,
+                c.ProviderFailureCode.CONNECTION,
+            }
+            if uncertain or not exc.receipt.retryable or job["attempt_count"] >= 3:
+                self.foundation.fail_analyzer_job(
+                    job["job_id"],
+                    worker_id=self.worker_id,
+                    error_code=(
+                        "PROVIDER_OUTCOME_UNCERTAIN_"
+                        if uncertain
+                        else "PROVIDER_REJECTED_"
+                    )
+                    + exc.receipt.code.value,
+                )
+            else:
+                self.foundation.release_analyzer_job(
+                    job["job_id"],
+                    worker_id=self.worker_id,
+                    error_code=f"PROVIDER_RETRYABLE_{exc.receipt.code.value}",
+                )
+        except Exception as exc:
+            current = self._job(job["job_id"])
+            uncertain = (
+                current["state"] == "PROVIDER_REQUESTED"
+                and current["candidate_json"] is None
+            )
+            if uncertain or job["attempt_count"] >= 3:
+                self.foundation.fail_analyzer_job(
+                    job["job_id"],
+                    worker_id=self.worker_id,
+                    error_code=(
+                        "PROVIDER_OUTCOME_UNCERTAIN_"
+                        if uncertain
+                        else "RETRY_EXHAUSTED_"
+                    )
+                    + type(exc).__name__,
                 )
             else:
                 self.foundation.release_analyzer_job(
@@ -86,6 +129,13 @@ class DurableAnalyzerWorker:
                     error_code=type(exc).__name__,
                 )
         return True
+
+    def _job(self, job_id: str) -> dict[str, Any]:
+        return next(
+            item
+            for item in self.foundation.analyzer_jobs(self.orchestrator.case_id)
+            if item["job_id"] == job_id
+        )
 
     async def drain(self, *, limit: int = 100) -> int:
         count = 0

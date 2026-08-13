@@ -18,7 +18,11 @@ from specops_workflow.workshop_protocol import FoundationProtocolError
 from specops_workshop.api import create_app
 from specops_workshop.sources import SourceCatalog
 from specops_workshop.v4.live_transport import V4LiveTransport
-from specops_workshop.v4.openai_adapter import BootstrapResult, PreparedProviderContext
+from specops_workshop.v4.openai_adapter import (
+    BootstrapResult,
+    PreparedProviderContext,
+    ProviderAdapterError,
+)
 from specops_workshop.v4.orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
 from specops_workshop.v4.scheduler import DurableAnalyzerWorker
 
@@ -592,6 +596,85 @@ class CancellablePreparationAdapter(DeterministicAdapter):
         self._cancel_once("cleanup")
 
 
+class SplitBootstrapCancellationAdapter(CancellablePreparationAdapter):
+    def __init__(self):
+        super().__init__("never")
+        self.start_calls = 0
+        self.finish_calls = 0
+
+    async def start_bootstrap(self, request, *, prepared):
+        self.start_calls += 1
+        return "resp_task27_durable_background"
+
+    async def finish_bootstrap(
+        self, request, *, prepared, session_id, response_id
+    ):
+        self.finish_calls += 1
+        assert response_id == "resp_task27_durable_background"
+        if self.finish_calls == 1:
+            raise asyncio.CancelledError
+        return await DeterministicAdapter.bootstrap(
+            self, request, prepared=prepared, session_id=session_id
+        )
+
+
+def test_bootstrap_response_identity_is_durable_before_cancelled_wait_resumes(tmp_path):
+    adapter = SplitBootstrapCancellationAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(orchestrator.prepare_workshop())
+    resources = app.state.workshop_protocol_foundation.preparation_resources(
+        app.state.bootstrap.case_id
+    )
+    assert resources["bootstrap_response_id"] == "resp_task27_durable_background"
+
+    projection = asyncio.run(orchestrator.prepare_workshop())
+    assert projection["phase"] == "READY"
+    assert adapter.start_calls == 1
+    assert adapter.finish_calls == 2
+
+
+def test_cancelled_bootstrap_create_without_response_id_fails_closed_without_retry(tmp_path):
+    class UncertainStartAdapter(CancellablePreparationAdapter):
+        start_calls = 0
+
+        def __init__(self):
+            super().__init__("never")
+
+        async def start_bootstrap(self, request, *, prepared):
+            self.start_calls += 1
+            raise asyncio.CancelledError
+
+        async def finish_bootstrap(self, request, *, prepared, session_id, response_id):
+            raise AssertionError("an unknown Response identity cannot be polled")
+
+    adapter = UncertainStartAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(orchestrator.prepare_workshop())
+    failed = app.state.workshop_protocol_foundation.preparation_projection(
+        app.state.bootstrap.case_id
+    )
+    assert failed["phase"] == "FAILED"
+    assert failed["failure_code"] == "BOOTSTRAP_RESPONSE_ID_UNCERTAIN"
+    assert failed["cleanup_state"] == "PENDING"
+
+    assert asyncio.run(orchestrator.prepare_workshop())["phase"] == "FAILED"
+    assert adapter.start_calls == 1
+
+
 @pytest.mark.parametrize(
     "stage",
     (
@@ -779,7 +862,7 @@ def test_cancelled_analysis_lease_reclaims_provider_completed_stage_without_anot
     assert replay.analysis is not None
 
 
-def test_real_analysis_cancellation_reuses_one_logical_provider_result(tmp_path):
+def test_real_analysis_cancellation_with_unknown_outcome_is_not_retried(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     _admit_brief(foundation)
@@ -788,8 +871,6 @@ def test_real_analysis_cancellation_reuses_one_logical_provider_result(tmp_path)
 
     class CancellableAnalysisAdapter:
         attempts = 0
-        logical_results = 0
-        candidate = None
 
         @staticmethod
         def source_set_hash(sources):
@@ -797,33 +878,7 @@ def test_real_analysis_cancellation_reuses_one_logical_provider_result(tmp_path)
 
         async def execute(self, request, *, context):
             self.attempts += 1
-            if self.candidate is None:
-                self.logical_results += 1
-                self.candidate = c.TurnAnalysisCandidate(
-                    protocol_version="1.0.0",
-                    output_type="TURN_ANALYSIS_CANDIDATE",
-                    analyzer_run_id=request.analyzer_run_id,
-                    context_id=request.context_id,
-                    request_hash=request.request_hash,
-                    source_set_hash=request.source_set_hash,
-                    transcript_event_id=request.transcript.transcript_event_id,
-                    based_on_case_revision=request.based_on_case_revision,
-                    disposition=c.TurnDisposition.NO_SEMANTIC_CHANGE,
-                    no_change_reason_code="SOCIAL_ONLY",
-                    evidence_candidates=(),
-                    new_problems=(),
-                    new_problem_clusters=(),
-                    revised_problem_clusters=(),
-                    new_questions=(),
-                    revised_questions=(),
-                    low_risk_facts=(),
-                    decisions=(),
-                    problem_assessments=(),
-                    evidence_findings=(),
-                )
-            if self.attempts == 1:
-                raise asyncio.CancelledError
-            return self.candidate
+            raise asyncio.CancelledError
 
     adapter = CancellableAnalysisAdapter()
     orchestrator = V4ProductionOrchestrator(
@@ -846,28 +901,75 @@ def test_real_analysis_cancellation_reuses_one_logical_provider_result(tmp_path)
     worker = DurableAnalyzerWorker(orchestrator, worker_id="cancelled-analysis-worker")
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(worker.run_once())
-    pending = foundation.analyzer_jobs(CASE_ID)[0]
-    assert pending["state"] == "PROVIDER_REQUESTED"
-    assert pending["request_json"] is not None
-    with foundation.engine.begin() as connection:
-        connection.execute(
-            V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
-            .update()
-            .where(
-                V0_RUNTIME_TABLES["workshop_analyzer_jobs"].c.job_id
-                == pending["job_id"]
-            )
-            .values(lease_expires_at="2026-08-12T11:59:00Z")
-        )
+    failed = foundation.analyzer_jobs(CASE_ID)[0]
+    assert failed["state"] == "FAILED"
+    assert failed["last_error_code"] == "PROVIDER_OUTCOME_UNCERTAIN_CANCELLED"
     resumed = DurableAnalyzerWorker(orchestrator, worker_id="resumed-analysis-worker")
-    assert asyncio.run(resumed.run_once()) is True
-    completed = foundation.analyzer_jobs(CASE_ID)[0]
-    assert completed["state"] == "COMPLETED"
-    assert adapter.attempts == 2
-    assert adapter.logical_results == 1
+    assert asyncio.run(resumed.run_once()) is False
+    assert adapter.attempts == 1
     replay = asyncio.run(orchestrator.record_final_transcript(transcript_input))
     assert replay.duplicate is True
-    assert replay.analysis is not None
+    assert replay.analysis is None
+
+
+def test_provider_timeout_is_terminal_without_blind_retry(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    context = foundation.active_analyzer_context(CASE_ID)
+
+    class TimeoutAdapter:
+        calls = 0
+
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def execute(self, request, *, context):
+            self.calls += 1
+            raise ProviderAdapterError(
+                c.ProviderFailureReceipt(
+                    provider=c.ProviderName.OPENAI,
+                    stage=c.ProviderProcessingStage.TURN_ANALYSIS,
+                    client_request_id=request.client_request_id,
+                    provider_request_id=None,
+                    status_code=None,
+                    code=c.ProviderFailureCode.TIMEOUT,
+                    retryable=True,
+                    validation_diagnostics=(),
+                    occurred_at=NOW,
+                )
+            )
+
+    adapter = TimeoutAdapter()
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=adapter,
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    asyncio.run(
+        orchestrator.record_final_transcript(
+            FinalTranscriptInput(
+                turn_sequence=1,
+                text="This answer receives one bounded Analyzer attempt.",
+                provider_request_id="task-27-timeout-no-retry",
+                speaker_actor_id=foundation.case_actor(CASE_ID, "PM"),
+                actor="PM",
+            )
+        )
+    )
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="timeout-worker")
+    assert asyncio.run(worker.run_once()) is True
+    failed = foundation.analyzer_jobs(CASE_ID)[0]
+    assert failed["state"] == "FAILED"
+    assert failed["last_error_code"] == "PROVIDER_OUTCOME_UNCERTAIN_TIMEOUT"
+    assert asyncio.run(worker.run_once()) is False
+    assert adapter.calls == 1
 
 
 @pytest.mark.parametrize(

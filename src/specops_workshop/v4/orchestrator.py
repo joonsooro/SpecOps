@@ -265,9 +265,40 @@ class V4ProductionOrchestrator:
                 )
                 context = c.AnalyzerContextBinding.model_validate_json(resources["context_json"])
             else:
-                bootstrapped = await self.adapter.bootstrap(
-                    request, prepared=prepared, session_id=self.session_id
-                )
+                if all(
+                    hasattr(self.adapter, name)
+                    for name in ("start_bootstrap", "finish_bootstrap")
+                ):
+                    response_id = resources["bootstrap_response_id"]
+                    if response_id is None:
+                        try:
+                            response_id = await self.adapter.start_bootstrap(
+                                request, prepared=prepared
+                            )
+                        except asyncio.CancelledError:
+                            # Without a returned Response ID, X-Client-Request-Id
+                            # is correlation rather than an exactly-once key. Fail
+                            # closed instead of blindly creating a second Response.
+                            self.foundation.set_preparation_phase(
+                                self.case_id,
+                                "FAILED",
+                                failure_code="BOOTSTRAP_RESPONSE_ID_UNCERTAIN",
+                                cleanup_state="PENDING",
+                            )
+                            raise
+                        self.foundation.checkpoint_preparation_resource(
+                            self.case_id, bootstrap_response_id=response_id
+                        )
+                    bootstrapped = await self.adapter.finish_bootstrap(
+                        request,
+                        prepared=prepared,
+                        session_id=self.session_id,
+                        response_id=response_id,
+                    )
+                else:
+                    bootstrapped = await self.adapter.bootstrap(
+                        request, prepared=prepared, session_id=self.session_id
+                    )
                 candidate = bootstrapped.candidate
                 context = bootstrapped.context
                 self.foundation.checkpoint_preparation_resource(

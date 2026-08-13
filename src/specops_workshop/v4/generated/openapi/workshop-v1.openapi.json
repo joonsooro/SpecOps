@@ -2849,6 +2849,119 @@
         "title": "CapturePolicy",
         "type": "string"
       },
+      "V4_ClaimWorkshopCompleteCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "format": "uuid",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "CLAIM_WORKSHOP_COMPLETE",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "completion_source": {
+            "$ref": "#/components/schemas/V4_WorkshopCompletionSource"
+          },
+          "completion_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Transcript Event Id"
+          },
+          "confirmation_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmation Transcript Event Id"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "completion_source",
+          "completion_transcript_event_id",
+          "confirmation_transcript_event_id"
+        ],
+        "title": "ClaimWorkshopCompleteCommand",
+        "type": "object"
+      },
       "V4_ClusterCouplingType": {
         "enum": [
           "SHARED_OUTCOME",
@@ -6095,6 +6208,15 @@
         "title": "VoiceConfirmationSelectionItemCandidate",
         "type": "object"
       },
+      "V4_WorkshopCompletionSource": {
+        "enum": [
+          "BUTTON",
+          "VOICE_EXPLICIT",
+          "VOICE_CONFIRMED"
+        ],
+        "title": "WorkshopCompletionSource",
+        "type": "string"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -6134,6 +6256,119 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WorkshopCompletionIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+            "title": "Operation Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_key"
+        ],
+        "title": "WorkshopCompletionIntent",
+        "type": "object"
+      },
+      "WorkshopCompletionOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "$ref": "#/components/schemas/WorkshopCompletionReceipt"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "FINISHING_ANALYSIS",
+              "CLEANUP_PENDING",
+              "COMPLETE"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt",
+          "state",
+          "replayed"
+        ],
+        "title": "WorkshopCompletionOutcome",
+        "type": "object"
+      },
+      "WorkshopCompletionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "title": "Completed At",
+            "type": "string"
+          },
+          "completion_source": {
+            "$ref": "#/components/schemas/WorkshopCompletionSource"
+          },
+          "completion_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Transcript Event Id"
+          },
+          "confirmation_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmation Transcript Event Id"
+          },
+          "receipt_type": {
+            "const": "WORKSHOP_COMPLETION",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "state": {
+            "const": "FINISHING_ANALYSIS",
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "completion_source",
+          "completed_at",
+          "completion_transcript_event_id",
+          "confirmation_transcript_event_id",
+          "state"
+        ],
+        "title": "WorkshopCompletionReceipt",
+        "type": "object"
+      },
+      "WorkshopCompletionSource": {
+        "enum": [
+          "BUTTON",
+          "VOICE_EXPLICIT",
+          "VOICE_CONFIRMED"
+        ],
+        "title": "WorkshopCompletionSource",
+        "type": "string"
       }
     }
   },
@@ -6590,6 +6825,7 @@
                     "ADMIT_TURN_ANALYSIS": "#/components/schemas/V4_AdmitTurnAnalysisCommand",
                     "APPLY_DECISION_BATCH_RESPONSE": "#/components/schemas/V4_ApplyDecisionBatchResponseCommand",
                     "CAPTURE_LOW_RISK_FACT": "#/components/schemas/V4_CaptureLowRiskFactCommand",
+                    "CLAIM_WORKSHOP_COMPLETE": "#/components/schemas/V4_ClaimWorkshopCompleteCommand",
                     "CONFIRM_ARTIFACT": "#/components/schemas/V4_ConfirmArtifactCommand",
                     "INVALIDATE_ANALYZER_CONTEXT": "#/components/schemas/V4_InvalidateAnalyzerContextCommand",
                     "MATERIALIZE_ARTIFACT_REVIEW": "#/components/schemas/V4_MaterializeArtifactReviewCommand",
@@ -6607,6 +6843,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/V4_RecordFinalTranscriptCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_ClaimWorkshopCompleteCommand"
                   },
                   {
                     "$ref": "#/components/schemas/V4_AdmitInterviewBriefCommand"
@@ -6663,7 +6902,8 @@
                       "LOW_RISK_FACT_CAPTURE": "#/components/schemas/LowRiskFactCaptureReceipt",
                       "PROPOSAL_ADMISSION": "#/components/schemas/ProposalAdmissionReceipt",
                       "REVIEW_NARRATION_ADMISSION": "#/components/schemas/ReviewNarrationAdmissionReceipt",
-                      "TRANSCRIPT_RECORDED": "#/components/schemas/TranscriptRecordedReceipt"
+                      "TRANSCRIPT_RECORDED": "#/components/schemas/TranscriptRecordedReceipt",
+                      "WORKSHOP_COMPLETION": "#/components/schemas/WorkshopCompletionReceipt"
                     },
                     "propertyName": "receipt_type"
                   },
@@ -6673,6 +6913,9 @@
                     },
                     {
                       "$ref": "#/components/schemas/TranscriptRecordedReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkshopCompletionReceipt"
                     },
                     {
                       "$ref": "#/components/schemas/ProposalAdmissionReceipt"
@@ -7128,6 +7371,57 @@
           }
         },
         "summary": "Record Voice Final Transcript",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/workshop/complete": {
+      "post": {
+        "operationId": "complete_workshop_api_v4_workshop_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkshopCompletionIntent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkshopCompletionOutcome"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FoundationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Complete Workshop",
         "tags": [
           "Workshop Protocol 1.0.0"
         ]

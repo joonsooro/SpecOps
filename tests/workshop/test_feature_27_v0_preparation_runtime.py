@@ -16,6 +16,10 @@ from specops_contracts import workshop_v1 as c
 from specops_workflow import migrate
 from specops_workflow.persistence import WORKSHOP_PROTOCOL_TABLES, V0_RUNTIME_TABLES, engine_for
 from specops_workflow.workshop_protocol import FoundationProtocolError
+from specops_workflow.workshop_completion import (
+    CompletionUtterance,
+    classify_completion_utterance,
+)
 from specops_workshop.api import create_app
 from specops_workshop.sources import SourceCatalog
 from specops_workshop.v4.live_transport import V4LiveTransport
@@ -494,13 +498,19 @@ def test_voice_guidance_refresh_is_applied_only_at_final_turn_boundary():
             events.append(("commit", value.provider_request_id))
             return SimpleNamespace(
                 transcript=SimpleNamespace(
+                    transcript_event_id=uuid4(),
                     command=SimpleNamespace(resulting_case_revision=9)
                 ),
                 duplicate=False,
             )
 
         orchestrator = SimpleNamespace(
-            case_id=uuid4(), foundation=foundation, record_final_transcript=record
+            case_id=uuid4(),
+            foundation=foundation,
+            record_final_transcript=record,
+            complete_from_final_transcript=lambda event_id: asyncio.sleep(
+                0, result=SimpleNamespace(action="NONE", completion=None)
+            ),
         )
         transport = V4LiveTransport(SimpleNamespace(), orchestrator)
         await transport._commit(
@@ -511,6 +521,74 @@ def test_voice_guidance_refresh_is_applied_only_at_final_turn_boundary():
         )
         assert [kind for kind, _ in events] == ["commit", "ack", "guidance"]
         assert "Foundation-admitted questions" in events[-1][1]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("text_value", "expected"),
+    (
+        ("I complete the Spec Workshop.", CompletionUtterance.EXPLICIT),
+        ("I have finished the spec workshop.", CompletionUtterance.EXPLICIT),
+        ("I have defined everything that I need to.", CompletionUtterance.EXPLICIT),
+        ("I think we're done.", CompletionUtterance.AMBIGUOUS),
+        ("That should be all.", CompletionUtterance.AMBIGUOUS),
+        ("Yes, I confirm.", CompletionUtterance.AFFIRMATIVE),
+        ("I haven't finished the Spec Workshop.", CompletionUtterance.NONE),
+        ("Continue with the next question.", CompletionUtterance.NONE),
+    ),
+)
+def test_completion_language_is_deterministic_and_negation_safe(text_value, expected):
+    assert classify_completion_utterance(text_value) is expected
+
+
+def test_ambiguous_voice_completion_asks_exact_confirmation_before_guidance():
+    async def scenario():
+        events = []
+        transcript_id = uuid4()
+
+        class Socket:
+            async def send_json(self, value):
+                events.append(("socket", value))
+
+        class Session:
+            async def send_text(self, value):
+                events.append(("provider", value))
+
+        foundation = SimpleNamespace(case_actor=lambda case_id, role: uuid4())
+
+        async def record(value):
+            return SimpleNamespace(
+                transcript=SimpleNamespace(
+                    transcript_event_id=transcript_id,
+                    command=SimpleNamespace(resulting_case_revision=9),
+                ),
+                duplicate=False,
+            )
+
+        async def completion(event_id):
+            assert event_id == transcript_id
+            return SimpleNamespace(action="CONFIRMATION_REQUIRED", completion=None)
+
+        orchestrator = SimpleNamespace(
+            case_id=uuid4(),
+            foundation=foundation,
+            record_final_transcript=record,
+            complete_from_final_transcript=completion,
+        )
+        completed = await V4LiveTransport(SimpleNamespace(), orchestrator)._commit(
+            Socket(),
+            {"turn_sequence": 1, "text": "I think we're done."},
+            provider_id="ambiguous-finish",
+            session=Session(),
+        )
+        assert completed is False
+        assert events[1] == (
+            "socket",
+            {"type": "COMPLETION_CONFIRMATION_REQUIRED"},
+        )
+        assert "Would you like me to finish the Spec Workshop now?" in events[2][1]
+        assert "Do not ask a substantive question" in events[2][1]
 
     asyncio.run(scenario())
 
@@ -1313,3 +1391,153 @@ def test_preparation_resource_checkpoints_and_failed_cleanup_are_reconstructable
     assert recovered["provider_conversation_id"] == "conversation_one"
     assert projection["cleanup_state"] == "PENDING"
     assert projection["failure_code"] == "CANCELLED_DURING_BOOTSTRAP"
+
+
+def test_button_completion_endpoint_is_durable_idempotent_and_closes_new_turns(tmp_path):
+    adapter = CancellablePreparationAdapter("never")
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    with TestClient(app) as client:
+        for _ in range(200):
+            if client.get("/api/workshop").json()["preparation"]["phase"] == "READY":
+                break
+            import time
+
+            time.sleep(0.01)
+        first = client.post(
+            "/api/v4/workshop/complete",
+            json={"operation_key": "browser-finish-first"},
+        )
+        replay = client.post(
+            "/api/v4/workshop/complete",
+            json={"operation_key": "browser-finish-repeated"},
+        )
+        rejected = client.post(
+            "/api/session/final-turn",
+            json={
+                "turn_sequence": 1,
+                "text": "This must not reopen a completed Workshop.",
+                "provider_request_id": "post-completion-turn",
+                "correction_of_version": None,
+            },
+        )
+        projection = client.get("/api/workshop").json()
+
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200, replay.text
+    assert first.json()["receipt"]["completion_source"] == "BUTTON"
+    assert first.json()["receipt"]["command"]["command_id"] == replay.json()["receipt"][
+        "command"
+    ]["command_id"]
+    assert replay.json()["replayed"] is True
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "INVALID_TRANSITION"
+    assert projection["session"]["conversation_phase"] == "COMPLETE"
+    assert projection["session"]["revision_locked"] is True
+    assert projection["completion"]["completed_at"] is not None
+
+
+def test_explicit_voice_completion_binds_final_transcript_and_finishes_analysis(tmp_path):
+    async def scenario():
+        adapter = CancellablePreparationAdapter("never")
+        app = create_app(
+            settings=configured(tmp_path),
+            source_catalog=SourceCatalog(ROOT),
+            live_provider=object(),
+            analyzer_adapter=adapter,
+        )
+        orchestrator = app.state.workshop_protocol_orchestrator
+        foundation = app.state.workshop_protocol_foundation
+        await orchestrator.prepare_workshop()
+        transcript = await orchestrator.record_final_transcript(
+            FinalTranscriptInput(
+                turn_sequence=1,
+                text="I have finished the Spec Workshop.",
+                provider_request_id="voice-explicit-completion",
+                speaker_actor_id=foundation.case_actor(app.state.bootstrap.case_id, "PM"),
+                actor="PM",
+            )
+        )
+        completion = await orchestrator.complete_from_final_transcript(
+            transcript.transcript.transcript_event_id
+        )
+        assert completion.action == "COMPLETE"
+        assert completion.completion.state == "FINISHING_ANALYSIS"
+        assert (
+            completion.completion.receipt.completion_transcript_event_id
+            == transcript.transcript.transcript_event_id
+        )
+        assert foundation.preparation_projection(app.state.bootstrap.case_id)[
+            "cleanup_state"
+        ] == "FINISHING_ANALYSIS"
+
+        worker = DurableAnalyzerWorker(orchestrator)
+        await worker.drain()
+        assert foundation.analyzer_jobs(app.state.bootstrap.case_id)[0]["state"] == "COMPLETED"
+        assert foundation.workshop_completion_projection(app.state.bootstrap.case_id)[
+            "state"
+        ] == "COMPLETE"
+        assert foundation.active_analyzer_context(app.state.bootstrap.case_id) is None
+        assert adapter.cleanup_attempts == 1
+
+    asyncio.run(scenario())
+
+
+def test_ambiguous_then_affirmative_voice_completion_binds_adjacent_turns(tmp_path):
+    async def scenario():
+        adapter = CancellablePreparationAdapter("never")
+        app = create_app(
+            settings=configured(tmp_path),
+            source_catalog=SourceCatalog(ROOT),
+            live_provider=object(),
+            analyzer_adapter=adapter,
+        )
+        orchestrator = app.state.workshop_protocol_orchestrator
+        foundation = app.state.workshop_protocol_foundation
+        await orchestrator.prepare_workshop()
+        actor = foundation.case_actor(app.state.bootstrap.case_id, "PM")
+        intent = await orchestrator.record_final_transcript(
+            FinalTranscriptInput(
+                turn_sequence=1,
+                text="I think we're done.",
+                provider_request_id="voice-ambiguous-completion",
+                speaker_actor_id=actor,
+                actor="PM",
+            )
+        )
+        pending = await orchestrator.complete_from_final_transcript(
+            intent.transcript.transcript_event_id
+        )
+        assert pending.action == "CONFIRMATION_REQUIRED"
+        assert foundation.preparation_projection(app.state.bootstrap.case_id)[
+            "workshop_complete_at"
+        ] is None
+
+        confirmation = await orchestrator.record_final_transcript(
+            FinalTranscriptInput(
+                turn_sequence=2,
+                text="Yes, I confirm.",
+                provider_request_id="voice-confirmed-completion",
+                speaker_actor_id=actor,
+                actor="PM",
+            )
+        )
+        completed = await orchestrator.complete_from_final_transcript(
+            confirmation.transcript.transcript_event_id
+        )
+        assert completed.action == "COMPLETE"
+        assert completed.completion.receipt.completion_source == "VOICE_CONFIRMED"
+        assert (
+            completed.completion.receipt.completion_transcript_event_id
+            == intent.transcript.transcript_event_id
+        )
+        assert (
+            completed.completion.receipt.confirmation_transcript_event_id
+            == confirmation.transcript.transcript_event_id
+        )
+
+    asyncio.run(scenario())

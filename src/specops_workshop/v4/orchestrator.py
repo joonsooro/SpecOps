@@ -19,6 +19,10 @@ from specops_contracts import artifact_quality_v1 as q
 from specops_contracts import workshop_v1 as c
 from specops_contracts.canonical import analyzer_request_hash, canonical_bytes, domain_hash, transcript_hash
 from specops_workflow.workshop_protocol import WorkshopFoundationService
+from specops_workflow.workshop_completion import (
+    CompletionUtterance,
+    classify_completion_utterance,
+)
 
 from .openai_adapter import (
     ProviderCleanupReceipt,
@@ -72,6 +76,19 @@ class TranscriptAnalysisReceipt(BaseModel):
     transcript: c.TranscriptRecordedReceipt
     analysis: c.ProposalAdmissionReceipt | None
     duplicate: bool
+
+
+class WorkshopCompletionOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    receipt: c.WorkshopCompletionReceipt
+    state: Literal["FINISHING_ANALYSIS", "CLEANUP_PENDING", "COMPLETE"]
+    replayed: bool
+
+
+class CompletionTurnOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    action: Literal["NONE", "CONFIRMATION_REQUIRED", "COMPLETE"]
+    completion: WorkshopCompletionOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -596,6 +613,126 @@ class V4ProductionOrchestrator:
                         cleanup_last_error_code=safe_code,
                     )
             return self.foundation.preparation_projection(self.case_id)
+
+    async def complete_workshop(
+        self,
+        *,
+        operation_key: str,
+        source: c.WorkshopCompletionSource,
+        completion_transcript_event_id: UUID | None = None,
+        confirmation_transcript_event_id: UUID | None = None,
+    ) -> WorkshopCompletionOutcome:
+        """Persist one human completion claim and start terminal-work draining."""
+
+        idempotency = f"v4-workshop-complete-{self.case_id}"
+        async with self._context_lock:
+            replay = self.foundation.workshop_completion_receipt(self.case_id)
+            if replay is not None:
+                assert isinstance(replay, c.WorkshopCompletionReceipt)
+                self._advance_workshop_completion_locked()
+                projection = self.foundation.workshop_completion_projection(self.case_id)
+                return WorkshopCompletionOutcome(
+                    receipt=replay,
+                    state=projection["state"],
+                    replayed=True,
+                )
+
+            actor = self.foundation.case_actor(self.case_id, "PM")
+            values = self._command_base(
+                "CLAIM_WORKSHOP_COMPLETE",
+                operation_key,
+                expected_revision=self.foundation.case_revision(self.case_id),
+                actor=actor,
+            )
+            values["idempotency_key"] = idempotency
+            values.update(
+                command_type="CLAIM_WORKSHOP_COMPLETE",
+                completion_source=source,
+                completion_transcript_event_id=completion_transcript_event_id,
+                confirmation_transcript_event_id=confirmation_transcript_event_id,
+            )
+            receipt = self.foundation.execute(c.ClaimWorkshopCompleteCommand(**values))
+            assert isinstance(receipt, c.WorkshopCompletionReceipt)
+            self._advance_workshop_completion_locked()
+            projection = self.foundation.workshop_completion_projection(self.case_id)
+            return WorkshopCompletionOutcome(
+                receipt=receipt,
+                state=projection["state"],
+                replayed=False,
+            )
+
+    async def complete_from_final_transcript(
+        self, transcript_event_id: UUID
+    ) -> CompletionTurnOutcome:
+        """Apply only explicit or immediately confirmed durable voice completion."""
+
+        transcripts = self.foundation.final_transcripts(self.case_id)
+        if not transcripts or transcripts[-1].event_id != transcript_event_id:
+            raise ValueError("completion intent must bind the latest final transcript")
+        current = transcripts[-1]
+        classification = classify_completion_utterance(current.text)
+        if classification is CompletionUtterance.EXPLICIT:
+            completion = await self.complete_workshop(
+                operation_key=f"voice-explicit-{current.event_id}",
+                source=c.WorkshopCompletionSource.VOICE_EXPLICIT,
+                completion_transcript_event_id=current.event_id,
+            )
+            return CompletionTurnOutcome(action="COMPLETE", completion=completion)
+        if classification is CompletionUtterance.AMBIGUOUS:
+            return CompletionTurnOutcome(action="CONFIRMATION_REQUIRED")
+        if classification is CompletionUtterance.AFFIRMATIVE and len(transcripts) >= 2:
+            intent = transcripts[-2]
+            if classify_completion_utterance(intent.text) is CompletionUtterance.AMBIGUOUS:
+                completion = await self.complete_workshop(
+                    operation_key=f"voice-confirmed-{intent.event_id}-{current.event_id}",
+                    source=c.WorkshopCompletionSource.VOICE_CONFIRMED,
+                    completion_transcript_event_id=intent.event_id,
+                    confirmation_transcript_event_id=current.event_id,
+                )
+                return CompletionTurnOutcome(action="COMPLETE", completion=completion)
+        return CompletionTurnOutcome(action="NONE")
+
+    async def advance_workshop_completion(self) -> bool:
+        async with self._context_lock:
+            return self._advance_workshop_completion_locked()
+
+    def _advance_workshop_completion_locked(self) -> bool:
+        projection = self.foundation.preparation_projection(self.case_id)
+        if projection["workshop_complete_at"] is None:
+            return False
+        if any(
+            job["state"] not in {"COMPLETED", "FAILED"}
+            for job in self.foundation.analyzer_jobs(self.case_id)
+        ):
+            return False
+        if projection["cleanup_state"] != "FINISHING_ANALYSIS":
+            return False
+        context = self.foundation.active_analyzer_context(self.case_id)
+        if context is not None:
+            values = self._command_base(
+                "INVALIDATE_ANALYZER_CONTEXT",
+                f"workshop-complete-{context.context_id}",
+                expected_revision=self.foundation.case_revision(self.case_id),
+            )
+            values.update(
+                command_type="INVALIDATE_ANALYZER_CONTEXT",
+                context_id=context.context_id,
+                reason_code="WORKSHOP_CLOSED",
+            )
+            self.foundation.execute(c.InvalidateAnalyzerContextCommand(**values))
+        self.foundation.set_provider_resource_lifecycle(
+            self.case_id,
+            cleanup_state="PENDING",
+            cleanup_reason="WORKSHOP_COMPLETE",
+            last_client_disconnected_at=None,
+            restart_grace_until=None,
+            cleanup_available_at=self.now()
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            cleanup_last_error_code=None,
+        )
+        return True
 
     async def record_final_transcript(
         self, value: FinalTranscriptInput

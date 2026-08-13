@@ -50,6 +50,7 @@ const workshop = {
     asked: [],
   },
   analyzer_jobs: [],
+  completion: { state: "ACTIVE", completed_at: null },
   session: {
     workshop_state: "ACTIVE",
     conversation_phase: "WORKSHOP",
@@ -196,6 +197,37 @@ test("artifact confirmation sends the exact final transcript authentication bind
     actor_id: bootstrap.pm_actor_id,
     assertion_transcript_event_id: transcriptEventId,
   });
+});
+
+test("Finish workshop uses the durable V4 endpoint and locks further input", async ({ page }) => {
+  let requestBody: { operation_key: string } | null = null;
+  let completed = false;
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({
+    json: completed ? {
+      ...workshop,
+      completion: { state: "CLEANUP_PENDING", completed_at: "2026-08-12T12:01:00Z" },
+      session: {
+        ...workshop.session,
+        workshop_state: "CLEANUP_PENDING",
+        conversation_phase: "COMPLETE",
+        call_state: "ENDED",
+        revision_locked: true,
+        revision_lock_reason: "The PM completed the Spec Workshop.",
+      },
+    } : workshop,
+  }));
+  await page.route("**/api/v4/workshop/complete", async (route) => {
+    requestBody = route.request().postDataJSON();
+    completed = true;
+    return route.fulfill({ json: { state: "CLEANUP_PENDING", replayed: false } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Finish workshop" }).click();
+  await expect(page.getByText("Spec Workshop completed. Finishing committed analysis and provider cleanup.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Finish workshop" })).toBeDisabled();
+  await expect(page.getByLabel("Text fallback")).toBeDisabled();
+  expect(requestBody?.operation_key).toMatch(/^browser-finish-/);
 });
 
 test("preserves the governed three-panel reading order and narrow layout", async ({ page }, testInfo) => {

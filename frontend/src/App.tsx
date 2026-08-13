@@ -53,6 +53,10 @@ type WorkshopProjection = {
     asked: string[];
   };
   analyzer_jobs: { job_id: string; operation: string; state: string; attempt_count: number }[];
+  completion: {
+    state: "ACTIVE" | "FINISHING_ANALYSIS" | "CLEANUP_PENDING" | "COMPLETE";
+    completed_at: string | null;
+  };
   session: {
     workshop_state: string;
     conversation_phase: "WORKSHOP" | "HANDOFF_READY" | "COMPLETE";
@@ -198,6 +202,14 @@ export function App() {
     if (event.type === "TRANSCRIPT_PARTIAL") setPartial(String(event.text ?? ""));
     if (event.type === "TRANSCRIPT_FINAL") { setPartial(""); void refresh(); }
     if (event.type === "FINAL_COMMITTED" || event.type === "PROPOSAL_PENDING" || event.type === "CONTROL_APPLIED" || event.type === "FINISH_COMPLETE") void refresh();
+    if (event.type === "COMPLETION_CONFIRMATION_REQUIRED") setNotice("Please confirm whether you want to finish the Spec Workshop now.");
+    if (event.type === "WORKSHOP_COMPLETE") {
+      live.current?.end();
+      setStarted(false);
+      setCallState("ENDED");
+      setNotice("Spec Workshop completed. Finishing committed analysis and provider cleanup.");
+      void refresh();
+    }
     if (event.type === "PROPOSAL_PENDING") setNotice("Proposal ready. Confirm, edit, or reject before the conversation advances.");
     if (event.type === "INTERRUPTED") setNotice("Agent playback stopped");
     if (event.type === "ERROR") setFailure(`Voice control failed: ${String(event.code)}`);
@@ -230,6 +242,33 @@ export function App() {
     setCallState("ENDED");
     setStarted(false);
     setNotice("Conversation ended. Governed evidence remains available.");
+  };
+
+  const finishWorkshop = async () => {
+    if (!preparationReady || workshop?.completion?.completed_at) return;
+    setFailure(null);
+    setBusyAction("finish");
+    try {
+      const response = await fetch("/api/v4/workshop/complete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operation_key: `browser-finish-${crypto.randomUUID()}` }),
+      });
+      if (!response.ok) {
+        const payload = await response.json() as { detail?: { code?: string } | string };
+        const detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.code;
+        throw new Error(detail ?? "Foundation refused Workshop completion");
+      }
+      live.current?.end();
+      setStarted(false);
+      setCallState("ENDED");
+      await refresh();
+      setNotice("Spec Workshop completed. Finishing committed analysis and provider cleanup.");
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : "Foundation refused Workshop completion.");
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   const submitText = async (event: FormEvent) => {
@@ -382,6 +421,7 @@ export function App() {
     workshop?.preparation.phase ?? "VALIDATING_DOCUMENTS",
     workshop?.runway.depth ?? 0,
   );
+  const workshopComplete = !!workshop?.completion?.completed_at;
   const lineMap = useMemo(() => new Map(bootstrap?.technical_source_lines ?? []), [bootstrap]);
 
   return (
@@ -410,13 +450,16 @@ export function App() {
               </li>
             ))}
           </ol>
-          <button className="mic-button" type="button" disabled={!started && !preparationReady} onClick={started ? () => live.current?.interrupt() : startConversation} aria-label={started ? "Stop agent playback" : "Start Spec Workshop"}>
+          <button className="mic-button" type="button" disabled={!started && (!preparationReady || workshopComplete)} onClick={started ? () => live.current?.interrupt() : startConversation} aria-label={started ? "Stop agent playback" : "Start Spec Workshop"}>
             <span aria-hidden="true">{started ? "Ⅱ" : "●"}</span>
           </button>
           <p className="call-prompt">{started ? "Tap to stop playback" : "Start Spec Workshop"}</p>
           <div className="call-actions">
             <button type="button" onClick={toggleMute} disabled={!started}>{muted ? "Unmute" : "Mute"}</button>
             <button type="button" onClick={endConversation} disabled={!started}>End</button>
+            <button type="button" onClick={finishWorkshop} disabled={!preparationReady || workshopComplete || busyAction !== null}>
+              {busyAction === "finish" ? "Finishing…" : "Finish workshop"}
+            </button>
           </div>
         </div>
 
@@ -445,7 +488,7 @@ export function App() {
         <form className="text-fallback" onSubmit={submitText}>
           <label htmlFor="fallback-text">Text fallback</label>
           <div>
-            <textarea id="fallback-text" value={text} onChange={(event) => setText(event.target.value)} placeholder={preparationReady ? "Add a final PM decision…" : "Available when Workshop preparation is ready"} rows={2} disabled={!preparationReady} />
+            <textarea id="fallback-text" value={text} onChange={(event) => setText(event.target.value)} placeholder={preparationReady ? "Add a final PM decision…" : "Available when Workshop preparation is ready"} rows={2} disabled={!preparationReady || workshopComplete} />
             <button type="submit" disabled={!preparationReady || !text.trim() || phase === "COMPLETE" || !!workshop?.session.revision_locked}>Send</button>
           </div>
           <small>Use after a voice or device disconnect. Final text follows the same evidence gate.</small>

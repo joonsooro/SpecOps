@@ -1578,6 +1578,43 @@ class RecordFinalTranscriptCommand(StrictRevisionCommandEnvelope):
         return self
 
 
+class WorkshopCompletionSource(StrEnum):
+    BUTTON = "BUTTON"
+    VOICE_EXPLICIT = "VOICE_EXPLICIT"
+    VOICE_CONFIRMED = "VOICE_CONFIRMED"
+
+
+class ClaimWorkshopCompleteCommand(StrictRevisionCommandEnvelope):
+    command_type: Literal["CLAIM_WORKSHOP_COMPLETE"]
+    acting_actor_id: UUID
+    completion_source: WorkshopCompletionSource
+    completion_transcript_event_id: UUID | None
+    confirmation_transcript_event_id: UUID | None
+
+    @model_validator(mode="after")
+    def source_binding(self) -> ClaimWorkshopCompleteCommand:
+        if self.completion_source is WorkshopCompletionSource.BUTTON:
+            if (
+                self.completion_transcript_event_id is not None
+                or self.confirmation_transcript_event_id is not None
+            ):
+                raise ValueError("button completion cannot carry transcript bindings")
+        elif self.completion_source is WorkshopCompletionSource.VOICE_EXPLICIT:
+            if (
+                self.completion_transcript_event_id is None
+                or self.confirmation_transcript_event_id is not None
+            ):
+                raise ValueError("explicit voice completion requires exactly one transcript")
+        elif (
+            self.completion_transcript_event_id is None
+            or self.confirmation_transcript_event_id is None
+            or self.completion_transcript_event_id
+            == self.confirmation_transcript_event_id
+        ):
+            raise ValueError("confirmed voice completion requires two distinct transcripts")
+        return self
+
+
 class AdmitInterviewBriefCommand(StrictRevisionCommandEnvelope):
     command_type: Literal["ADMIT_INTERVIEW_BRIEF"]
     acting_actor_id: Literal["SYSTEM"]
@@ -1887,6 +1924,7 @@ FoundationCommand = Annotated[
     ActivateAnalyzerContextCommand
     | InvalidateAnalyzerContextCommand
     | RecordFinalTranscriptCommand
+    | ClaimWorkshopCompleteCommand
     | AdmitInterviewBriefCommand
     | AdmitTurnAnalysisCommand
     | AdmitGuidanceCommand
@@ -2010,6 +2048,22 @@ class TranscriptRecordedReceipt(ContractModel):
     transcript_hash: Sha256
 
 
+class WorkshopCompletionState(StrEnum):
+    FINISHING_ANALYSIS = "FINISHING_ANALYSIS"
+    CLEANUP_PENDING = "CLEANUP_PENDING"
+    COMPLETE = "COMPLETE"
+
+
+class WorkshopCompletionReceipt(ContractModel):
+    receipt_type: Literal["WORKSHOP_COMPLETION"]
+    command: FoundationCommandReceipt
+    completion_source: WorkshopCompletionSource
+    completed_at: datetime
+    completion_transcript_event_id: UUID | None
+    confirmation_transcript_event_id: UUID | None
+    state: Literal[WorkshopCompletionState.FINISHING_ANALYSIS]
+
+
 class ProposalAdmissionReceipt(ContractModel):
     receipt_type: Literal["PROPOSAL_ADMISSION"]
     command: FoundationCommandReceipt
@@ -2070,6 +2124,7 @@ class ArtifactConfirmationReceipt(ContractModel):
 FoundationReceipt = Annotated[
     AnalyzerContextCommandReceipt
     | TranscriptRecordedReceipt
+    | WorkshopCompletionReceipt
     | ProposalAdmissionReceipt
     | ArtifactSynthesisAdmissionReceipt
     | ReviewNarrationAdmissionReceipt

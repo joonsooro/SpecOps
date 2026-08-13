@@ -26,6 +26,10 @@ class V4LiveTransport:
             self.orchestrator.case_id
         )
         runway = self.orchestrator.foundation.runway_projection(self.orchestrator.case_id)
+        if preparation.get("workshop_complete_at") is not None:
+            await websocket.send_json({"type": "ERROR", "code": "WORKSHOP_COMPLETE"})
+            await websocket.close(code=4409)
+            return
         if preparation["phase"] != "READY":
             await websocket.send_json(
                 {"type": "ERROR", "code": "WORKSHOP_PREPARATION_NOT_READY"}
@@ -75,7 +79,7 @@ class V4LiveTransport:
 
     async def _commit(
         self, websocket: WebSocket, value: dict, *, provider_id: str, session=None
-    ) -> None:
+    ) -> bool:
         receipt = await self.orchestrator.record_final_transcript(
             FinalTranscriptInput(
                 turn_sequence=int(value["turn_sequence"]),
@@ -94,6 +98,28 @@ class V4LiveTransport:
                 "duplicate": receipt.duplicate,
             }
         )
+        completion = await self.orchestrator.complete_from_final_transcript(
+            receipt.transcript.transcript_event_id
+        )
+        if completion.action == "COMPLETE":
+            assert completion.completion is not None
+            await websocket.send_json(
+                {
+                    "type": "WORKSHOP_COMPLETE",
+                    "state": completion.completion.state,
+                    "replayed": completion.completion.replayed,
+                }
+            )
+            return True
+        if completion.action == "CONFIRMATION_REQUIRED":
+            await websocket.send_json({"type": "COMPLETION_CONFIRMATION_REQUIRED"})
+            if session is not None:
+                await session.send_text(
+                    "The PM may be signaling completion. Ask exactly: "
+                    "‘Would you like me to finish the Spec Workshop now?’ "
+                    "Do not ask a substantive question until the PM answers."
+                )
+            return False
         if session is not None:
             # This input-final callback is the conversational turn boundary.
             # Only a fresh Foundation read may update Voice guidance.
@@ -104,6 +130,7 @@ class V4LiveTransport:
                 self.orchestrator.case_id
             )
             await session.send_text(self._voice_instruction(card, runway))
+        return False
 
     @staticmethod
     def _voice_instruction(card: c.VoiceSessionCard, runway: dict) -> str:
@@ -119,6 +146,8 @@ class V4LiveTransport:
         return (
             "Facilitate the Workshop without interpreting confirmations. Ask only one of the "
             "following Foundation-admitted questions, in order; do not invent, revise, or combine them. "
+            "A clear PM statement that the Spec Workshop is complete ends the Workshop; an ambiguous "
+            "completion statement requires one direct confirmation before any further substantive question. "
             f"Runway health: {card.runway_health.value}.\n{allowed}"
         )
 
@@ -132,12 +161,14 @@ class V4LiveTransport:
                 return
             value = json.loads(message["text"])
             if value.get("type") == "TEXT":
-                await self._commit(
+                completed = await self._commit(
                     websocket,
                     value,
                     provider_id=str(value["provider_request_id"]),
                     session=session,
                 )
+                if completed:
+                    return
             elif value.get("type") == "INTERRUPT":
                 await session.interrupt()
             elif value.get("type") == "DECISION_SELECTION":
@@ -180,13 +211,15 @@ class V4LiveTransport:
             elif event.type is VoiceEventType.INPUT_PARTIAL:
                 await websocket.send_json({"type": "TRANSCRIPT_PARTIAL", "text": event.text})
             elif event.type is VoiceEventType.INPUT_FINAL and event.text:
-                await self._commit(
+                completed = await self._commit(
                     websocket,
                     {"turn_sequence": sequence, "text": event.text},
                     provider_id=event.provider_request_id or f"gemini-turn-{sequence}",
                     session=session,
                 )
                 sequence += 1
+                if completed:
+                    return
             elif event.type is VoiceEventType.OUTPUT_TRANSCRIPT:
                 await websocket.send_json({"type": "AGENT_TRANSCRIPT", "text": event.text})
             elif event.type is VoiceEventType.INTERRUPTED:
@@ -201,11 +234,13 @@ class V4LiveTransport:
             except WebSocketDisconnect:
                 return
             if value.get("type") == "TEXT":
-                await self._commit(
+                completed = await self._commit(
                     websocket,
                     value,
                     provider_id=str(value["provider_request_id"]),
                 )
+                if completed:
+                    return
             elif value.get("type") == "END":
                 return
             else:

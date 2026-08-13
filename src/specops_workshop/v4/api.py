@@ -14,6 +14,7 @@ from specops_workflow.workshop_protocol import FoundationProtocolError, Workshop
 
 from .openai_adapter import safe_validation_diagnostics
 from .artifact_quality_adapter import ArtifactQualityEvaluatorError
+from .orchestrator import WorkshopCompletionOutcome
 
 
 router = APIRouter(prefix="/api/v4", tags=["Workshop Protocol 1.0.0"])
@@ -95,6 +96,11 @@ class DecisionResponseIntent(BaseModel):
         tuple[c.VoiceConfirmationSelectionItemCandidate, ...],
         Field(min_length=1, max_length=26),
     ]
+
+
+class WorkshopCompletionIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    operation_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 
 
@@ -183,6 +189,25 @@ async def execute_foundation_command(
     request: Request, command=Depends(_parse_foundation_command)
 ) -> c.FoundationReceipt:
     return _execute(request, command)
+
+
+@router.post(
+    "/workshop/complete",
+    response_model=WorkshopCompletionOutcome,
+    responses={409: {"model": FoundationErrorEnvelope}},
+)
+async def complete_workshop(
+    request: Request, value: WorkshopCompletionIntent
+) -> WorkshopCompletionOutcome:
+    try:
+        return await request.app.state.workshop_protocol_orchestrator.complete_workshop(
+            operation_key=value.operation_key,
+            source=c.WorkshopCompletionSource.BUTTON,
+        )
+    except FoundationProtocolError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code.value}) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": str(exc)}) from None
 
 
 @router.post(

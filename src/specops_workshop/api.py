@@ -193,6 +193,8 @@ def create_app(
         preparation = foundation.preparation_projection(bootstrap.case_id)
         runway = foundation.runway_projection(bootstrap.case_id)
         voice_card = foundation.voice_session_card(bootstrap.case_id)
+        completion = foundation.workshop_completion_projection(bootstrap.case_id)
+        completed = completion["completed_at"] is not None
         return {
             "protocol_version": c.PROTOCOL_VERSION,
             "case_id": str(case.case_id),
@@ -201,12 +203,21 @@ def create_app(
             "readiness": case.readiness.value,
             "review_obligation": case.review_obligation.value,
             "session": {
-                "workshop_state": "ACTIVE",
-                "conversation_phase": "WORKSHOP",
-                "call_state": "READY" if preparation["phase"] == "READY" else "PREPARING",
-                "revision_locked": False,
-                "revision_lock_reason": None,
+                "workshop_state": completion["state"],
+                "conversation_phase": "COMPLETE" if completed else "WORKSHOP",
+                "call_state": (
+                    "ENDED"
+                    if completed
+                    else "READY"
+                    if preparation["phase"] == "READY"
+                    else "PREPARING"
+                ),
+                "revision_locked": completed,
+                "revision_lock_reason": (
+                    "The PM completed the Spec Workshop." if completed else None
+                ),
             },
+            "completion": completion,
             "preparation": preparation,
             "runway": runway,
             "voice_session_card": voice_card.model_dump(mode="json"),

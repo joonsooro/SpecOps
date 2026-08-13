@@ -59,6 +59,7 @@ from .artifact_projection import (
     validate_exact,
 )
 from .artifact_quality_foundation import ArtifactQualityFoundationMixin
+from .workshop_completion import CompletionUtterance, classify_completion_utterance
 
 
 SCHEMA_ROOT = Path(__file__).resolve().parents[1] / "specops_contracts" / "schemas"
@@ -243,6 +244,22 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ).scalar_one_or_none()
         return None if value is None else TypeAdapter(c.FoundationReceipt).validate_json(value)
 
+    def workshop_completion_receipt(
+        self, case_id: UUID
+    ) -> c.WorkshopCompletionReceipt | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_command_ledger"]
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(table.c.receipt_json)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.command_type == "CLAIM_WORKSHOP_COMPLETE",
+                )
+                .order_by(table.c.recorded_at)
+                .limit(1)
+            ).scalar_one_or_none()
+        return None if value is None else c.WorkshopCompletionReceipt.model_validate_json(value)
+
     def active_analyzer_context(self, case_id: UUID) -> c.AnalyzerContextBinding | None:
         """Recover the persisted provider binding; provider IDs never live in UI state."""
 
@@ -344,6 +361,23 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 else None
             ),
         }
+
+    def workshop_completion_projection(self, case_id: UUID) -> dict[str, Any]:
+        preparation = self.preparation_projection(case_id)
+        completed_at = preparation["workshop_complete_at"]
+        if completed_at is None:
+            return {"state": "ACTIVE", "completed_at": None}
+        jobs_terminal = all(
+            job["state"] in {"COMPLETED", "FAILED"}
+            for job in self.analyzer_jobs(case_id)
+        )
+        if not jobs_terminal:
+            state = c.WorkshopCompletionState.FINISHING_ANALYSIS.value
+        elif preparation["cleanup_state"] == "COMPLETED":
+            state = c.WorkshopCompletionState.COMPLETE.value
+        else:
+            state = c.WorkshopCompletionState.CLEANUP_PENDING.value
+        return {"state": state, "completed_at": completed_at}
 
     def set_provider_resource_lifecycle(self, case_id: UUID, **values: Any) -> None:
         """Persist content-free retention/release state independently of preparation."""
@@ -1044,6 +1078,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             return self._invalidate_context(connection, command, prior_revision)
         if isinstance(command, c.RecordFinalTranscriptCommand):
             return self._record_transcript(connection, command, prior_revision)
+        if isinstance(command, c.ClaimWorkshopCompleteCommand):
+            return self._claim_workshop_complete(connection, command, prior_revision)
         if isinstance(command, c.AdmitInterviewBriefCommand):
             return self._admit_candidate(
                 connection,
@@ -1170,6 +1206,14 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
 
     def _record_transcript(self, connection, command, prior_revision):
+        preparation = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        completed_at = connection.execute(
+            select(preparation.c.workshop_complete_at).where(
+                preparation.c.case_id == str(command.case_id)
+            )
+        ).scalar_one()
+        if completed_at is not None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
         table = WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"]
         prior = connection.execute(
             select(func.max(table.c.sequence_number)).where(
@@ -1236,6 +1280,77 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             command=self._base_receipt(command, prior_revision),
             transcript_event_id=command.transcript.event_id,
             transcript_hash=command.transcript.transcript_hash,
+        )
+
+    def _claim_workshop_complete(self, connection, command, prior_revision):
+        preparations = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        preparation = connection.execute(
+            select(preparations).where(preparations.c.case_id == str(command.case_id))
+        ).mappings().one()
+        if preparation["phase"] != "READY" or preparation["workshop_complete_at"] is not None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+        case = connection.execute(
+            select(foundation_cases).where(foundation_cases.c.id == str(command.case_id))
+        ).mappings().one()
+        if case["pm_actor_id"] != str(command.acting_actor_id):
+            raise FoundationProtocolError(c.FoundationRejectionCode.AUTHORITY_FAILED)
+        self._require_participant(connection, command.case_id, command.acting_actor_id)
+
+        if command.completion_source is not c.WorkshopCompletionSource.BUTTON:
+            assert command.completion_transcript_event_id is not None
+            completion = self._participant_transcript(
+                connection,
+                command.case_id,
+                command.completion_transcript_event_id,
+                command.acting_actor_id,
+            )
+            if completion is None:
+                raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+            classification = classify_completion_utterance(completion.text)
+            if command.completion_source is c.WorkshopCompletionSource.VOICE_EXPLICIT:
+                if classification is not CompletionUtterance.EXPLICIT:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+            else:
+                assert command.confirmation_transcript_event_id is not None
+                confirmation = self._participant_transcript(
+                    connection,
+                    command.case_id,
+                    command.confirmation_transcript_event_id,
+                    command.acting_actor_id,
+                )
+                if (
+                    classification is not CompletionUtterance.AMBIGUOUS
+                    or confirmation is None
+                    or confirmation.sequence_number != completion.sequence_number + 1
+                    or classify_completion_utterance(confirmation.text)
+                    is not CompletionUtterance.AFFIRMATIVE
+                ):
+                    raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+
+        completed_at = self.now()
+        connection.execute(
+            update(preparations)
+            .where(preparations.c.case_id == str(command.case_id))
+            .values(
+                workshop_complete_at=_instant(completed_at),
+                cleanup_state="FINISHING_ANALYSIS",
+                cleanup_reason="WORKSHOP_COMPLETE",
+                last_client_disconnected_at=None,
+                restart_grace_until=None,
+                cleanup_available_at=None,
+                cleanup_last_error_code=None,
+                updated_at=_instant(completed_at),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.WorkshopCompletionReceipt(
+            receipt_type="WORKSHOP_COMPLETION",
+            command=self._base_receipt(command, prior_revision),
+            completion_source=command.completion_source,
+            completed_at=completed_at,
+            completion_transcript_event_id=command.completion_transcript_event_id,
+            confirmation_transcript_event_id=command.confirmation_transcript_event_id,
+            state=c.WorkshopCompletionState.FINISHING_ANALYSIS,
         )
 
     def _consume_runway_and_schedule_guidance(

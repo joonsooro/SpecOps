@@ -33,6 +33,9 @@ class DurableAnalyzerWorker:
 
     async def run_once(self) -> bool:
         projection = self.foundation.preparation_projection(self.orchestrator.case_id)
+        if projection["workshop_complete_at"] is not None:
+            await self.orchestrator.advance_workshop_completion()
+            projection = self.foundation.preparation_projection(self.orchestrator.case_id)
         if projection["cleanup_state"] == "RESTART_GRACE":
             await self.orchestrator.expire_restart_grace()
             projection = self.foundation.preparation_projection(self.orchestrator.case_id)

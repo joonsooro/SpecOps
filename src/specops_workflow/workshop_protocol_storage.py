@@ -34,11 +34,19 @@ V4_TABLE_NAMES = (
     "workshop_protocol_events",
 )
 
+V0_RUNTIME_TABLE_NAMES = (
+    "workshop_preparations",
+    "workshop_preparation_resources",
+    "workshop_runway_items",
+    "workshop_analyzer_jobs",
+)
+
 
 def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
     """Register the V4 tables on the one canonical Foundation metadata graph."""
 
-    if V4_TABLE_NAMES[0] in metadata.tables:
+    all_names = (*V4_TABLE_NAMES, *V0_RUNTIME_TABLE_NAMES)
+    if all(name in metadata.tables for name in all_names):
         return {name: metadata.tables[name] for name in V4_TABLE_NAMES}
 
     tables: dict[str, Table] = {}
@@ -241,6 +249,67 @@ def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
         Column("occurred_at", Text, nullable=False),
         UniqueConstraint("case_id", "event_sequence"),
     )
+    table(
+        "workshop_preparations",
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True),
+        Column("preparation_id", Text, nullable=False, unique=True),
+        Column("phase", Text, nullable=False),
+        Column("started_at", Text, nullable=False),
+        Column("updated_at", Text, nullable=False),
+        Column("ready_at", Text),
+        Column("failure_code", Text),
+        Column("cleanup_state", Text, nullable=False),
+    )
+    table(
+        "workshop_preparation_resources",
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True),
+        Column("source_set_hash", Text, nullable=False),
+        Column("pm_file_id", Text),
+        Column("technical_file_id", Text),
+        Column("provider_conversation_id", Text),
+        Column("bootstrap_request_id", Text, nullable=False),
+        Column("bootstrap_response_id", Text),
+        Column("bootstrap_candidate_json", Text),
+        Column("context_json", Text),
+        Column("updated_at", Text, nullable=False),
+    )
+    table(
+        "workshop_runway_items",
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True),
+        Column("guidance_id", Text, primary_key=True),
+        Column("question_id", Text, primary_key=True),
+        Column("question_version", Integer, nullable=False),
+        Column("position", Integer, nullable=False),
+        Column("exact_text", Text, nullable=False),
+        Column("reason", Text, nullable=False),
+        Column("status", Text, nullable=False),
+        Column("admitted_at", Text, nullable=False),
+        Column("consumed_at", Text),
+        UniqueConstraint("case_id", "guidance_id", "position"),
+    )
+    table(
+        "workshop_analyzer_jobs",
+        Column("job_id", Text, primary_key=True),
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False),
+        Column("session_id", Text, nullable=False),
+        Column("operation", Text, nullable=False),
+        Column("subject_id", Text, nullable=False),
+        Column("dedupe_key", Text, nullable=False, unique=True),
+        Column("priority", Integer, nullable=False),
+        Column("state", Text, nullable=False),
+        Column("provider_request_id", Text, nullable=False),
+        Column("request_json", Text),
+        Column("candidate_json", Text),
+        Column("admission_receipt_json", Text),
+        Column("attempt_count", Integer, nullable=False),
+        Column("lease_owner", Text),
+        Column("lease_expires_at", Text),
+        Column("available_at", Text, nullable=False),
+        Column("last_error_code", Text),
+        Column("created_at", Text, nullable=False),
+        Column("updated_at", Text, nullable=False),
+        UniqueConstraint("case_id", "operation", "subject_id"),
+    )
 
     Index(
         "ix_workshop_semantic_records_current",
@@ -254,4 +323,10 @@ def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
         tables["workshop_artifact_records"].c.artifact_type,
         tables["workshop_artifact_records"].c.artifact_version,
     )
-    return tables
+    Index(
+        "ix_workshop_analyzer_jobs_eligible",
+        tables["workshop_analyzer_jobs"].c.state,
+        tables["workshop_analyzer_jobs"].c.priority,
+        tables["workshop_analyzer_jobs"].c.available_at,
+    )
+    return {name: tables[name] for name in V4_TABLE_NAMES}

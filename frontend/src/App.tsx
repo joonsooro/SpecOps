@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LiveAudioClient } from "./audio/liveClient";
+import { workshopStartEnabled } from "./uiModel";
 import type { components as WorkshopProtocolComponents } from "./generated/workshopProtocol";
 
 type DecisionBatchReviewView = WorkshopProtocolComponents["schemas"]["DecisionBatchReviewView"];
@@ -34,6 +35,23 @@ type GovernanceItem = {
   approval_scopes: ("BUSINESS" | "TECHNICAL")[];
 };
 type WorkshopProjection = {
+  preparation: {
+    phase: "VALIDATING_DOCUMENTS" | "PREPARING_ANALYZER" | "ANALYZER_REVIEWING_DOCUMENTS" | "FORMULATING_WORKSHOP_PLAN" | "VALIDATING_INITIAL_RUNWAY" | "READY" | "FAILED";
+    message: string;
+    started_at: string;
+    updated_at: string;
+    ready_at: string | null;
+    failure_code: string | null;
+    delayed: boolean;
+    delayed_message: string | null;
+  };
+  runway: {
+    guidance_id: string | null;
+    depth: number;
+    questions: { question_id: string; question_version: number; position: number; exact_text: string; reason: string }[];
+    asked: string[];
+  };
+  analyzer_jobs: { job_id: string; operation: string; state: string; attempt_count: number }[];
   session: {
     workshop_state: string;
     conversation_phase: "WORKSHOP" | "HANDOFF_READY" | "COMPLETE";
@@ -88,7 +106,7 @@ export function App() {
   const [workshop, setWorkshop] = useState<WorkshopProjection | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [notice, setNotice] = useState("Validating governed sources…");
-  const [callState, setCallState] = useState("READY");
+  const [callState, setCallState] = useState("PREPARING");
   const [partial, setPartial] = useState("");
   const [text, setText] = useState("");
   const [started, setStarted] = useState(false);
@@ -124,7 +142,7 @@ export function App() {
     if (!response.ok) throw new Error("Workshop projection unavailable");
     const value = await response.json() as WorkshopProjection;
     setWorkshop(value);
-    setCallState(value.session.call_state);
+    if (!started) setCallState(value.session.call_state);
     if (bootstrap?.case_id) await Promise.all([
       loadDecisionReview(bootstrap.case_id),
       loadArtifactReview(bootstrap.case_id),
@@ -147,7 +165,7 @@ export function App() {
         setBootstrap(nextBootstrap);
         setWorkshop(nextWorkshop);
         setCallState(nextWorkshop.session.call_state);
-        setNotice("Foundation and delegation verified");
+        setNotice(nextWorkshop.preparation.message);
         void loadDecisionReview(nextBootstrap.case_id);
         void loadArtifactReview(nextBootstrap.case_id);
         reportBrowserSpan(startedAt, "OK");
@@ -158,6 +176,15 @@ export function App() {
       });
     return () => live.current?.end();
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => { void refresh().catch(() => undefined); }, 1000);
+    return () => window.clearInterval(timer);
+  });
+
+  useEffect(() => {
+    if (!started && workshop?.preparation) setNotice(workshop.preparation.message);
+  }, [started, workshop?.preparation.phase, workshop?.preparation.message]);
 
   const onLiveEvent = (raw: unknown) => {
     const event = raw as Record<string, unknown>;
@@ -171,6 +198,7 @@ export function App() {
   };
 
   const startConversation = async () => {
+    if (workshop?.preparation.phase !== "READY") return;
     setFailure(null);
     setCallState("CONNECTING");
     try {
@@ -344,6 +372,10 @@ export function App() {
   const blocked = workshop?.governance?.items.filter((item) => item.review_obligation === "DECISION_REQUIRED") ?? [];
   const later = workshop?.governance?.items.filter((item) => item.review_obligation === "LATER_REVIEW") ?? [];
   const phase = workshop?.session.conversation_phase ?? "WORKSHOP";
+  const preparationReady = workshopStartEnabled(
+    workshop?.preparation.phase ?? "VALIDATING_DOCUMENTS",
+    workshop?.runway.depth ?? 0,
+  );
   const lineMap = useMemo(() => new Map(bootstrap?.technical_source_lines ?? []), [bootstrap]);
 
   return (
@@ -365,10 +397,17 @@ export function App() {
               <i key={index} style={{ height: `${height}%` }} />
             ))}
           </div>
-          <button className="mic-button" type="button" onClick={started ? () => live.current?.interrupt() : startConversation} aria-label={started ? "Stop agent playback" : "Start conversation"}>
+          <ol className="runway-rail" aria-label={`${workshop?.runway.depth ?? 0} of 6 admitted questions ready`}>
+            {Array.from({ length: 6 }, (_, index) => (
+              <li key={index} data-admitted={index < (workshop?.runway.depth ?? 0)}>
+                <span className="sr-only">Question {index + 1} {index < (workshop?.runway.depth ?? 0) ? "admitted" : "not ready"}</span>
+              </li>
+            ))}
+          </ol>
+          <button className="mic-button" type="button" disabled={!started && !preparationReady} onClick={started ? () => live.current?.interrupt() : startConversation} aria-label={started ? "Stop agent playback" : "Start Spec Workshop"}>
             <span aria-hidden="true">{started ? "Ⅱ" : "●"}</span>
           </button>
-          <p className="call-prompt">{started ? "Tap to stop playback" : "Start conversation"}</p>
+          <p className="call-prompt">{started ? "Tap to stop playback" : "Start Spec Workshop"}</p>
           <div className="call-actions">
             <button type="button" onClick={toggleMute} disabled={!started}>{muted ? "Unmute" : "Mute"}</button>
             <button type="button" onClick={endConversation} disabled={!started}>End</button>
@@ -377,6 +416,7 @@ export function App() {
 
         <div className="live-status" role="status" aria-live="polite">
           <span>{notice}</span>
+          {workshop?.preparation.delayed && <em>{workshop.preparation.delayed_message}</em>}
           {failure && <strong>{failure}</strong>}
         </div>
 
@@ -399,8 +439,8 @@ export function App() {
         <form className="text-fallback" onSubmit={submitText}>
           <label htmlFor="fallback-text">Text fallback</label>
           <div>
-            <textarea id="fallback-text" value={text} onChange={(event) => setText(event.target.value)} placeholder="Add a final PM decision…" rows={2} />
-            <button type="submit" disabled={!text.trim() || phase === "COMPLETE" || !!workshop?.session.revision_locked}>Send</button>
+            <textarea id="fallback-text" value={text} onChange={(event) => setText(event.target.value)} placeholder={preparationReady ? "Add a final PM decision…" : "Available when Workshop preparation is ready"} rows={2} disabled={!preparationReady} />
+            <button type="submit" disabled={!preparationReady || !text.trim() || phase === "COMPLETE" || !!workshop?.session.revision_locked}>Send</button>
           </div>
           <small>Use after a voice or device disconnect. Final text follows the same evidence gate.</small>
         </form>

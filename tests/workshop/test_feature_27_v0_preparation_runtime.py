@@ -1,0 +1,949 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
+
+from specops_contracts import workshop_v1 as c
+from specops_workflow import migrate
+from specops_workflow.persistence import WORKSHOP_PROTOCOL_TABLES, V0_RUNTIME_TABLES, engine_for
+from specops_workflow.workshop_protocol import FoundationProtocolError
+from specops_workshop.api import create_app
+from specops_workshop.sources import SourceCatalog
+from specops_workshop.v4.live_transport import V4LiveTransport
+from specops_workshop.v4.openai_adapter import BootstrapResult, PreparedProviderContext
+from specops_workshop.v4.orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
+from specops_workshop.v4.scheduler import DurableAnalyzerWorker
+
+from test_feature_25_v4_foundation import (
+    CASE_ID,
+    CONTEXT_ID,
+    NOW,
+    REQUEST_HASH,
+    RUN_ID,
+    SOURCE_SET_HASH,
+    _activate,
+    _base,
+    _runtime,
+    _transcript_command,
+)
+from test_feature_26_v4_production_seam import (
+    ROOT,
+    DeterministicAdapter,
+    configured,
+)
+
+
+def _brief(question_count: int = 6) -> c.InterviewBriefCandidate:
+    questions = tuple(
+        c.QuestionCandidate(
+            candidate_key=f"question-{index}",
+            text=f"Which confirmed export choice applies to clarification area {index}?",
+            rationale=f"Clarification area {index} must be answered independently.",
+            question_shape=c.QuestionShape.OPEN_TEXT,
+            capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
+            answer_options=(),
+            addresses_problem_keys=("problem-export",),
+            prerequisite_problem_keys=(),
+            safe_without_current_turn_interpretation=True,
+        )
+        for index in range(1, question_count + 1)
+    )
+    return c.InterviewBriefCandidate(
+        protocol_version="1.0.0",
+        output_type="INTERVIEW_BRIEF_CANDIDATE",
+        analyzer_run_id=RUN_ID,
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        customer_promise_summary="Export filtered orders with governed behavior.",
+        evidence_candidates=(
+            c.EvidenceCandidate(
+                candidate_key="evidence-export",
+                source_role=c.SourceRole.TECHNICAL_CONTRACT,
+                locator=c.SourceLineLocator(
+                    locator_kind=c.SourceLocatorKind.SOURCE_LINES,
+                    start_line=531,
+                    end_line=531,
+                ),
+                relevance_claim="The source fixes the CSV encoding contract.",
+                quoted_text_candidate="CSV output uses UTF-8 and one header row.",
+            ),
+        ),
+        problems=(
+            c.ProblemCandidate(
+                candidate_key="problem-export",
+                problem_kind=c.ProblemKind.MISSING_DECISION,
+                domain=c.Domain.PRODUCT,
+                severity=c.Severity.HIGH,
+                statement="The PM must close the export behavior decisions.",
+                consequence="The governed package cannot be completed yet.",
+                evidence_candidate_keys=("evidence-export",),
+            ),
+        ),
+        problem_clusters=(),
+        questions=questions,
+        initial_runway=c.QuestionRunwayCandidate(
+            recommended_question_key="question-1",
+            safe_alternate_question_keys=tuple(
+                f"question-{index}" for index in range(2, question_count + 1)
+            ),
+            do_not_ask_question_keys=(),
+        ),
+        confirmation_checkpoints=(),
+    )
+
+
+def _admit_brief(foundation, question_count: int = 6):
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_INTERVIEW_BRIEF",
+        analyzer_run_id=RUN_ID,
+        context_id=CONTEXT_ID,
+        provider_request_hash=REQUEST_HASH,
+        candidate=_brief(question_count),
+    )
+    return foundation.execute(c.AdmitInterviewBriefCommand(**values))
+
+
+def test_real_0004_database_upgrades_additively_to_0005(tmp_path):
+    url, original = _runtime(tmp_path)
+    original_case = original.get_case(CASE_ID)
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", url)
+    # Preserve a real canonical V4 case while removing only the new operational
+    # tables. Registration after upgrade must backfill those rows idempotently.
+    command.downgrade(config, "0004")
+    with engine_for(url).connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0004"
+        assert "workshop_preparations" not in engine_for(url).dialect.get_table_names(connection)
+    migrate(url)
+    with engine_for(url).connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005"
+        tables = set(engine_for(url).dialect.get_table_names(connection))
+    assert {
+        "workshop_preparations",
+        "workshop_preparation_resources",
+        "workshop_runway_items",
+        "workshop_analyzer_jobs",
+    }.issubset(tables)
+    restarted = type(original)(url, now=lambda: NOW)
+    restarted.register_case(
+        case_id=original_case.case_id,
+        session_id=original_case.session_id,
+        source_set_hash=original_case.source_set_hash,
+    )
+    assert restarted.preparation_projection(CASE_ID)["phase"] == "VALIDATING_DOCUMENTS"
+    assert restarted.preparation_resources(CASE_ID)["source_set_hash"] == SOURCE_SET_HASH
+
+
+def test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_five(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    receipt = _admit_brief(foundation)
+    assert receipt.admitted_guidance_id is not None
+    runway = foundation.runway_projection(CASE_ID)
+    assert runway["depth"] == 6
+    assert len({item["question_id"] for item in runway["questions"]}) == 6
+    assert foundation.current_admitted_guidance(CASE_ID).guidance_id == receipt.admitted_guidance_id
+
+
+def test_insufficient_bootstrap_runway_fails_closed_without_guidance(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    receipt = _admit_brief(foundation, 5)
+    assert receipt.admitted_guidance_id is None
+    assert foundation.runway_projection(CASE_ID)["depth"] == 0
+
+
+def test_guidance_is_selection_only_and_rejects_question_text_smuggling(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    admitted = foundation.current_admitted_guidance(CASE_ID)
+    assert admitted is not None
+    assert "new_questions" not in str(c.GuidanceCandidate.model_json_schema())
+    run_id = uuid4()
+    request_hash = "sha256:" + "8" * 64
+    candidate = c.GuidanceCandidate(
+        protocol_version="1.0.0",
+        output_type="GUIDANCE_CANDIDATE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        request_hash=request_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        recommended_question=c.GuidanceQuestion(
+            question_ref=c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=admitted.recommended_question.question_id,
+                expected_version=admitted.recommended_question.question_version,
+            ),
+            exact_text="This invented question was never admitted.",
+            reason="Attempted question smuggling.",
+        ),
+        safe_alternates=(),
+        do_not_ask_question_refs=(),
+        dependencies=(
+            c.GuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_ref=None,
+            ),
+        ),
+        acknowledgement_suggestion="A safe question is available.",
+    )
+    values = _base(foundation.case_revision(CASE_ID))
+    values.update(
+        command_type="ADMIT_GUIDANCE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=request_hash,
+        candidate=candidate,
+    )
+    with pytest.raises(FoundationProtocolError) as error:
+        foundation.execute(c.AdmitGuidanceCommand(**values))
+    assert error.value.code is c.FoundationRejectionCode.STALE_ENTITY
+
+
+def test_foundation_derives_current_dependencies_for_every_guidance_question(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    current = foundation.current_admitted_guidance(CASE_ID)
+    selected = (current.recommended_question, *current.safe_alternates)
+    run_id = uuid4()
+    request_hash = "sha256:" + "7" * 64
+    candidate = c.GuidanceCandidate(
+        protocol_version="1.0.0",
+        output_type="GUIDANCE_CANDIDATE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        request_hash=request_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        recommended_question=c.GuidanceQuestion(
+            question_ref=c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=selected[0].question_id,
+                expected_version=selected[0].question_version,
+            ),
+            exact_text=selected[0].exact_text,
+            reason=selected[0].reason,
+        ),
+        safe_alternates=tuple(
+            c.GuidanceQuestion(
+                question_ref=c.FoundationEntityRef(
+                    ref_kind="FOUNDATION_ID",
+                    foundation_id=item.question_id,
+                    expected_version=item.question_version,
+                ),
+                exact_text=item.exact_text,
+                reason=item.reason,
+            )
+            for item in selected[1:]
+        ),
+        do_not_ask_question_refs=(),
+        # Terra need not be trusted to enumerate the selected questions as
+        # dependencies; Foundation derives and validates them on admission.
+        dependencies=(
+            c.GuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_ref=None,
+            ),
+        ),
+        acknowledgement_suggestion="The next admitted clarification is ready.",
+    )
+    values = _base(foundation.case_revision(CASE_ID))
+    values.update(
+        command_type="ADMIT_GUIDANCE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=request_hash,
+        candidate=candidate,
+    )
+    foundation.execute(c.AdmitGuidanceCommand(**values))
+    admitted = foundation.current_admitted_guidance(CASE_ID)
+    question_dependencies = {
+        (item.entity_id, item.expected_version)
+        for item in admitted.dependencies
+        if item.dependency_kind is c.GuidanceDependencyKind.QUESTION
+    }
+    assert question_dependencies == {
+        (item.question_id, item.question_version) for item in selected
+    }
+    assert any(
+        item.dependency_kind is c.GuidanceDependencyKind.PROBLEM
+        for item in admitted.dependencies
+    )
+
+
+def test_transcript_and_pending_analysis_job_are_atomic_and_replay_deduplicates(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    command_value = _transcript_command(4, 1, "The first answer is final.")
+    receipt = foundation.execute(command_value)
+    replay = foundation.execute(command_value)
+    assert replay == receipt
+    jobs = foundation.analyzer_jobs(CASE_ID)
+    assert len(jobs) == 1
+    assert jobs[0]["state"] == "ANALYSIS_PENDING"
+    with engine_for(url).connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"])
+        ).scalar_one() == 1
+        assert connection.execute(
+            select(func.count()).select_from(V0_RUNTIME_TABLES["workshop_analyzer_jobs"])
+        ).scalar_one() == 1
+
+
+def test_transcript_rolls_back_when_atomic_job_insert_fails(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    command_value = _transcript_command(4, 1, "This transaction must roll back.")
+    jobs = V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
+    event_id = command_value.transcript.event_id
+    now = NOW.isoformat().replace("+00:00", "Z")
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            jobs.insert().values(
+                job_id=str(uuid4()),
+                case_id=str(CASE_ID),
+                session_id=str(command_value.session_id),
+                operation="TURN_ANALYSIS",
+                subject_id="preexisting-conflict",
+                dedupe_key=f"turn-analysis:{CASE_ID}:{event_id}",
+                priority=10,
+                state="ANALYSIS_PENDING",
+                provider_request_id="preexisting-conflict",
+                request_json=None,
+                candidate_json=None,
+                admission_receipt_json=None,
+                attempt_count=0,
+                lease_owner=None,
+                lease_expires_at=None,
+                available_at=now,
+                last_error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    with pytest.raises(IntegrityError):
+        foundation.execute(command_value)
+    with engine_for(url).connect() as connection:
+        assert connection.execute(
+            select(func.count())
+            .select_from(WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"])
+            .where(
+                WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"].c.event_id
+                == str(event_id)
+            )
+        ).scalar_one() == 0
+        assert connection.execute(
+            select(func.count())
+            .select_from(WORKSHOP_PROTOCOL_TABLES["workshop_command_ledger"])
+            .where(
+                WORKSHOP_PROTOCOL_TABLES["workshop_command_ledger"].c.idempotency_key
+                == command_value.idempotency_key
+            )
+        ).scalar_one() == 0
+
+
+def test_depth_two_enqueues_one_guidance_and_turn_jobs_remain_first(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    for sequence in range(1, 5):
+        foundation.execute(
+            _transcript_command(
+                foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."
+            )
+        )
+    assert foundation.runway_projection(CASE_ID)["depth"] == 2
+    jobs = foundation.analyzer_jobs(CASE_ID)
+    assert sum(item["operation"] == "GUIDANCE" for item in jobs) == 1
+    claimed = foundation.claim_analyzer_job(CASE_ID, worker_id="test-worker")
+    assert claimed["operation"] == "TURN_ANALYSIS"
+
+
+def test_zero_runway_instruction_is_fixed_and_never_invents_a_question(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    for sequence in range(1, 7):
+        foundation.execute(
+            _transcript_command(
+                foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."
+            )
+        )
+    runway = foundation.runway_projection(CASE_ID)
+    card = foundation.voice_session_card(CASE_ID)
+    instruction = V4LiveTransport._voice_instruction(card, runway)
+    assert runway["depth"] == 0
+    assert card.runway_health is c.RunwayHealth.SAFE_RECOVERY_ONLY
+    assert "No substantive clarification question is currently admitted" in instruction
+    assert "preparing the next clarification area" in instruction
+
+
+def test_endangered_runway_blocks_spec_synthesis(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    for sequence in range(1, 5):
+        foundation.execute(
+            _transcript_command(
+                foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."
+            )
+        )
+    context = foundation.active_analyzer_context(CASE_ID)
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=SimpleNamespace(source_set_hash=lambda sources: SOURCE_SET_HASH),
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    with pytest.raises(ValueError, match="runway is endangered"):
+        asyncio.run(orchestrator.synthesize_artifact("SPEC_PACKAGE", operation_key="blocked"))
+
+
+def test_voice_provider_is_not_created_before_ready():
+    async def scenario():
+        calls = 0
+
+        class Provider:
+            async def connect(self, context):
+                nonlocal calls
+                calls += 1
+
+        class Socket:
+            def __init__(self):
+                self.messages = []
+                self.closed = None
+
+            async def accept(self):
+                return None
+
+            async def send_json(self, value):
+                self.messages.append(value)
+
+            async def close(self, code):
+                self.closed = code
+
+        foundation = SimpleNamespace(
+            preparation_projection=lambda case_id: {"phase": "VALIDATING_DOCUMENTS"},
+            runway_projection=lambda case_id: {"depth": 0},
+        )
+        orchestrator = SimpleNamespace(foundation=foundation, case_id=uuid4())
+        socket = Socket()
+        await V4LiveTransport(Provider(), orchestrator).handle(socket)
+        assert calls == 0
+        assert socket.closed == 4403
+        assert socket.messages == [
+            {"type": "ERROR", "code": "WORKSHOP_PREPARATION_NOT_READY"}
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_voice_guidance_refresh_is_applied_only_at_final_turn_boundary():
+    async def scenario():
+        events = []
+
+        class Socket:
+            async def send_json(self, value):
+                events.append(("ack", value))
+
+        class Session:
+            async def send_text(self, value):
+                events.append(("guidance", value))
+
+        foundation = SimpleNamespace(
+            case_actor=lambda case_id, role: uuid4(),
+            voice_session_card=lambda case_id: SimpleNamespace(
+                runway_health=SimpleNamespace(value="HEALTHY")
+            ),
+            runway_projection=lambda case_id: {
+                "depth": 1,
+                "questions": [
+                    {
+                        "exact_text": "Which Foundation-admitted export choice applies?"
+                    }
+                ],
+            },
+        )
+
+        async def record(value):
+            events.append(("commit", value.provider_request_id))
+            return SimpleNamespace(
+                transcript=SimpleNamespace(
+                    command=SimpleNamespace(resulting_case_revision=9)
+                ),
+                duplicate=False,
+            )
+
+        orchestrator = SimpleNamespace(
+            case_id=uuid4(), foundation=foundation, record_final_transcript=record
+        )
+        transport = V4LiveTransport(SimpleNamespace(), orchestrator)
+        await transport._commit(
+            Socket(),
+            {"turn_sequence": 1, "text": "Final answer."},
+            provider_id="turn-boundary-one",
+            session=Session(),
+        )
+        assert [kind for kind, _ in events] == ["commit", "ack", "guidance"]
+        assert "Foundation-admitted questions" in events[-1][1]
+
+    asyncio.run(scenario())
+
+
+def test_delayed_projection_uses_server_time_and_exact_copy(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    table = V0_RUNTIME_TABLES["workshop_preparations"]
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            table.update()
+            .where(table.c.case_id == str(CASE_ID))
+            .values(started_at="2026-08-12T11:59:29Z")
+        )
+    projection = foundation.preparation_projection(CASE_ID)
+    assert projection["delayed"] is True
+    assert projection["delayed_message"] == (
+        "SpecOps Analyzer is taking a little longer to formulate your Workshop plan. "
+        "Your documents are safe, and preparation is continuing."
+    )
+    foundation.set_preparation_phase(CASE_ID, "FAILED", failure_code="SAFE_FAILURE")
+    failed = foundation.preparation_projection(CASE_ID)
+    assert failed["delayed"] is False
+    assert failed["delayed_message"] is None
+
+
+class CancellablePreparationAdapter(DeterministicAdapter):
+    """Deterministic remote: repeat attempts reuse one logical resource/result."""
+
+    def __init__(self, cancel_stage: str):
+        super().__init__(conversation_id="conv_task27_cancellable")
+        self.cancel_stage = cancel_stage
+        self.cancelled = False
+        self.uploaded: dict[str, str] = {}
+        self.upload_creations = 0
+        self.conversation_creations = 0
+        self.bootstrap_creations = 0
+        self.bootstrap_result: BootstrapResult | None = None
+        self.cleanup_attempts = 0
+        self.cleaned_resources: set[str] = set()
+
+    def _cancel_once(self, stage: str) -> None:
+        if self.cancel_stage == stage and not self.cancelled:
+            self.cancelled = True
+            raise asyncio.CancelledError
+
+    async def upload_source(self, item):
+        key = str(item.source.source_id)
+        if key not in self.uploaded:
+            self.upload_creations += 1
+            self.uploaded[key] = f"file_task27_{self.upload_creations}"
+        self._cancel_once(f"upload:{item.source.role.value}")
+        return self.uploaded[key]
+
+    async def create_conversation(self, sources):
+        if self.conversation_creations == 0:
+            self.conversation_creations = 1
+        self._cancel_once("conversation")
+        return self.conversation_id
+
+    def prepared_from_ids(self, sources, file_ids, conversation_id):
+        return PreparedProviderContext(
+            provider_conversation_id=conversation_id,
+            source_set=c.SourceSetBinding(
+                source_set_hash=self.source_set_hash(tuple(item.source for item in sources)),
+                ordered_sources=tuple(
+                    c.ProviderSourceBinding(source=item.source, provider_file_id=file_id)
+                    for item, file_id in zip(sources, file_ids, strict=True)
+                ),
+            ),
+        )
+
+    async def bootstrap(self, request, *, prepared, session_id):
+        if self.bootstrap_result is None:
+            self.bootstrap_creations += 1
+            self.bootstrap_result = await super().bootstrap(
+                request, prepared=prepared, session_id=session_id
+            )
+        self._cancel_once("bootstrap")
+        return self.bootstrap_result
+
+    async def release_resource_ids(self, conversation_id, file_ids):
+        self.cleanup_attempts += 1
+        self.cleaned_resources.update(
+            identity for identity in (conversation_id, *file_ids) if identity is not None
+        )
+        self._cancel_once("cleanup")
+
+
+@pytest.mark.parametrize(
+    "stage",
+    (
+        "upload:PM_SPEC",
+        "upload:TECHNICAL_CONTRACT",
+        "conversation",
+        "bootstrap",
+    ),
+)
+def test_real_preparation_cancellation_resumes_without_duplicate_logical_work(
+    tmp_path, stage
+):
+    adapter = CancellablePreparationAdapter(stage)
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(orchestrator.prepare_workshop())
+    projection = asyncio.run(orchestrator.prepare_workshop())
+    resources = app.state.workshop_protocol_foundation.preparation_resources(
+        app.state.bootstrap.case_id
+    )
+    assert projection["phase"] == "READY"
+    assert resources["pm_file_id"] is not None
+    assert resources["technical_file_id"] is not None
+    assert resources["provider_conversation_id"] == adapter.conversation_id
+    assert adapter.upload_creations == 2
+    assert adapter.conversation_creations == 1
+    assert adapter.bootstrap_creations == 1
+
+
+def test_real_cleanup_cancellation_stays_resumable_and_idempotent(tmp_path):
+    adapter = CancellablePreparationAdapter("cleanup")
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    foundation = app.state.workshop_protocol_foundation
+    case_id = app.state.bootstrap.case_id
+    foundation.checkpoint_preparation_resource(
+        case_id,
+        pm_file_id="file_pm",
+        technical_file_id="file_technical",
+        provider_conversation_id="conversation_cleanup",
+    )
+    foundation.set_preparation_phase(
+        case_id,
+        "FAILED",
+        failure_code="PREPARATION_CANCELLED",
+        cleanup_state="PENDING",
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(orchestrator.cleanup_preparation())
+    assert foundation.preparation_projection(case_id)["cleanup_state"] == "IN_PROGRESS"
+    completed = asyncio.run(orchestrator.cleanup_preparation())
+    assert completed["cleanup_state"] == "COMPLETED"
+    resources = foundation.preparation_resources(case_id)
+    assert resources["pm_file_id"] is None
+    assert resources["technical_file_id"] is None
+    assert resources["provider_conversation_id"] is None
+    assert adapter.cleanup_attempts == 2
+    assert adapter.cleaned_resources == {
+        "file_pm",
+        "file_technical",
+        "conversation_cleanup",
+    }
+
+
+def test_cancelled_analysis_lease_reclaims_provider_completed_stage_without_another_call(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    context = foundation.active_analyzer_context(CASE_ID)
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=SimpleNamespace(source_set_hash=lambda sources: SOURCE_SET_HASH),
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    transcript_input = FinalTranscriptInput(
+        turn_sequence=1,
+        text="The final participant answer is recorded.",
+        provider_request_id="task-27-replay-stage",
+        speaker_actor_id=foundation.case_actor(CASE_ID, "PM"),
+        actor="PM",
+    )
+    first = asyncio.run(orchestrator.record_final_transcript(transcript_input))
+    assert first.analysis is None and first.duplicate is False
+    event = foundation.latest_final_transcript(CASE_ID)
+    snapshot = foundation.semantic_snapshot(CASE_ID)
+    job = foundation.claim_analyzer_job(CASE_ID, worker_id="crashed-worker")
+    request = c.AnalyzeFinalTurnRequest.model_construct(
+        **orchestrator._provider_base(
+            operation=c.AnalyzerOperation.TURN_ANALYSIS,
+            operation_key=job["job_id"],
+            context=context,
+            based_on_revision=snapshot.case_revision,
+        ),
+        request_hash="sha256:" + "0" * 64,
+        transcript=c.FinalizedTranscriptInput(
+            transcript_event_id=event.event_id,
+            transcript_hash=event.transcript_hash,
+            speaker_actor_id=event.speaker_actor_id,
+            actor=event.actor,
+            sequence_number=event.sequence_number,
+            text=event.text,
+        ),
+        prior_transcript=None,
+        foundation_snapshot=snapshot,
+        requested_output="TURN_ANALYSIS_CANDIDATE",
+    )
+    from specops_contracts.canonical import analyzer_request_hash
+
+    request = request.model_copy(
+        update={"request_hash": analyzer_request_hash(request.model_dump(mode="json"))}
+    )
+    candidate = c.TurnAnalysisCandidate(
+        protocol_version="1.0.0",
+        output_type="TURN_ANALYSIS_CANDIDATE",
+        analyzer_run_id=request.analyzer_run_id,
+        context_id=request.context_id,
+        request_hash=request.request_hash,
+        source_set_hash=request.source_set_hash,
+        transcript_event_id=event.event_id,
+        based_on_case_revision=request.based_on_case_revision,
+        disposition=c.TurnDisposition.NO_SEMANTIC_CHANGE,
+        no_change_reason_code="SOCIAL_ONLY",
+        evidence_candidates=(),
+        new_problems=(),
+        new_problem_clusters=(),
+        revised_problem_clusters=(),
+        new_questions=(),
+        revised_questions=(),
+        low_risk_facts=(),
+        decisions=(),
+        problem_assessments=(),
+        evidence_findings=(),
+    )
+    foundation.checkpoint_analyzer_job(
+        job["job_id"],
+        worker_id="crashed-worker",
+        state="PROVIDER_COMPLETED",
+        request_json=request.model_dump_json(),
+        candidate_json=candidate.model_dump_json(),
+    )
+    table = V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            table.update()
+            .where(table.c.job_id == job["job_id"])
+            .values(lease_expires_at="2026-08-12T11:59:00Z")
+        )
+
+    class NoProviderReplay:
+        calls = 0
+
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def execute(self, request, *, context):
+            self.calls += 1
+            raise AssertionError("provider-completed stage must not call the provider again")
+
+    orchestrator.adapter = NoProviderReplay()
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="restart-worker")
+    assert asyncio.run(worker.run_once()) is True
+    completed = foundation.analyzer_jobs(CASE_ID)[0]
+    assert completed["state"] == "COMPLETED"
+    assert completed["admission_receipt_json"] is not None
+    assert orchestrator.adapter.calls == 0
+    replay = asyncio.run(orchestrator.record_final_transcript(transcript_input))
+    assert replay.duplicate is True
+    assert replay.analysis is not None
+
+
+def test_real_analysis_cancellation_reuses_one_logical_provider_result(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    context = foundation.active_analyzer_context(CASE_ID)
+
+    class CancellableAnalysisAdapter:
+        attempts = 0
+        logical_results = 0
+        candidate = None
+
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def execute(self, request, *, context):
+            self.attempts += 1
+            if self.candidate is None:
+                self.logical_results += 1
+                self.candidate = c.TurnAnalysisCandidate(
+                    protocol_version="1.0.0",
+                    output_type="TURN_ANALYSIS_CANDIDATE",
+                    analyzer_run_id=request.analyzer_run_id,
+                    context_id=request.context_id,
+                    request_hash=request.request_hash,
+                    source_set_hash=request.source_set_hash,
+                    transcript_event_id=request.transcript.transcript_event_id,
+                    based_on_case_revision=request.based_on_case_revision,
+                    disposition=c.TurnDisposition.NO_SEMANTIC_CHANGE,
+                    no_change_reason_code="SOCIAL_ONLY",
+                    evidence_candidates=(),
+                    new_problems=(),
+                    new_problem_clusters=(),
+                    revised_problem_clusters=(),
+                    new_questions=(),
+                    revised_questions=(),
+                    low_risk_facts=(),
+                    decisions=(),
+                    problem_assessments=(),
+                    evidence_findings=(),
+                )
+            if self.attempts == 1:
+                raise asyncio.CancelledError
+            return self.candidate
+
+    adapter = CancellableAnalysisAdapter()
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=adapter,
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    transcript_input = FinalTranscriptInput(
+        turn_sequence=1,
+        text="This answer survives a cancelled Analyzer attempt.",
+        provider_request_id="task-27-real-analysis-cancel",
+        speaker_actor_id=foundation.case_actor(CASE_ID, "PM"),
+        actor="PM",
+    )
+    asyncio.run(orchestrator.record_final_transcript(transcript_input))
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="cancelled-analysis-worker")
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(worker.run_once())
+    pending = foundation.analyzer_jobs(CASE_ID)[0]
+    assert pending["state"] == "PROVIDER_REQUESTED"
+    assert pending["request_json"] is not None
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
+            .update()
+            .where(
+                V0_RUNTIME_TABLES["workshop_analyzer_jobs"].c.job_id
+                == pending["job_id"]
+            )
+            .values(lease_expires_at="2026-08-12T11:59:00Z")
+        )
+    resumed = DurableAnalyzerWorker(orchestrator, worker_id="resumed-analysis-worker")
+    assert asyncio.run(resumed.run_once()) is True
+    completed = foundation.analyzer_jobs(CASE_ID)[0]
+    assert completed["state"] == "COMPLETED"
+    assert adapter.attempts == 2
+    assert adapter.logical_results == 1
+    replay = asyncio.run(orchestrator.record_final_transcript(transcript_input))
+    assert replay.duplicate is True
+    assert replay.analysis is not None
+
+
+@pytest.mark.parametrize(
+    ("failure_code", "resources", "cleanup_state"),
+    (
+        ("CANCELLED_DURING_FILE_UPLOAD", {"pm_file_id": "file_pm"}, "NOT_REQUIRED"),
+        (
+            "CANCELLED_DURING_CONVERSATION_CREATION",
+            {"pm_file_id": "file_pm", "technical_file_id": "file_technical"},
+            "NOT_REQUIRED",
+        ),
+        (
+            "CANCELLED_DURING_BOOTSTRAP",
+            {
+                "pm_file_id": "file_pm",
+                "technical_file_id": "file_technical",
+                "provider_conversation_id": "conversation_one",
+            },
+            "NOT_REQUIRED",
+        ),
+        (
+            "CANCELLED_DURING_CLEANUP",
+            {
+                "pm_file_id": "file_pm",
+                "technical_file_id": "file_technical",
+                "provider_conversation_id": "conversation_one",
+            },
+            "PENDING",
+        ),
+    ),
+)
+def test_named_preparation_cancellations_preserve_resumable_checkpoints(
+    tmp_path, failure_code, resources, cleanup_state
+):
+    _, foundation = _runtime(tmp_path)
+    foundation.checkpoint_preparation_resource(CASE_ID, **resources)
+    foundation.set_preparation_phase(
+        CASE_ID,
+        "FAILED",
+        failure_code=failure_code,
+        cleanup_state=cleanup_state,
+    )
+    restarted = type(foundation)(
+        foundation.engine.url.render_as_string(hide_password=False), now=lambda: NOW
+    )
+    recovered = restarted.preparation_resources(CASE_ID)
+    assert all(recovered[key] == value for key, value in resources.items())
+    assert restarted.preparation_projection(CASE_ID)["failure_code"] == failure_code
+    restarted.set_preparation_phase(CASE_ID, "VALIDATING_DOCUMENTS")
+    resumed = restarted.preparation_projection(CASE_ID)
+    assert resumed["phase"] == "VALIDATING_DOCUMENTS"
+    assert resumed["failure_code"] is None
+
+
+def test_preparation_resource_checkpoints_and_failed_cleanup_are_reconstructable(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    foundation.checkpoint_preparation_resource(CASE_ID, pm_file_id="file_pm")
+    first = foundation.preparation_resources(CASE_ID)
+    assert first["pm_file_id"] == "file_pm"
+    assert first["technical_file_id"] is None
+    foundation.checkpoint_preparation_resource(
+        CASE_ID,
+        technical_file_id="file_technical",
+        provider_conversation_id="conversation_one",
+    )
+    foundation.set_preparation_phase(
+        CASE_ID,
+        "FAILED",
+        failure_code="CANCELLED_DURING_BOOTSTRAP",
+        cleanup_state="PENDING",
+    )
+    restarted = type(foundation)(foundation.engine.url.render_as_string(hide_password=False), now=lambda: NOW)
+    recovered = restarted.preparation_resources(CASE_ID)
+    projection = restarted.preparation_projection(CASE_ID)
+    assert recovered["pm_file_id"] == "file_pm"
+    assert recovered["technical_file_id"] == "file_technical"
+    assert recovered["provider_conversation_id"] == "conversation_one"
+    assert projection["cleanup_state"] == "PENDING"
+    assert projection["failure_code"] == "CANCELLED_DURING_BOOTSTRAP"

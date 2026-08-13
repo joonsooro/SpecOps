@@ -27,6 +27,29 @@ const bootstrap = {
 };
 
 const workshop = {
+  preparation: {
+    phase: "READY",
+    message: "Your Spec Workshop is ready.",
+    started_at: "2026-08-12T11:59:00Z",
+    updated_at: "2026-08-12T12:00:00Z",
+    ready_at: "2026-08-12T12:00:00Z",
+    failure_code: null,
+    delayed: false,
+    delayed_message: null,
+  },
+  runway: {
+    guidance_id: "88888888-8888-4888-8888-888888888888",
+    depth: 6,
+    questions: Array.from({ length: 6 }, (_, index) => ({
+      question_id: `${index + 1}8888888-8888-4888-8888-888888888888`,
+      question_version: 1,
+      position: index + 1,
+      exact_text: `Admitted clarification question ${index + 1}?`,
+      reason: "Foundation admitted this independent question.",
+    })),
+    asked: [],
+  },
+  analyzer_jobs: [],
   session: {
     workshop_state: "ACTIVE",
     conversation_phase: "WORKSHOP",
@@ -47,6 +70,32 @@ const workshop = {
   review_requests: [],
   handoff: null,
 };
+
+test("keeps Voice and microphone disabled until the exact admitted runway is READY", async ({ page }) => {
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({
+    json: {
+      ...workshop,
+      session: { ...workshop.session, call_state: "PREPARING" },
+      preparation: {
+        ...workshop.preparation,
+        phase: "VALIDATING_INITIAL_RUNWAY",
+        message: "Validating the initial clarification runway…",
+        ready_at: null,
+        delayed: true,
+        delayed_message: "SpecOps Analyzer is taking a little longer to formulate your Workshop plan. Your documents are safe, and preparation is continuing.",
+      },
+      runway: { ...workshop.runway, depth: 5, questions: workshop.runway.questions.slice(0, 5) },
+    },
+  }));
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: "Start Spec Workshop" })).toBeDisabled();
+  await expect(page.getByText("Validating the initial clarification runway…")).toBeVisible();
+  await expect(page.getByText("SpecOps Analyzer is taking a little longer to formulate your Workshop plan. Your documents are safe, and preparation is continuing.")).toBeVisible();
+  await expect(page.getByLabel("5 of 6 admitted questions ready")).toBeVisible();
+  await expect(page.getByLabel("Text fallback")).toBeDisabled();
+  await expect(page.getByText(/%/)).toHaveCount(0);
+});
 
 const artifactReview = {
   confirmation_id: "12121212-1212-4212-8212-121212121212",

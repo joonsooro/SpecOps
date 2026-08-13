@@ -142,44 +142,84 @@ class V4ProductionOrchestrator:
         }
 
     async def ensure_context(self) -> c.AnalyzerContextBinding:
-        async with self._context_lock:
+        # Narrow unit-test/application ports that predate Task 27 may provide a
+        # fully admitted active context without the operational projection.
+        if not hasattr(self.foundation, "preparation_projection"):
             active = self.foundation.active_analyzer_context(self.case_id)
-            if active is not None:
-                mismatch = (
-                    active.source_set.source_set_hash != self.source_set_hash
-                    or active.analyzer_contract != self.analyzer_contract
-                    or active.model != "gpt-5.6-terra"
-                    or active.reasoning_effort is not c.ReasoningEffort.MEDIUM
-                    or not active.conversation_state_persisted
-                    or not active.response_store_enabled
-                )
-                available = False if mismatch else await self.adapter.context_is_available(active)
-                if available:
-                    return active
-                reason = (
-                    "SOURCE_SET_CHANGED"
-                    if active.source_set.source_set_hash != self.source_set_hash
-                    else "ANALYZER_CONTRACT_CHANGED"
-                    if active.analyzer_contract != self.analyzer_contract
-                    else "PROFILE_MISMATCH"
-                    if mismatch
-                    else "CONVERSATION_UNAVAILABLE"
-                )
-                revision = self.foundation.case_revision(self.case_id)
-                values = self._command_base(
-                    "INVALIDATE_ANALYZER_CONTEXT",
-                    str(active.context_id),
-                    expected_revision=revision,
-                )
-                values.update(
-                    command_type="INVALIDATE_ANALYZER_CONTEXT",
-                    context_id=active.context_id,
-                    reason_code=reason,
-                )
-                self.foundation.execute(c.InvalidateAnalyzerContextCommand(**values))
-                await self.adapter.release_context(active)
+            if active is None:
+                raise RuntimeError("Workshop Analyzer context is not prepared")
+            return active
+        await self.prepare_workshop()
+        active = self.foundation.active_analyzer_context(self.case_id)
+        if active is None:
+            raise RuntimeError("Workshop Analyzer context is not prepared")
+        return active
 
-            prepared = await self.adapter.prepare_context(self.sources)
+    async def prepare_workshop(self) -> dict[str, Any]:
+        """Resume mandatory preparation from the last durable provider checkpoint."""
+
+        async with self._context_lock:
+            projection = self.foundation.preparation_projection(self.case_id)
+            if projection["phase"] in {"READY", "FAILED"}:
+                return projection
+            active = self.foundation.active_analyzer_context(self.case_id)
+            runway = self.foundation.runway_projection(self.case_id)
+            if active is not None and runway["depth"] == 6:
+                self.foundation.set_preparation_phase(self.case_id, "READY")
+                return self.foundation.preparation_projection(self.case_id)
+            if active is not None and self.foundation.current_admitted_guidance(self.case_id) is None:
+                self.foundation.set_preparation_phase(
+                    self.case_id, "FAILED", failure_code="INSUFFICIENT_SAFE_RUNWAY"
+                )
+                return self.foundation.preparation_projection(self.case_id)
+
+            self.foundation.set_preparation_phase(self.case_id, "VALIDATING_DOCUMENTS")
+            if tuple(item.source.role for item in self.sources) != (
+                c.SourceRole.PM_SPEC,
+                c.SourceRole.TECHNICAL_CONTRACT,
+            ):
+                self.foundation.set_preparation_phase(
+                    self.case_id, "FAILED", failure_code="SOURCE_ORDER_INVALID"
+                )
+                return self.foundation.preparation_projection(self.case_id)
+            resources = self.foundation.preparation_resources(self.case_id)
+            self.foundation.set_preparation_phase(self.case_id, "PREPARING_ANALYZER")
+            prepared = None
+            if all(
+                hasattr(self.adapter, name)
+                for name in ("upload_source", "create_conversation", "prepared_from_ids")
+            ):
+                file_ids = [resources["pm_file_id"], resources["technical_file_id"]]
+                for index, item in enumerate(self.sources):
+                    if file_ids[index] is None:
+                        file_ids[index] = await self.adapter.upload_source(item)
+                        self.foundation.checkpoint_preparation_resource(
+                            self.case_id,
+                            **{
+                                "pm_file_id" if index == 0 else "technical_file_id": file_ids[index]
+                            },
+                        )
+                conversation_id = resources["provider_conversation_id"]
+                if conversation_id is None:
+                    conversation_id = await self.adapter.create_conversation(self.sources)
+                    self.foundation.checkpoint_preparation_resource(
+                        self.case_id, provider_conversation_id=conversation_id
+                    )
+                prepared = self.adapter.prepared_from_ids(
+                    self.sources, tuple(file_ids), conversation_id
+                )
+            else:
+                prepared = await self.adapter.prepare_context(self.sources)
+                self.foundation.checkpoint_preparation_resource(
+                    self.case_id,
+                    pm_file_id=prepared.source_set.ordered_sources[0].provider_file_id,
+                    technical_file_id=prepared.source_set.ordered_sources[1].provider_file_id,
+                    provider_conversation_id=prepared.provider_conversation_id,
+                )
+            resources = self.foundation.preparation_resources(self.case_id)
+            self.foundation.set_preparation_phase(
+                self.case_id, "ANALYZER_REVIEWING_DOCUMENTS"
+            )
             revision = self.foundation.case_revision(self.case_id)
             context_id = _stable_id(
                 self.case_id,
@@ -219,36 +259,114 @@ class V4ProductionOrchestrator:
                     requested_output="INTERVIEW_BRIEF_CANDIDATE",
                 ),
             )
-            try:
-                bootstrapped = await self.adapter.bootstrap(
-                    request,
-                    prepared=prepared,
-                    session_id=self.session_id,
+            if resources["bootstrap_candidate_json"] and resources["context_json"]:
+                candidate = c.InterviewBriefCandidate.model_validate_json(
+                    resources["bootstrap_candidate_json"]
                 )
-            except Exception:
-                await self.adapter.release_prepared(prepared)
-                raise
-            activate_values = self._command_base(
-                "ACTIVATE_ANALYZER_CONTEXT", str(context_id), expected_revision=revision
+                context = c.AnalyzerContextBinding.model_validate_json(resources["context_json"])
+            else:
+                bootstrapped = await self.adapter.bootstrap(
+                    request, prepared=prepared, session_id=self.session_id
+                )
+                candidate = bootstrapped.candidate
+                context = bootstrapped.context
+                self.foundation.checkpoint_preparation_resource(
+                    self.case_id,
+                    bootstrap_response_id=context.bootstrap_response_id,
+                    bootstrap_candidate_json=candidate.model_dump_json(),
+                    context_json=context.model_dump_json(),
+                )
+            self.foundation.set_preparation_phase(
+                self.case_id, "FORMULATING_WORKSHOP_PLAN"
             )
-            activate_values.update(
-                command_type="ACTIVATE_ANALYZER_CONTEXT", context=bootstrapped.context
-            )
-            self.foundation.execute(c.ActivateAnalyzerContextCommand(**activate_values))
+            if self.foundation.active_analyzer_context(self.case_id) is None:
+                activate_values = self._command_base(
+                    "ACTIVATE_ANALYZER_CONTEXT", str(context_id), expected_revision=revision
+                )
+                activate_values.update(
+                    command_type="ACTIVATE_ANALYZER_CONTEXT", context=context
+                )
+                self.foundation.execute(c.ActivateAnalyzerContextCommand(**activate_values))
             admit_values = self._command_base(
                 "ADMIT_INTERVIEW_BRIEF",
                 str(request.analyzer_run_id),
-                expected_revision=revision + 1,
+                expected_revision=self.foundation.case_revision(self.case_id),
             )
             admit_values.update(
                 command_type="ADMIT_INTERVIEW_BRIEF",
                 analyzer_run_id=request.analyzer_run_id,
                 context_id=context_id,
                 provider_request_hash=request.request_hash,
-                candidate=bootstrapped.candidate,
+                candidate=candidate,
             )
-            self.foundation.execute(c.AdmitInterviewBriefCommand(**admit_values))
-            return bootstrapped.context
+            if self.foundation.current_admitted_guidance(self.case_id) is None:
+                self.foundation.execute(c.AdmitInterviewBriefCommand(**admit_values))
+            self.foundation.set_preparation_phase(
+                self.case_id, "VALIDATING_INITIAL_RUNWAY"
+            )
+            if self.foundation.runway_projection(self.case_id)["depth"] != 6:
+                self.foundation.set_preparation_phase(
+                    self.case_id, "FAILED", failure_code="INSUFFICIENT_SAFE_RUNWAY"
+                )
+            else:
+                self.foundation.set_preparation_phase(self.case_id, "READY")
+            return self.foundation.preparation_projection(self.case_id)
+
+    async def cleanup_preparation(self) -> dict[str, Any]:
+        """Resume best-effort cleanup without weakening admitted Foundation data."""
+
+        async with self._context_lock:
+            projection = self.foundation.preparation_projection(self.case_id)
+            if projection["cleanup_state"] not in {"PENDING", "IN_PROGRESS"}:
+                return projection
+            if self.foundation.active_analyzer_context(self.case_id) is not None:
+                raise RuntimeError("active Analyzer context cannot be preparation-cleaned")
+            if not hasattr(self.adapter, "release_resource_ids"):
+                raise RuntimeError("provider adapter cannot resume preparation cleanup")
+            self.foundation.set_preparation_phase(
+                self.case_id,
+                projection["phase"],
+                failure_code=projection["failure_code"],
+                cleanup_state="IN_PROGRESS",
+            )
+            resources = self.foundation.preparation_resources(self.case_id)
+            try:
+                await self.adapter.release_resource_ids(
+                    resources["provider_conversation_id"],
+                    tuple(
+                        identity
+                        for identity in (
+                            resources["pm_file_id"],
+                            resources["technical_file_id"],
+                        )
+                        if identity is not None
+                    ),
+                )
+            except asyncio.CancelledError:
+                # IN_PROGRESS is deliberately resumable. The adapter receives
+                # the same resource identities on the next worker lease.
+                raise
+            except Exception:
+                self.foundation.set_preparation_phase(
+                    self.case_id,
+                    projection["phase"],
+                    failure_code=projection["failure_code"],
+                    cleanup_state="PENDING",
+                )
+                raise
+            self.foundation.checkpoint_preparation_resource(
+                self.case_id,
+                pm_file_id=None,
+                technical_file_id=None,
+                provider_conversation_id=None,
+            )
+            self.foundation.set_preparation_phase(
+                self.case_id,
+                projection["phase"],
+                failure_code=projection["failure_code"],
+                cleanup_state="COMPLETED",
+            )
+            return self.foundation.preparation_projection(self.case_id)
 
     async def record_final_transcript(
         self, value: FinalTranscriptInput
@@ -259,7 +377,16 @@ class V4ProductionOrchestrator:
         replay = self.foundation.idempotent_receipt(self.case_id, idempotency)
         if replay is not None:
             assert isinstance(replay, c.TranscriptRecordedReceipt)
-            return TranscriptAnalysisReceipt(transcript=replay, analysis=None, duplicate=True)
+            analysis = None
+            event_id = _stable_id(self.case_id, "transcript", value.provider_request_id)
+            for job in self.foundation.analyzer_jobs(self.case_id):
+                if job["subject_id"] == str(event_id) and job["admission_receipt_json"]:
+                    parsed = c.ProposalAdmissionReceipt.model_validate_json(
+                        job["admission_receipt_json"]
+                    )
+                    analysis = parsed
+                    break
+            return TranscriptAnalysisReceipt(transcript=replay, analysis=analysis, duplicate=True)
 
         prior = self.foundation.latest_final_transcript(self.case_id)
         expected_sequence = 1 if prior is None else prior.sequence_number + 1
@@ -301,56 +428,9 @@ class V4ProductionOrchestrator:
         transcript_receipt = self.foundation.execute(c.RecordFinalTranscriptCommand(**command_values))
         assert isinstance(transcript_receipt, c.TranscriptRecordedReceipt)
 
-        context = await self.ensure_context()
-        snapshot = self.foundation.semantic_snapshot(self.case_id)
-        prior_binding = None
-        if prior is not None:
-            prior_binding = c.PriorTranscriptBinding(
-                transcript_event_id=prior.event_id,
-                transcript_hash=prior.transcript_hash,
-                sequence_number=prior.sequence_number,
-            )
-        request = _request(
-            c.AnalyzeFinalTurnRequest,
-            dict(
-                self._provider_base(
-                    operation=c.AnalyzerOperation.TURN_ANALYSIS,
-                    operation_key=value.provider_request_id,
-                    context=context,
-                    based_on_revision=snapshot.case_revision,
-                ),
-                transcript=c.FinalizedTranscriptInput(
-                    transcript_event_id=event.event_id,
-                    transcript_hash=event.transcript_hash,
-                    speaker_actor_id=event.speaker_actor_id,
-                    actor=event.actor,
-                    sequence_number=event.sequence_number,
-                    text=event.text,
-                ),
-                prior_transcript=prior_binding,
-                foundation_snapshot=snapshot,
-                requested_output="TURN_ANALYSIS_CANDIDATE",
-            ),
-        )
-        candidate = await self.adapter.execute(request, context=context)
-        assert isinstance(candidate, c.TurnAnalysisCandidate)
-        admit_values = self._command_base(
-            "ADMIT_TURN_ANALYSIS",
-            str(request.analyzer_run_id),
-            expected_revision=snapshot.case_revision,
-        )
-        admit_values.update(
-            command_type="ADMIT_TURN_ANALYSIS",
-            analyzer_run_id=request.analyzer_run_id,
-            context_id=context.context_id,
-            provider_request_hash=request.request_hash,
-            candidate=candidate,
-        )
-        analysis = self.foundation.execute(c.AdmitTurnAnalysisCommand(**admit_values))
-        assert isinstance(analysis, c.ProposalAdmissionReceipt)
         return TranscriptAnalysisReceipt(
             transcript=transcript_receipt,
-            analysis=analysis,
+            analysis=None,
             duplicate=False,
         )
 
@@ -623,6 +703,8 @@ class V4ProductionOrchestrator:
         *,
         operation_key: str,
     ) -> ProviderOperationAdmission:
+        if self.foundation.runway_projection(self.case_id)["depth"] < 3:
+            raise ValueError("active interview runway is endangered")
         context = await self.ensure_context()
         entity_kinds = self.foundation.artifact_identity_allocation_policy(artifact_type)
         plan = self.foundation.issue_artifact_identity_plan(

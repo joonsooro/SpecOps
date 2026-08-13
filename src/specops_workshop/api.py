@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +34,18 @@ from .v4.artifact_quality_adapter import (
     FreshConversationTerraQualityEvaluator,
 )
 from .v4.orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
+from .v4.scheduler import DurableAnalyzerWorker
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-SPEC_ENG_ROOT = BACKEND_ROOT.parent / "Spec_Eng"
+SPEC_ENG_ROOT = next(
+    (
+        candidate
+        for candidate in (BACKEND_ROOT.parent / "Spec_Eng", *BACKEND_ROOT.parents)
+        if (candidate / "docs").is_dir() and (candidate / "app").is_dir()
+    ),
+    BACKEND_ROOT.parent / "Spec_Eng",
+)
 V4_ROOT = SPEC_ENG_ROOT / "spec-workshop-contracts-and-interaction-model-v4"
 QUALITY_CONTRACT_PATH = Path(specops_contracts.__file__).resolve().parent / "semantic-quality-contract.yaml"
 DEMO_SESSION_ID = stable_id("csv-export-workshop:session")
@@ -139,7 +149,20 @@ def create_app(
     )
     live_transport = V4LiveTransport(voice, orchestrator)
 
-    app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
+    worker = DurableAnalyzerWorker(orchestrator)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        worker_task = asyncio.create_task(worker.run_forever())
+        try:
+            yield
+        finally:
+            worker.stop()
+            await asyncio.gather(worker_task, return_exceptions=True)
+
+    app = FastAPI(
+        title="SpecOps Workshop", docs_url=None, redoc_url=None, lifespan=lifespan
+    )
     app.state.settings = runtime_settings
     app.state.bootstrap = bootstrap
     app.state.source_catalog = catalog
@@ -151,6 +174,7 @@ def create_app(
     app.state.workshop_protocol_orchestrator = orchestrator
     app.state.openai_adapter = adapter
     app.state.artifact_quality_evaluator = evaluator
+    app.state.analyzer_worker = worker
     install_workshop_protocol_api(app, foundation)
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
@@ -161,6 +185,9 @@ def create_app(
     async def workshop_projection():
         case = foundation.get_case(bootstrap.case_id)
         transcripts = foundation.final_transcripts(bootstrap.case_id)
+        preparation = foundation.preparation_projection(bootstrap.case_id)
+        runway = foundation.runway_projection(bootstrap.case_id)
+        voice_card = foundation.voice_session_card(bootstrap.case_id)
         return {
             "protocol_version": c.PROTOCOL_VERSION,
             "case_id": str(case.case_id),
@@ -171,10 +198,22 @@ def create_app(
             "session": {
                 "workshop_state": "ACTIVE",
                 "conversation_phase": "WORKSHOP",
-                "call_state": "READY",
+                "call_state": "READY" if preparation["phase"] == "READY" else "PREPARING",
                 "revision_locked": False,
                 "revision_lock_reason": None,
             },
+            "preparation": preparation,
+            "runway": runway,
+            "voice_session_card": voice_card.model_dump(mode="json"),
+            "analyzer_jobs": [
+                {
+                    "job_id": item["job_id"],
+                    "operation": item["operation"],
+                    "state": item["state"],
+                    "attempt_count": item["attempt_count"],
+                }
+                for item in foundation.analyzer_jobs(bootstrap.case_id)
+            ],
             "final_transcripts": [
                 {
                     "event_id": str(item.event_id),

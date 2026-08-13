@@ -22,14 +22,22 @@ class V4LiveTransport:
 
     async def handle(self, websocket: WebSocket) -> None:
         await websocket.accept()
+        preparation = self.orchestrator.foundation.preparation_projection(
+            self.orchestrator.case_id
+        )
+        runway = self.orchestrator.foundation.runway_projection(self.orchestrator.case_id)
+        if preparation["phase"] != "READY":
+            await websocket.send_json(
+                {"type": "ERROR", "code": "WORKSHOP_PREPARATION_NOT_READY"}
+            )
+            await websocket.close(code=4403)
+            return
         await websocket.send_json({"type": "CALL_STATE", "state": "CONNECTING"})
+        card = self.orchestrator.foundation.voice_session_card(self.orchestrator.case_id)
         try:
             session = await self.provider.connect(
                 VoiceContext(
-                    system_instruction=(
-                        "Facilitate the Workshop without interpreting confirmations. "
-                        "Return final transcripts and mechanical spoken selections only."
-                    ),
+                    system_instruction=self._voice_instruction(card, runway),
                     resume=ProviderResumeContext(
                         conversation_phase=ConversationPhase.WORKSHOP,
                         committed_package=None,
@@ -65,7 +73,9 @@ class V4LiveTransport:
         finally:
             await session.close()
 
-    async def _commit(self, websocket: WebSocket, value: dict, *, provider_id: str) -> None:
+    async def _commit(
+        self, websocket: WebSocket, value: dict, *, provider_id: str, session=None
+    ) -> None:
         receipt = await self.orchestrator.record_final_transcript(
             FinalTranscriptInput(
                 turn_sequence=int(value["turn_sequence"]),
@@ -84,6 +94,33 @@ class V4LiveTransport:
                 "duplicate": receipt.duplicate,
             }
         )
+        if session is not None:
+            # This input-final callback is the conversational turn boundary.
+            # Only a fresh Foundation read may update Voice guidance.
+            card = self.orchestrator.foundation.voice_session_card(
+                self.orchestrator.case_id
+            )
+            runway = self.orchestrator.foundation.runway_projection(
+                self.orchestrator.case_id
+            )
+            await session.send_text(self._voice_instruction(card, runway))
+
+    @staticmethod
+    def _voice_instruction(card: c.VoiceSessionCard, runway: dict) -> str:
+        if runway["depth"] == 0:
+            return (
+                "No substantive clarification question is currently admitted. "
+                "Summarize admitted information, invite corrections, and say exactly: "
+                "‘I’m preparing the next clarification area. You can correct anything already captured while I do that.’"
+            )
+        allowed = "\n".join(
+            f"{index + 1}. {item['exact_text']}" for index, item in enumerate(runway["questions"])
+        )
+        return (
+            "Facilitate the Workshop without interpreting confirmations. Ask only one of the "
+            "following Foundation-admitted questions, in order; do not invent, revise, or combine them. "
+            f"Runway health: {card.runway_health.value}.\n{allowed}"
+        )
 
     async def _client(self, websocket: WebSocket, session) -> None:
         while True:
@@ -99,6 +136,7 @@ class V4LiveTransport:
                     websocket,
                     value,
                     provider_id=str(value["provider_request_id"]),
+                    session=session,
                 )
             elif value.get("type") == "INTERRUPT":
                 await session.interrupt()
@@ -146,6 +184,7 @@ class V4LiveTransport:
                     websocket,
                     {"turn_sequence": sequence, "text": event.text},
                     provider_id=event.provider_request_id or f"gemini-turn-{sequence}",
+                    session=session,
                 )
                 sequence += 1
             elif event.type is VoiceEventType.OUTPUT_TRANSCRIPT:

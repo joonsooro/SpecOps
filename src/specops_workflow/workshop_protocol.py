@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from jsonschema import Draft202012Validator
 from pydantic import TypeAdapter
@@ -33,7 +33,8 @@ from specops_contracts.canonical import (
 )
 
 from .persistence import (
-    WORKSHOP_PROTOCOL_TABLES,
+    WORKSHOP_PROTOCOL_TABLES as V4_WORKSHOP_PROTOCOL_TABLES,
+    V0_RUNTIME_TABLES,
     audit_events,
     case_participants,
     cases as foundation_cases,
@@ -41,6 +42,15 @@ from .persistence import (
     engine_for,
     source_artifacts,
 )
+
+WORKSHOP_PROTOCOL_TABLES = {**V4_WORKSHOP_PROTOCOL_TABLES, **V0_RUNTIME_TABLES}
+
+
+RUNTIME_NAMESPACE = UUID("31bfc764-d069-4f27-b614-444d1f47da7a")
+
+
+def _runtime_id(*parts: object) -> UUID:
+    return uuid5(RUNTIME_NAMESPACE, ":".join(str(part) for part in parts))
 from .artifact_projection import (
     artifact_envelope,
     build_review_view,
@@ -126,7 +136,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         source_set_hash: str,
     ) -> ProtocolCase:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]
+        preparation = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        resources = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
         now = _instant(self.now())
+        preparation_id = _runtime_id(case_id, "preparation", source_set_hash)
         with self.engine.begin() as connection:
             existing = connection.execute(
                 select(table).where(table.c.case_id == str(case_id))
@@ -149,6 +162,45 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 or existing["source_set_hash"] != source_set_hash
             ):
                 raise FoundationProtocolError(c.FoundationRejectionCode.DUPLICATE_CONFLICT)
+
+            # A 0004 database can already contain the canonical V4 case.  The
+            # 0005 operational rows are therefore backfilled idempotently when
+            # that case is registered after upgrade instead of assuming this is
+            # a brand-new case.
+            existing_preparation = connection.execute(
+                select(preparation.c.case_id).where(preparation.c.case_id == str(case_id))
+            ).scalar_one_or_none()
+            if existing_preparation is None:
+                connection.execute(
+                    insert(preparation).values(
+                        case_id=str(case_id),
+                        preparation_id=str(preparation_id),
+                        phase="VALIDATING_DOCUMENTS",
+                        started_at=now,
+                        updated_at=now,
+                        ready_at=None,
+                        failure_code=None,
+                        cleanup_state="NOT_REQUIRED",
+                    )
+                )
+            existing_resources = connection.execute(
+                select(resources.c.case_id).where(resources.c.case_id == str(case_id))
+            ).scalar_one_or_none()
+            if existing_resources is None:
+                connection.execute(
+                    insert(resources).values(
+                        case_id=str(case_id),
+                        source_set_hash=source_set_hash,
+                        pm_file_id=None,
+                        technical_file_id=None,
+                        provider_conversation_id=None,
+                        bootstrap_request_id=f"specops-bootstrap-{preparation_id}",
+                        bootstrap_response_id=None,
+                        bootstrap_candidate_json=None,
+                        context_json=None,
+                        updated_at=now,
+                    )
+                )
         return self.get_case(case_id)
 
     def get_case(self, case_id: UUID) -> ProtocolCase:
@@ -218,6 +270,294 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 .order_by(table.c.sequence_number)
             ).scalars().all()
         return tuple(c.TranscriptFinalizedEvent.model_validate_json(row) for row in rows)
+
+    def set_preparation_phase(
+        self,
+        case_id: UUID,
+        phase: str,
+        *,
+        failure_code: str | None = None,
+        cleanup_state: str | None = None,
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        values: dict[str, Any] = {
+            "phase": phase,
+            "updated_at": _instant(self.now()),
+            "failure_code": failure_code,
+        }
+        if phase == "READY":
+            values["ready_at"] = _instant(self.now())
+        if cleanup_state is not None:
+            values["cleanup_state"] = cleanup_state
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table).where(table.c.case_id == str(case_id)).values(**values)
+            )
+            if result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation")
+
+    def preparation_projection(self, case_id: UUID) -> dict[str, Any]:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table).where(table.c.case_id == str(case_id))
+            ).mappings().one()
+        started = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+        delayed = row["phase"] not in {"READY", "FAILED"} and (
+            self.now() - started
+        ).total_seconds() >= 30
+        messages = {
+            "VALIDATING_DOCUMENTS": "Validating the uploaded documents…",
+            "PREPARING_ANALYZER": "Preparing the SpecOps Analyzer…",
+            "ANALYZER_REVIEWING_DOCUMENTS": "SpecOps Analyzer is reviewing the documents…",
+            "FORMULATING_WORKSHOP_PLAN": "Formulating the Spec Workshop plan…",
+            "VALIDATING_INITIAL_RUNWAY": "Validating the initial clarification runway…",
+            "READY": "Your Spec Workshop is ready.",
+            "FAILED": "Workshop preparation could not establish a safe clarification runway.",
+        }
+        return {
+            "preparation_id": row["preparation_id"],
+            "phase": row["phase"],
+            "message": messages[row["phase"]],
+            "started_at": row["started_at"],
+            "updated_at": row["updated_at"],
+            "ready_at": row["ready_at"],
+            "failure_code": row["failure_code"],
+            "cleanup_state": row["cleanup_state"],
+            "delayed": delayed,
+            "delayed_message": (
+                "SpecOps Analyzer is taking a little longer to formulate your Workshop plan. "
+                "Your documents are safe, and preparation is continuing."
+                if delayed
+                else None
+            ),
+        }
+
+    def preparation_resources(self, case_id: UUID) -> dict[str, Any]:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
+        with self.engine.connect() as connection:
+            return dict(
+                connection.execute(
+                    select(table).where(table.c.case_id == str(case_id))
+                ).mappings().one()
+            )
+
+    def checkpoint_preparation_resource(self, case_id: UUID, **values: Any) -> None:
+        allowed = {
+            "pm_file_id",
+            "technical_file_id",
+            "provider_conversation_id",
+            "bootstrap_response_id",
+            "bootstrap_candidate_json",
+            "context_json",
+        }
+        if not values or not set(values).issubset(allowed):
+            raise ValueError("invalid preparation resource checkpoint")
+        values["updated_at"] = _instant(self.now())
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table).where(table.c.case_id == str(case_id)).values(**values)
+            )
+
+    def current_admitted_guidance(self, case_id: UUID) -> c.AdmittedGuidance | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(table.c.payload_json)
+                .where(table.c.case_id == str(case_id), table.c.valid == 1)
+                .order_by(table.c.admitted_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        return None if value is None else c.AdmittedGuidance.model_validate_json(value)
+
+    def runway_projection(self, case_id: UUID) -> dict[str, Any]:
+        guidance = self.current_admitted_guidance(case_id)
+        if guidance is None:
+            return {"guidance_id": None, "depth": 0, "questions": [], "asked": []}
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.guidance_id == str(guidance.guidance_id),
+                )
+                .order_by(table.c.position)
+            ).mappings().all()
+        questions = [
+            {
+                "question_id": row["question_id"],
+                "question_version": row["question_version"],
+                "position": row["position"],
+                "exact_text": row["exact_text"],
+                "reason": row["reason"],
+            }
+            for row in rows
+            if row["status"] == "AVAILABLE"
+        ]
+        return {
+            "guidance_id": str(guidance.guidance_id),
+            "guidance_version": guidance.guidance_version,
+            "depth": len(questions),
+            "questions": questions,
+            "asked": [row["question_id"] for row in rows if row["status"] == "ASKED"],
+        }
+
+    def voice_session_card(self, case_id: UUID) -> c.VoiceSessionCard:
+        case = self.get_case(case_id)
+        guidance = self.current_admitted_guidance(case_id)
+        depth = self.runway_projection(case_id)["depth"]
+        health = (
+            c.RunwayHealth.HEALTHY
+            if depth >= 3
+            else c.RunwayHealth.PRIORITIZE_RUNWAY_REPLENISHMENT
+            if depth == 2
+            else c.RunwayHealth.PAUSE_DEEP_SYNTHESIS
+            if depth == 1
+            else c.RunwayHealth.SAFE_RECOVERY_ONLY
+        )
+        return c.VoiceSessionCard(
+            protocol_version=c.PROTOCOL_VERSION,
+            view_type="VOICE_SESSION_CARD",
+            session_id=case.session_id,
+            case_revision=self.case_revision(case_id),
+            readiness=(c.Readiness.READY if depth else c.Readiness.NEEDS_CLARIFICATION),
+            review_obligation=case.review_obligation,
+            committed_summary=(),
+            admitted_guidance=guidance,
+            runway_health=health,
+            pending_decision_batch_view_id=None,
+            admitted_review_narration=None,
+            generated_at=self.now(),
+        )
+
+    def analyzer_jobs(self, case_id: UUID) -> tuple[dict[str, Any], ...]:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(table.c.case_id == str(case_id))
+                .order_by(table.c.created_at, table.c.priority, table.c.job_id)
+            ).mappings().all()
+        return tuple(dict(row) for row in rows)
+
+    def claim_analyzer_job(
+        self, case_id: UUID, *, worker_id: str, lease_seconds: int = 30
+    ) -> dict[str, Any] | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        now = self.now()
+        now_text = _instant(now)
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.state != "COMPLETED",
+                    table.c.state != "FAILED",
+                    (table.c.lease_expires_at.is_(None) | (table.c.lease_expires_at <= now_text)),
+                    table.c.available_at <= now_text,
+                )
+                .order_by(table.c.priority, table.c.created_at, table.c.job_id)
+            ).mappings().all()
+            for row in rows:
+                if row["operation"] == c.AnalyzerOperation.GUIDANCE.value:
+                    older_turn = connection.execute(
+                        select(table.c.job_id).where(
+                            table.c.case_id == str(case_id),
+                            table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
+                            table.c.state != "COMPLETED",
+                            table.c.created_at <= row["created_at"],
+                        ).limit(1)
+                    ).scalar_one_or_none()
+                    if older_turn is not None:
+                        continue
+                lease_until = _instant(now + timedelta(seconds=lease_seconds))
+                result = connection.execute(
+                    update(table)
+                    .where(
+                        table.c.job_id == row["job_id"],
+                        (table.c.lease_expires_at.is_(None) | (table.c.lease_expires_at <= now_text)),
+                    )
+                    .values(
+                        lease_owner=worker_id,
+                        lease_expires_at=lease_until,
+                        attempt_count=table.c.attempt_count + 1,
+                        updated_at=now_text,
+                    )
+                )
+                if result.rowcount == 1:
+                    claimed = dict(row)
+                    claimed.update(
+                        lease_owner=worker_id,
+                        lease_expires_at=lease_until,
+                        attempt_count=row["attempt_count"] + 1,
+                    )
+                    return claimed
+        return None
+
+    def checkpoint_analyzer_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        state: str,
+        request_json: str | None = None,
+        candidate_json: str | None = None,
+        admission_receipt_json: str | None = None,
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        values: dict[str, Any] = {"state": state, "updated_at": _instant(self.now())}
+        if request_json is not None:
+            values["request_json"] = request_json
+        if candidate_json is not None:
+            values["candidate_json"] = candidate_json
+        if admission_receipt_json is not None:
+            values["admission_receipt_json"] = admission_receipt_json
+        if state == "COMPLETED":
+            values.update(lease_owner=None, lease_expires_at=None)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(table.c.job_id == job_id, table.c.lease_owner == worker_id)
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("Analyzer job lease was lost")
+
+    def release_analyzer_job(
+        self, job_id: str, *, worker_id: str, error_code: str
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table)
+                .where(table.c.job_id == job_id, table.c.lease_owner == worker_id)
+                .values(
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    last_error_code=error_code[:128],
+                    available_at=_instant(self.now() + timedelta(seconds=1)),
+                    updated_at=_instant(self.now()),
+                )
+            )
+
+    def fail_analyzer_job(
+        self, job_id: str, *, worker_id: str, error_code: str
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table)
+                .where(table.c.job_id == job_id, table.c.lease_owner == worker_id)
+                .values(
+                    state="FAILED",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    last_error_code=error_code[:128],
+                    updated_at=_instant(self.now()),
+                )
+            )
 
     def case_actor(self, case_id: UUID, role: str) -> UUID:
         column = {
@@ -796,12 +1136,116 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 recorded_at=_instant(self.now()),
             )
         )
+        # The transcript and its first eligible Analyzer work item deliberately
+        # share this Foundation transaction. A caller can acknowledge this
+        # receipt immediately; provider work begins only after commit.
+        jobs = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        event_id = command.transcript.event_id
+        now = _instant(self.now())
+        job_id = _runtime_id(command.case_id, "TURN_ANALYSIS", event_id)
+        connection.execute(
+            insert(jobs).values(
+                job_id=str(job_id),
+                case_id=str(command.case_id),
+                session_id=str(command.session_id),
+                operation=c.AnalyzerOperation.TURN_ANALYSIS.value,
+                subject_id=str(event_id),
+                dedupe_key=f"turn-analysis:{command.case_id}:{event_id}",
+                priority=10,
+                state="ANALYSIS_PENDING",
+                provider_request_id=f"specops-turn_analysis-{job_id}",
+                request_json=None,
+                candidate_json=None,
+                admission_receipt_json=None,
+                attempt_count=0,
+                lease_owner=None,
+                lease_expires_at=None,
+                available_at=now,
+                last_error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self._consume_runway_and_schedule_guidance(
+            connection, command.case_id, command.session_id, now
+        )
         self._advance_revision(connection, command.case_id, prior_revision)
         return c.TranscriptRecordedReceipt(
             receipt_type="TRANSCRIPT_RECORDED",
             command=self._base_receipt(command, prior_revision),
             transcript_event_id=command.transcript.event_id,
             transcript_hash=command.transcript.transcript_hash,
+        )
+
+    def _consume_runway_and_schedule_guidance(
+        self, connection, case_id: UUID, session_id: UUID, now: str
+    ) -> None:
+        runway = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        jobs = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        current_guidance = connection.execute(
+            select(runway.c.guidance_id)
+            .where(runway.c.case_id == str(case_id), runway.c.status == "AVAILABLE")
+            .order_by(runway.c.admitted_at.desc(), runway.c.position)
+            .limit(1)
+        ).scalar_one_or_none()
+        if current_guidance is None:
+            return
+        current = connection.execute(
+            select(runway)
+            .where(
+                runway.c.case_id == str(case_id),
+                runway.c.guidance_id == current_guidance,
+                runway.c.status == "AVAILABLE",
+            )
+            .order_by(runway.c.position)
+        ).mappings().all()
+        if not current:
+            return
+        connection.execute(
+            update(runway)
+            .where(
+                runway.c.case_id == str(case_id),
+                runway.c.guidance_id == current_guidance,
+                runway.c.question_id == current[0]["question_id"],
+            )
+            .values(status="ASKED", consumed_at=now)
+        )
+        depth = len(current) - 1
+        if depth != 2:
+            return
+        subject_id = str(current_guidance)
+        existing = connection.execute(
+            select(jobs.c.job_id).where(
+                jobs.c.case_id == str(case_id),
+                jobs.c.operation == c.AnalyzerOperation.GUIDANCE.value,
+                jobs.c.subject_id == subject_id,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
+        job_id = _runtime_id(case_id, "GUIDANCE", subject_id)
+        connection.execute(
+            insert(jobs).values(
+                job_id=str(job_id),
+                case_id=str(case_id),
+                session_id=str(session_id),
+                operation=c.AnalyzerOperation.GUIDANCE.value,
+                subject_id=subject_id,
+                dedupe_key=f"guidance:{case_id}:{subject_id}",
+                priority=20,
+                state="ANALYSIS_PENDING",
+                provider_request_id=f"specops-guidance-{job_id}",
+                request_json=None,
+                candidate_json=None,
+                admission_receipt_json=None,
+                attempt_count=0,
+                lease_owner=None,
+                lease_expires_at=None,
+                available_at=now,
+                last_error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
         )
 
     def _active_context(self, connection, case_id: UUID, context_id: UUID):
@@ -934,14 +1378,178 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if isinstance(command, c.AdmitTurnAnalysisCommand):
             self._apply_turn_revisions(connection, command, allocated)
             self._apply_problem_assessments(connection, command, allocated)
+        admitted_guidance_id = None
+        if isinstance(command, c.AdmitInterviewBriefCommand):
+            admitted_guidance_id = self._admit_initial_runway(
+                connection, command, allocated
+            )
         self._advance_revision(connection, command.case_id, prior_revision)
         return c.ProposalAdmissionReceipt(
             receipt_type="PROPOSAL_ADMISSION",
             command=self._base_receipt(command, prior_revision),
             analyzer_run_id=command.analyzer_run_id,
             identity_mappings=tuple(mappings),
-            admitted_guidance_id=None,
+            admitted_guidance_id=admitted_guidance_id,
         )
+
+    def _admit_initial_runway(self, connection, command, allocated):
+        """Map BOOTSTRAP-local question keys into one governed initial runway.
+
+        A short or unsafe candidate is still valid provisional semantic input,
+        but it never becomes guidance. Preparation therefore fails closed
+        without weakening the six-question Voice gate.
+        """
+
+        candidate = command.candidate
+        runway = candidate.initial_runway
+        keys = (
+            runway.recommended_question_key,
+            *runway.safe_alternate_question_keys,
+        )
+        if len(keys) != 6 or len(set(keys)) != 6:
+            return None
+        questions = {item.candidate_key: item for item in candidate.questions}
+        if any(key not in questions for key in keys):
+            return None
+        if any(not questions[key].safe_without_current_turn_interpretation for key in keys):
+            return None
+
+        def admitted_question(key):
+            entity_kind, foundation_id, version = allocated[key]
+            if entity_kind != "QUESTION":
+                raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+            question = questions[key]
+            # Every prerequisite is bound to an admitted, still-current problem.
+            for problem_key in (
+                *question.addresses_problem_keys,
+                *question.prerequisite_problem_keys,
+            ):
+                problem_kind, problem_id, problem_version = allocated[problem_key]
+                if problem_kind != "PROBLEM":
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                self._semantic_record_for_ref(
+                    connection,
+                    command.case_id,
+                    {
+                        "foundation_id": str(problem_id),
+                        "expected_version": problem_version,
+                    },
+                )
+            return c.AdmittedGuidanceQuestion(
+                question_id=foundation_id,
+                question_version=version,
+                exact_text=question.text,
+                reason=question.rationale,
+            )
+
+        recommended = admitted_question(keys[0])
+        alternatives = tuple(admitted_question(key) for key in keys[1:])
+        dependencies = [
+            c.AdmittedGuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_id=None,
+                expected_version=None,
+                source_set_hash=candidate.source_set_hash,
+            )
+        ]
+        dependency_refs: set[tuple[c.GuidanceDependencyKind, UUID, int]] = set()
+        for key in keys:
+            question = questions[key]
+            _, question_id, question_version = allocated[key]
+            dependency_refs.add(
+                (c.GuidanceDependencyKind.QUESTION, question_id, question_version)
+            )
+            for problem_key in (
+                *question.addresses_problem_keys,
+                *question.prerequisite_problem_keys,
+            ):
+                _, problem_id, problem_version = allocated[problem_key]
+                dependency_refs.add(
+                    (c.GuidanceDependencyKind.PROBLEM, problem_id, problem_version)
+                )
+        dependencies.extend(
+            c.AdmittedGuidanceDependency(
+                dependency_kind=kind,
+                entity_id=identity,
+                expected_version=version,
+                source_set_hash=None,
+            )
+            for kind, identity, version in sorted(
+                dependency_refs, key=lambda item: (item[0].value, str(item[1]), item[2])
+            )
+        )
+        do_not_ask = tuple(
+            c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=allocated[key][1],
+                expected_version=allocated[key][2],
+            )
+            for key in runway.do_not_ask_question_keys
+        )
+        guidance_id = _runtime_id(command.analyzer_run_id, "initial-guidance")
+        admitted = c.AdmittedGuidance(
+            guidance_id=guidance_id,
+            guidance_version=1,
+            source_analyzer_run_id=command.analyzer_run_id,
+            source_context_id=command.context_id,
+            source_request_hash=command.provider_request_hash,
+            based_on_case_revision=command.expected_case_revision,
+            source_set_hash=candidate.source_set_hash,
+            recommended_question=recommended,
+            safe_alternates=alternatives,
+            do_not_ask_questions=do_not_ask,
+            dependencies=tuple(dependencies),
+            acknowledgement_suggestion="The first clarification area is ready.",
+            invalidation_triggers=tuple(
+                sorted(
+                    {
+                        c.GuidanceInvalidationTrigger.SOURCE_SET_CHANGED,
+                        c.GuidanceInvalidationTrigger.FOUNDATION_ENTITY_CHANGED,
+                        c.GuidanceInvalidationTrigger.QUESTION_ANSWERED,
+                        c.GuidanceInvalidationTrigger.PROBLEM_RESOLVED,
+                        c.GuidanceInvalidationTrigger.GUIDANCE_SUPERSEDED,
+                        c.GuidanceInvalidationTrigger.WORKSHOP_CLOSED,
+                    },
+                    key=lambda item: item.value,
+                )
+            ),
+            admitted_at=self.now(),
+        )
+        guidance_table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        runway_table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        connection.execute(
+            update(guidance_table)
+            .where(guidance_table.c.case_id == str(command.case_id))
+            .values(valid=0)
+        )
+        connection.execute(
+            insert(guidance_table).values(
+                guidance_id=str(guidance_id),
+                guidance_version=1,
+                case_id=str(command.case_id),
+                payload_json=admitted.model_dump_json(),
+                valid=1,
+                admitted_at=_instant(admitted.admitted_at),
+            )
+        )
+        for position, question in enumerate(
+            (admitted.recommended_question, *admitted.safe_alternates), start=1
+        ):
+            connection.execute(
+                insert(runway_table).values(
+                    case_id=str(command.case_id),
+                    guidance_id=str(guidance_id),
+                    question_id=str(question.question_id),
+                    question_version=question.question_version,
+                    position=position,
+                    exact_text=question.exact_text,
+                    reason=question.reason,
+                    status="AVAILABLE",
+                    admitted_at=_instant(admitted.admitted_at),
+                    consumed_at=None,
+                )
+            )
+        return guidance_id
 
     def _admit_evidence_candidate(self, connection, case_id, candidate, active_context):
         context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
@@ -1185,6 +1793,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if command.candidate.source_set_hash != case["source_set_hash"]:
             raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
 
+        derived_dependency_refs: set[
+            tuple[c.GuidanceDependencyKind, UUID, int]
+        ] = set()
+
         def admitted_question(question):
             row = self._semantic_record_for_ref(connection, command.case_id, question.question_ref)
             if row["entity_kind"] != "QUESTION":
@@ -1192,6 +1804,34 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             payload = json.loads(row["payload_json"])
             if payload.get("text") != question.exact_text:
                 raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+            if not payload.get("safe_without_current_turn_interpretation", False):
+                raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+            derived_dependency_refs.add(
+                (
+                    c.GuidanceDependencyKind.QUESTION,
+                    question.question_ref.foundation_id,
+                    question.question_ref.expected_version,
+                )
+            )
+            for prerequisite in (
+                *payload.get("addresses_problem_refs", ()),
+                *payload.get("prerequisite_problem_refs", ()),
+            ):
+                problem = self._semantic_record_for_ref(
+                    connection, command.case_id, prerequisite
+                )
+                if (
+                    problem["entity_kind"] != "PROBLEM"
+                    or problem["status"] != c.SemanticRecordStatus.OPEN.value
+                ):
+                    raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+                derived_dependency_refs.add(
+                    (
+                        c.GuidanceDependencyKind.PROBLEM,
+                        UUID(prerequisite["foundation_id"]),
+                        prerequisite["expected_version"],
+                    )
+                )
             return c.AdmittedGuidanceQuestion(
                 question_id=question.question_ref.foundation_id,
                 question_version=question.question_ref.expected_version,
@@ -1206,6 +1846,9 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
 
         dependencies = []
+        admitted_dependency_refs: set[
+            tuple[c.GuidanceDependencyKind, UUID, int]
+        ] = set()
         triggers = {
             c.GuidanceInvalidationTrigger.GUIDANCE_SUPERSEDED,
             c.GuidanceInvalidationTrigger.WORKSHOP_CLOSED,
@@ -1238,10 +1881,39 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     source_set_hash=None,
                 )
             )
+            admitted_dependency_refs.add(
+                (
+                    dependency.dependency_kind,
+                    dependency.entity_ref.foundation_id,
+                    dependency.entity_ref.expected_version,
+                )
+            )
             triggers.add(c.GuidanceInvalidationTrigger.FOUNDATION_ENTITY_CHANGED)
             if dependency.dependency_kind is c.GuidanceDependencyKind.QUESTION:
                 triggers.add(c.GuidanceInvalidationTrigger.QUESTION_ANSWERED)
             if dependency.dependency_kind is c.GuidanceDependencyKind.PROBLEM:
+                triggers.add(c.GuidanceInvalidationTrigger.PROBLEM_RESOLVED)
+
+        # Foundation binds every selected question and each current open
+        # problem it addresses, even if Terra omitted those dependency rows.
+        # This strengthens admission without changing the GUIDANCE schema or
+        # allowing GUIDANCE to create a question.
+        for kind, identity, version in sorted(
+            derived_dependency_refs - admitted_dependency_refs,
+            key=lambda item: (item[0].value, str(item[1]), item[2]),
+        ):
+            dependencies.append(
+                c.AdmittedGuidanceDependency(
+                    dependency_kind=kind,
+                    entity_id=identity,
+                    expected_version=version,
+                    source_set_hash=None,
+                )
+            )
+            triggers.add(c.GuidanceInvalidationTrigger.FOUNDATION_ENTITY_CHANGED)
+            if kind is c.GuidanceDependencyKind.QUESTION:
+                triggers.add(c.GuidanceInvalidationTrigger.QUESTION_ANSWERED)
+            else:
                 triggers.add(c.GuidanceInvalidationTrigger.PROBLEM_RESOLVED)
 
         guidance_id = self.new_id()
@@ -1273,6 +1945,22 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 admitted_at=_instant(admitted.admitted_at),
             )
         )
+        runway_table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        for position, question in enumerate((recommended, *alternates), start=1):
+            connection.execute(
+                insert(runway_table).values(
+                    case_id=str(command.case_id),
+                    guidance_id=str(guidance_id),
+                    question_id=str(question.question_id),
+                    question_version=question.question_version,
+                    position=position,
+                    exact_text=question.exact_text,
+                    reason=question.reason,
+                    status="AVAILABLE",
+                    admitted_at=_instant(admitted.admitted_at),
+                    consumed_at=None,
+                )
+            )
         self._advance_revision(connection, command.case_id, prior_revision)
         return c.ProposalAdmissionReceipt(
             receipt_type="PROPOSAL_ADMISSION",

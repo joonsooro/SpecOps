@@ -35,7 +35,7 @@ def test_0002_database_upgrades_to_0003_with_exact_v4_tables(tmp_path):
         column["name"] for column in inspector.get_columns("workshop_artifact_confirmations")
     }
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0004"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005"
     assert set(ARTIFACT_QUALITY_TABLE_NAMES).issubset(inspector.get_table_names())
 
 

@@ -76,6 +76,8 @@ from .workshop_protocol_storage import define_workshop_protocol_tables
 from .artifact_quality_storage import define_artifact_quality_tables
 
 WORKSHOP_PROTOCOL_TABLES = define_workshop_protocol_tables(metadata)
+from .workshop_protocol_storage import V0_RUNTIME_TABLE_NAMES
+V0_RUNTIME_TABLES = {name: metadata.tables[name] for name in V0_RUNTIME_TABLE_NAMES}
 ARTIFACT_QUALITY_TABLES = define_artifact_quality_tables(metadata)
 
 # Relationally expressible references are composite and case-scoped.  Cyclic
@@ -143,7 +145,10 @@ for table in metadata.tables.values():
     for column in table.columns:
         if not isinstance(column.type, Integer) or (table.name, column.name) in BOOLEAN_COLUMNS:
             continue
-        lower = 0 if (table.name, column.name) == ("audit_events", "before_case_revision") else 1
+        lower = 0 if (table.name, column.name) in {
+            ("audit_events", "before_case_revision"),
+            ("workshop_analyzer_jobs", "attempt_count"),
+        } else 1
         bounds = f"{column.name} >= {lower} AND {column.name} <= 9223372036854775807"
         table.append_constraint(CheckConstraint(f"{column.name} IS NULL OR ({bounds})" if column.nullable else bounds))
 

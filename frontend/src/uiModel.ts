@@ -1,6 +1,13 @@
 export type ConversationPhase = "WORKSHOP" | "HANDOFF_READY" | "COMPLETE";
 export type ProposalIntent = "CONFIRM" | "EDIT" | "REJECT";
 
+export function workshopStartEnabled(phase: string, runwayDepth: number): boolean {
+  // READY is a durable server fact that could only have been reached with the
+  // exact six-question initial runway. Current depth may legitimately fall as
+  // the active Workshop consumes admitted questions.
+  return phase === "READY" && runwayDepth >= 0;
+}
+
 export function formulationEnabled(phase: ConversationPhase, revisionLocked: boolean): boolean {
   return phase === "WORKSHOP" && !revisionLocked;
 }

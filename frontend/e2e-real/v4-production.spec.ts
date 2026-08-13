@@ -5,7 +5,7 @@ test("real FastAPI and built frontend complete both deterministic V4 artifact se
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "CSV Export Workshop" })).toBeVisible();
-  await expect(page.getByText("Foundation and delegation verified")).toBeVisible();
+  await expect(page.getByText("Your Spec Workshop is ready.")).toBeVisible();
   await expect(page.getByText("No final turns yet. Start with the export’s success criteria.")).toBeVisible();
   const projection = await page.request.get("/api/workshop");
   expect(projection.ok()).toBe(true);
@@ -13,6 +13,8 @@ test("real FastAPI and built frontend complete both deterministic V4 artifact se
   expect(body.protocol_version).toBe("1.0.0");
   expect(body.session.conversation_phase).toBe("WORKSHOP");
   expect(body.pending_proposal).toBeNull();
+  expect(body.preparation.phase).toBe("READY");
+  expect(body.runway.depth).toBe(6);
 
   await page.getByRole("button", { name: "Synthesize + audit" }).click();
   await expect(page.getByText("Spec Package synthesized and quality-audited")).toBeVisible();

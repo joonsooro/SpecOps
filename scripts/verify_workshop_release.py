@@ -11,9 +11,9 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
 FRONTEND = BACKEND / "frontend"
-# Run 4/SW evidence is historical and immutable. Task 26 emits a separate
-# deterministic build receipt and never rewrites that release record.
-RECEIPT = BACKEND / "tests/workshop/task26-deterministic-evidence.json"
+# Run 4/SW and Task 26 evidence are historical and immutable. Task 27 emits a
+# new receipt and never rewrites either earlier release record.
+RECEIPT = BACKEND / "tests/workshop/task27-deterministic-evidence.json"
 LIVE_RECEIPT = BACKEND / "tests/workshop/live-evidence.json"
 sys.path.insert(0, str(BACKEND / "tests/workshop"))
 from sw_release_contract import SW_EVIDENCE, SW_IDS  # noqa: E402
@@ -51,7 +51,7 @@ def main() -> int:
         # persistence tests create and migrate their own isolated databases.
         run(
             "pytest",
-            [str(BACKEND / ".venv/bin/pytest"), "-q"],
+            [sys.executable, "-m", "pytest", "-q"],
             BACKEND,
             unset_environment=("SPECOPS_DATABASE_URL", "WORKSHOP_DATABASE_URL"),
         ),

@@ -40,6 +40,10 @@ h3, h4 { font-weight: 650; }
 .state-line { position: absolute; top: .1rem; left: 0; display: flex; gap: .5rem; align-items: center; color: var(--muted); font: 700 .66rem/1 "SFMono-Regular", Menlo, monospace; letter-spacing: .09em; }
 .state-dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--governed-teal); box-shadow: 0 0 0 .25rem color-mix(in srgb, var(--governed-teal) 15%, transparent); }
 .call-stage[data-state="DISCONNECTED"] .state-dot, .call-stage[data-state="ENDED"] .state-dot { background: var(--decision-ochre); box-shadow: none; }
+.call-stage[data-state="PREPARING"] .state-dot { background: var(--binding-blue); }
+.runway-rail { position: absolute; top: 2rem; left: 0; right: 0; display: grid; grid-template-columns: repeat(6, 1fr); gap: .28rem; margin: 0; padding: 0; list-style: none; }
+.runway-rail li { height: .3rem; border: 1px solid #94a29e; background: transparent; }
+.runway-rail li[data-admitted="true"] { border-color: var(--governed-teal); background: var(--governed-teal); }
 .waveform { position: absolute; inset: 4.2rem 8% 5.1rem; display: flex; justify-content: center; align-items: center; gap: min(1.5%, .38rem); opacity: .66; }
 .waveform i { width: .22rem; min-height: .6rem; border-radius: 2rem; background: linear-gradient(var(--evidence-cyan), var(--binding-blue)); transform-origin: center; }
 .call-stage[data-state="AGENT_SPEAKING"] .waveform i, .call-stage[data-state="LISTENING"] .waveform i { animation: listen 1.15s ease-in-out infinite alternate; }
@@ -47,12 +51,14 @@ h3, h4 { font-weight: 650; }
 .waveform i:nth-child(2n) { animation-delay: -.2s !important; }
 .mic-button { position: relative; z-index: 2; width: 6.4rem; height: 6.4rem; border: 1px solid #fbfffd; border-radius: 50%; background: var(--ledger-ink); color: #fff; box-shadow: 0 0 0 .6rem #dfe8e4, 0 0 0 .68rem #9baca7; cursor: pointer; font-size: 1.25rem; }
 .mic-button::after { content: ""; position: absolute; inset: 1rem; border: 1px solid #ffffff55; border-radius: inherit; }
+.mic-button:disabled { background: #63716f; box-shadow: 0 0 0 .6rem #dfe8e4, 0 0 0 .68rem #b7c1be; }
 .call-prompt { position: absolute; bottom: 3.5rem; margin: 0; color: var(--muted); font-size: .78rem; }
 .call-actions { position: absolute; bottom: .55rem; display: flex; gap: .45rem; }
 .call-actions button, .proposal-controls button { border: 1px solid #8d9c98; background: transparent; padding: .52rem .75rem; cursor: pointer; font-size: .76rem; font-weight: 700; }
 .call-actions button:disabled, button:disabled { cursor: not-allowed; opacity: .42; }
 .live-status { min-height: 3.7rem; display: grid; gap: .35rem; padding: .8rem .9rem; border-left: .22rem solid var(--evidence-cyan); background: #f5f8f6; font-size: .75rem; }
 .live-status strong { color: #8d3d20; font-weight: 650; }
+.live-status em { color: var(--binding-blue); font-style: normal; line-height: 1.45; }
 .transcript-head { display: flex; justify-content: space-between; align-items: baseline; margin: 1.6rem 0 .6rem; }
 .transcript-head h2 { font: 650 .9rem/1.2 "Avenir Next", Avenir, sans-serif; letter-spacing: .01em; }
 .transcript-head span { color: var(--muted); font: .65rem "SFMono-Regular", Menlo, monospace; }

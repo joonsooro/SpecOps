@@ -25,7 +25,9 @@ from v4_quality_factory import DeterministicQualityEvaluator
 
 
 BACKEND = Path(__file__).resolve().parents[2]
-SPEC_ENG = BACKEND.parent / "Spec_Eng"
+SPEC_ENG = next(
+    parent for parent in Path(__file__).resolve().parents if parent.name == "Spec_Eng"
+)
 _temporary = tempfile.TemporaryDirectory(prefix="specops-task26-browser-")
 
 

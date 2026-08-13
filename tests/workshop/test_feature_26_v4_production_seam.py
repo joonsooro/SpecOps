@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
@@ -18,7 +19,9 @@ from specops_workshop.v4.openai_adapter import BootstrapResult, PreparedProvider
 from specops_workshop.v4.orchestrator import V4ProductionOrchestrator
 
 
-ROOT = Path(__file__).resolve().parents[3] / "Spec_Eng"
+ROOT = next(
+    parent for parent in Path(__file__).resolve().parents if parent.name == "Spec_Eng"
+)
 
 
 class DeterministicAdapter:
@@ -70,16 +73,19 @@ class DeterministicAdapter:
             consequence="The export behavior cannot yet be confirmed.",
             evidence_candidate_keys=("evidence-export",),
         )
-        question = c.QuestionCandidate(
-            candidate_key="question-export",
-            text="Which export behavior should be confirmed?",
-            rationale="The product decision requires a human answer.",
-            question_shape=c.QuestionShape.OPEN_TEXT,
-            capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
-            answer_options=(),
-            addresses_problem_keys=("problem-export",),
-            prerequisite_problem_keys=(),
-            safe_without_current_turn_interpretation=True,
+        questions = tuple(
+            c.QuestionCandidate(
+                candidate_key=f"question-export-{index}",
+                text=f"Which export behavior should be confirmed for area {index}?",
+                rationale="The product decision requires an independently safe human answer.",
+                question_shape=c.QuestionShape.OPEN_TEXT,
+                capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
+                answer_options=(),
+                addresses_problem_keys=("problem-export",),
+                prerequisite_problem_keys=(),
+                safe_without_current_turn_interpretation=True,
+            )
+            for index in range(1, 7)
         )
         candidate = c.InterviewBriefCandidate(
             protocol_version="1.0.0",
@@ -93,10 +99,12 @@ class DeterministicAdapter:
             evidence_candidates=(evidence,),
             problems=(problem,),
             problem_clusters=(),
-            questions=(question,),
+            questions=questions,
             initial_runway=c.QuestionRunwayCandidate(
-                recommended_question_key="question-export",
-                safe_alternate_question_keys=(),
+                recommended_question_key="question-export-1",
+                safe_alternate_question_keys=tuple(
+                    f"question-export-{index}" for index in range(2, 7)
+                ),
                 do_not_ask_question_keys=(),
             ),
             confirmation_checkpoints=(),
@@ -182,6 +190,10 @@ def test_production_factory_uses_stored_conversation_v4_path_and_replays_duplica
         }
         first = client.post("/api/session/final-turn", json=payload)
         replay = client.post("/api/session/final-turn", json=payload)
+        for _ in range(100):
+            if client.get("/api/workshop").json()["analyzer_jobs"][0]["state"] == "COMPLETED":
+                break
+            time.sleep(0.01)
     assert first.status_code == 200, first.text
     assert replay.status_code == 200, replay.text
     assert first.json()["duplicate"] is False
@@ -203,7 +215,7 @@ def test_production_source_excludes_the_legacy_orchestration_boundary():
         assert forbidden not in source
 
 
-def test_restart_invalidates_unavailable_conversation_and_rebuilds_provider_bindings(tmp_path):
+def test_restart_reuses_durable_ready_context_without_duplicate_provider_work(tmp_path):
     first = DeterministicAdapter()
     settings = configured(tmp_path)
     initial = create_app(
@@ -217,13 +229,14 @@ def test_restart_invalidates_unavailable_conversation_and_rebuilds_provider_bind
         live_provider=object(), analyzer_adapter=rebuilt,
     )
     context = asyncio.run(restarted.state.workshop_protocol_orchestrator.ensure_context())
-    assert rebuilt.released == ["conv_task26"]
-    assert context.provider_conversation_id == "conv_task26_rebuilt"
+    assert rebuilt.released == []
+    assert rebuilt.operations == []
+    assert context.provider_conversation_id == "conv_task26"
     recovered = restarted.state.workshop_protocol_foundation.active_analyzer_context(
         restarted.state.bootstrap.case_id
     )
     assert recovered is not None
-    assert recovered.provider_conversation_id == "conv_task26_rebuilt"
+    assert recovered.provider_conversation_id == "conv_task26"
 
 
 def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():

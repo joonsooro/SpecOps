@@ -9,7 +9,7 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
   },
   webServer: {
-    command: "../.venv/bin/python ../tests/workshop/task26_browser_server.py",
+    command: "PYTHONPATH=../src ${SPECOPS_PYTHON:-../.venv/bin/python} ../tests/workshop/task26_browser_server.py",
     url: "http://127.0.0.1:8000/api/bootstrap",
     reuseExistingServer: false,
   },

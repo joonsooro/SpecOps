@@ -193,36 +193,49 @@ class StoredConversationOpenAIAdapter:
         if len({item.source.source_id for item in sources}) != 2:
             raise ValueError("provider sources must have distinct Foundation identities")
 
-        uploaded: list[contracts.ProviderSourceBinding] = []
-        for item in sources:
-            actual_hash = "sha256:" + hashlib.sha256(item.content).hexdigest()
-            if actual_hash != item.source.payload_hash:
-                raise ValueError("provider source bytes do not match the Foundation payload hash")
-            client_request_id = f"specops-file-{item.source.source_id}"
-            try:
-                provider_file = await asyncio.wait_for(
-                    self._client.files.create(
-                        file=(item.source.filename, item.content, item.source.media_type),
-                        purpose="user_data",
-                        extra_headers={"X-Client-Request-Id": client_request_id},
-                    ),
-                    timeout=REQUEST_TIMEOUT_SECONDS,
-                )
-                file_id = _safe_provider_identifier(getattr(provider_file, "id", None))
-                if file_id is None:
-                    raise ValueError("unsafe provider file identifier")
-                uploaded.append(
-                    contracts.ProviderSourceBinding(source=item.source, provider_file_id=file_id)
-                )
-            except Exception as exc:
-                await self._release_prepared_ids(
-                    None, tuple(binding.provider_file_id for binding in uploaded)
-                )
-                raise self._provider_error(
-                    exc,
-                    stage=contracts.ProviderProcessingStage.FILE_UPLOAD,
-                    client_request_id=client_request_id,
-                ) from exc
+        uploaded: list[str] = []
+        try:
+            for item in sources:
+                uploaded.append(await self.upload_source(item))
+            conversation_id = await self.create_conversation(sources)
+        except Exception:
+            await self._release_prepared_ids(
+                None, tuple(uploaded)
+            )
+            raise
+        return self.prepared_from_ids(sources, tuple(uploaded), conversation_id)
+
+    async def upload_source(self, item: ProviderSourceUpload) -> str:
+        """Upload one ordered source under a stable logical request identity."""
+
+        actual_hash = "sha256:" + hashlib.sha256(item.content).hexdigest()
+        if actual_hash != item.source.payload_hash:
+            raise ValueError("provider source bytes do not match the Foundation payload hash")
+        client_request_id = f"specops-file-{item.source.source_id}"
+        try:
+            provider_file = await asyncio.wait_for(
+                self._client.files.create(
+                    file=(item.source.filename, item.content, item.source.media_type),
+                    purpose="user_data",
+                    extra_headers={"X-Client-Request-Id": client_request_id},
+                ),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            file_id = _safe_provider_identifier(getattr(provider_file, "id", None))
+            if file_id is None:
+                raise ValueError("unsafe provider file identifier")
+            return file_id
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage.FILE_UPLOAD,
+                client_request_id=client_request_id,
+            ) from exc
+
+    async def create_conversation(
+        self, sources: tuple[ProviderSourceUpload, ProviderSourceUpload]
+    ) -> str:
+        """Create the one stored Conversation under a stable logical identity."""
 
         conversation_request_id = "specops-conversation-" + hashlib.sha256(
             "|".join(str(item.source.source_id) for item in sources).encode("ascii")
@@ -238,24 +251,37 @@ class StoredConversationOpenAIAdapter:
             conversation_id = _safe_provider_identifier(getattr(conversation, "id", None))
             if conversation_id is None:
                 raise ValueError("unsafe provider Conversation identifier")
+            return conversation_id
         except Exception as exc:
-            await self._release_prepared_ids(
-                None, tuple(binding.provider_file_id for binding in uploaded)
-            )
             raise self._provider_error(
                 exc,
                 stage=contracts.ProviderProcessingStage.CONVERSATION_CREATE,
                 client_request_id=conversation_request_id,
             ) from exc
 
-        source_set_hash = self.source_set_hash(tuple(item.source for item in sources))
+    def prepared_from_ids(
+        self,
+        sources: tuple[ProviderSourceUpload, ProviderSourceUpload],
+        file_ids: tuple[str, str],
+        conversation_id: str,
+    ) -> PreparedProviderContext:
+        if len(file_ids) != 2:
+            raise ValueError("exactly two provider file IDs are required")
         return PreparedProviderContext(
             provider_conversation_id=conversation_id,
             source_set=contracts.SourceSetBinding(
-                source_set_hash=source_set_hash,
-                ordered_sources=tuple(uploaded),
+                source_set_hash=self.source_set_hash(tuple(item.source for item in sources)),
+                ordered_sources=tuple(
+                    contracts.ProviderSourceBinding(source=item.source, provider_file_id=file_id)
+                    for item, file_id in zip(sources, file_ids, strict=True)
+                ),
             ),
         )
+
+    async def release_resource_ids(
+        self, conversation_id: str | None, file_ids: tuple[str, ...]
+    ) -> None:
+        await self._release_prepared_ids(conversation_id, file_ids)
 
     async def bootstrap(
         self,

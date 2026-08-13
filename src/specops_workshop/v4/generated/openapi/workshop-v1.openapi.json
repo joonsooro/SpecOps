@@ -3900,6 +3900,7 @@
               "PROFILE_MISMATCH",
               "ANALYZER_CONTRACT_CHANGED",
               "CONTEXT_MISMATCH",
+              "PREPARATION_REJECTED",
               "WORKSHOP_CLOSED"
             ],
             "title": "Reason Code",

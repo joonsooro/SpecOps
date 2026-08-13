@@ -1556,6 +1556,7 @@ class InvalidateAnalyzerContextCommand(StrictRevisionCommandEnvelope):
         "PROFILE_MISMATCH",
         "ANALYZER_CONTRACT_CHANGED",
         "CONTEXT_MISMATCH",
+        "PREPARATION_REJECTED",
         "WORKSHOP_CLOSED",
     ]
 
@@ -2247,6 +2248,7 @@ class AnalyzerContextInvalidatedEvent(EventEnvelope):
         "PROFILE_MISMATCH",
         "ANALYZER_CONTRACT_CHANGED",
         "CONTEXT_MISMATCH",
+        "PREPARATION_REJECTED",
         "WORKSHOP_CLOSED",
     ]
 

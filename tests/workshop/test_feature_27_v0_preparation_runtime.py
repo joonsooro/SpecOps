@@ -963,6 +963,62 @@ def test_cancelled_bootstrap_create_without_response_id_fails_closed_without_ret
     assert adapter.start_calls == 1
 
 
+def test_rejected_bootstrap_terminalizes_context_and_enters_cleanup_without_retry(tmp_path):
+    class RejectedBootstrapAdapter(CancellablePreparationAdapter):
+        async def bootstrap(self, request, *, prepared, session_id):
+            result = await super().bootstrap(
+                request, prepared=prepared, session_id=session_id
+            )
+            evidence = result.candidate.evidence_candidates[0].model_copy(
+                update={
+                    "locator": c.QuoteSearchLocator(
+                        locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
+                        exact_quote="This exact quote is not present in the PM source.",
+                        occurrence=1,
+                    ),
+                    "quoted_text_candidate": (
+                        "This exact quote is not present in the PM source."
+                    ),
+                }
+            )
+            candidate = result.candidate.model_copy(
+                update={"evidence_candidates": (evidence,)}
+            )
+            return BootstrapResult(context=result.context, candidate=candidate)
+
+    adapter = RejectedBootstrapAdapter("never")
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    foundation = app.state.workshop_protocol_foundation
+    case_id = app.state.bootstrap.case_id
+
+    failed = asyncio.run(orchestrator.prepare_workshop())
+    assert failed["phase"] == "FAILED"
+    assert failed["failure_code"] == "FOUNDATION_REJECTED_EVIDENCE_BINDING_FAILED"
+    assert failed["cleanup_state"] == "PENDING"
+    assert failed["cleanup_reason"] == "UNRECOVERABLE_PREPARATION_FAILURE"
+    assert foundation.active_analyzer_context(case_id) is None
+    assert adapter.bootstrap_creations == 1
+
+    assert asyncio.run(orchestrator.prepare_workshop()) == failed
+    assert adapter.bootstrap_creations == 1
+
+    cleaned = asyncio.run(orchestrator.cleanup_preparation())
+    assert cleaned["cleanup_state"] == "COMPLETED"
+    assert foundation.preparation_resources(case_id)["bootstrap_response_id"] is None
+    assert adapter.cleaned_resources == {
+        "resp_bootstrap",
+        "conv_task27_cancellable",
+        "file_task27_1",
+        "file_task27_2",
+    }
+
+
 @pytest.mark.parametrize(
     "stage",
     (

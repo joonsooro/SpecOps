@@ -2011,7 +2011,7 @@ export interface components {
              * Reason Code
              * @enum {string}
              */
-            reason_code: "SOURCE_SET_CHANGED" | "CONVERSATION_UNAVAILABLE" | "PROFILE_MISMATCH" | "ANALYZER_CONTRACT_CHANGED" | "CONTEXT_MISMATCH" | "WORKSHOP_CLOSED";
+            reason_code: "SOURCE_SET_CHANGED" | "CONVERSATION_UNAVAILABLE" | "PROFILE_MISMATCH" | "ANALYZER_CONTRACT_CHANGED" | "CONTEXT_MISMATCH" | "PREPARATION_REJECTED" | "WORKSHOP_CLOSED";
             /**
              * Session Id
              * Format: uuid

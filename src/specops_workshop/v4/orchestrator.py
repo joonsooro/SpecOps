@@ -18,7 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from specops_contracts import artifact_quality_v1 as q
 from specops_contracts import workshop_v1 as c
 from specops_contracts.canonical import analyzer_request_hash, canonical_bytes, domain_hash, transcript_hash
-from specops_workflow.workshop_protocol import WorkshopFoundationService
+from specops_workflow.workshop_protocol import (
+    FoundationProtocolError,
+    WorkshopFoundationService,
+)
 from specops_workflow.workshop_completion import (
     CompletionUtterance,
     classify_completion_utterance,
@@ -360,7 +363,42 @@ class V4ProductionOrchestrator:
                 candidate=candidate,
             )
             if self.foundation.current_admitted_guidance(self.case_id) is None:
-                self.foundation.execute(c.AdmitInterviewBriefCommand(**admit_values))
+                try:
+                    self.foundation.execute(c.AdmitInterviewBriefCommand(**admit_values))
+                except FoundationProtocolError as exc:
+                    active = self.foundation.active_analyzer_context(self.case_id)
+                    if active is not None:
+                        invalidate_values = self._command_base(
+                            "INVALIDATE_ANALYZER_CONTEXT",
+                            f"preparation-rejected-{context_id}",
+                            expected_revision=self.foundation.case_revision(self.case_id),
+                        )
+                        invalidate_values.update(
+                            command_type="INVALIDATE_ANALYZER_CONTEXT",
+                            context_id=context_id,
+                            reason_code="PREPARATION_REJECTED",
+                        )
+                        self.foundation.execute(
+                            c.InvalidateAnalyzerContextCommand(**invalidate_values)
+                        )
+                    failure_code = f"FOUNDATION_REJECTED_{exc.code.value}"
+                    self.foundation.set_provider_resource_lifecycle(
+                        self.case_id,
+                        cleanup_state="PENDING",
+                        cleanup_reason="UNRECOVERABLE_PREPARATION_FAILURE",
+                        cleanup_available_at=self.now()
+                        .astimezone(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        cleanup_last_error_code=None,
+                    )
+                    self.foundation.set_preparation_phase(
+                        self.case_id,
+                        "FAILED",
+                        failure_code=failure_code,
+                        cleanup_state="PENDING",
+                    )
+                    return self.foundation.preparation_projection(self.case_id)
             self.foundation.set_preparation_phase(
                 self.case_id, "VALIDATING_INITIAL_RUNWAY"
             )

@@ -599,6 +599,9 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
         assert finding.assessment is c.EvidenceAssessment.SUPPORTS
         assert finding.source_hash == foundation.test_source_set.ordered_sources[1].source.payload_hash
 
+    snapshot = foundation.semantic_snapshot(CASE_ID)
+    assert snapshot.evidence_findings == (finding,)
+
     restarted = WorkflowService(database_url=url)
     assert restarted._cases[CASE_ID].revision == 9
 

@@ -848,7 +848,11 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     )
                 )
             elif kind == "FINDING":
-                findings.append(c.AdmittedSemanticEvidenceFinding.model_validate(payload))
+                findings.append(
+                    c.AdmittedSemanticEvidenceFinding.model_validate_json(
+                        row["payload_json"]
+                    )
+                )
             elif kind == "REVISION_REQUEST":
                 revision_requests.append(
                     c.FoundationRevisionRequestSnapshot(

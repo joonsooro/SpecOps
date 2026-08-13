@@ -215,6 +215,12 @@ class _FakeResponses:
             _request_id=f"req_{len(self.owner.response_calls)}",
         )
 
+    async def delete(self, response_id, **kwargs):
+        self.owner.deleted_responses.append((response_id, kwargs))
+        # The installed AsyncOpenAI SDK intentionally casts successful
+        # Response DELETE bodies to None.
+        return None
+
 
 class FakeOpenAI:
     def __init__(self):
@@ -225,6 +231,7 @@ class FakeOpenAI:
         self.outputs = []
         self.deleted_files = []
         self.deleted_conversations = []
+        self.deleted_responses = []
         self.fail_file_call = None
         self.fail_conversation = False
         self.files = _FakeFiles(self)
@@ -416,7 +423,7 @@ def test_prepare_failure_cleans_partial_upload_without_content_diagnostics():
     asyncio.run(scenario())
 
 
-def test_release_context_deletes_conversation_and_both_uploaded_files():
+def test_release_context_deletes_response_conversation_and_both_uploaded_files():
     async def scenario():
         fake = FakeOpenAI()
         adapter = StoredConversationOpenAIAdapter(api_key="unused", client=fake, now=lambda: NOW)
@@ -431,6 +438,7 @@ def test_release_context_deletes_conversation_and_both_uploaded_files():
         receipt = await adapter.release_context(context)
         assert receipt.completed is True
         assert {item.outcome for item in receipt.deletions} == {"DELETED"}
+        assert [value[0] for value in fake.deleted_responses] == ["resp_1"]
         assert [value[0] for value in fake.deleted_conversations] == ["conv_workshop"]
         assert [value[0] for value in fake.deleted_files] == ["file_1", "file_2"]
 
@@ -478,6 +486,34 @@ def test_release_keeps_uncertain_resource_identity_and_accepts_explicit_absence(
         encoded = json.dumps([item.__dict__ for item in adapter.cleanup_events])
         assert "raw provider cleanup body" not in encoded
         assert "raw source content" not in encoded
+
+    asyncio.run(scenario())
+
+
+def test_response_delete_timeout_is_unconfirmed_and_keeps_stable_identity():
+    class Responses:
+        async def delete(self, response_id, **kwargs):
+            raise TimeoutError("provider body must not enter the cleanup receipt")
+
+    async def scenario():
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=Responses()),
+            now=lambda: NOW,
+        )
+        receipt = await adapter.release_resource_ids(
+            None, (), response_id="resp_timeout"
+        )
+        assert receipt.completed is False
+        assert receipt.retryable is True
+        assert len(receipt.deletions) == 1
+        deletion = receipt.deletions[0]
+        assert deletion.resource_kind == "RESPONSE"
+        assert deletion.resource_id == "resp_timeout"
+        assert deletion.client_request_id == "specops-response-delete-resp_timeout"
+        assert deletion.outcome == "UNCONFIRMED"
+        assert deletion.safe_error_code == "DELETE_TIMEOUT"
+        assert "provider body" not in json.dumps(deletion.__dict__)
 
     asyncio.run(scenario())
 

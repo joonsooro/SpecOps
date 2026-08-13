@@ -669,16 +669,24 @@ class CancellablePreparationAdapter(DeterministicAdapter):
         self._cancel_once("bootstrap")
         return self.bootstrap_result
 
-    async def release_resource_ids(self, conversation_id, file_ids):
+    async def release_resource_ids(self, conversation_id, file_ids, *, response_id=None):
         self.cleanup_attempts += 1
         self.cleaned_resources.update(
-            identity for identity in (conversation_id, *file_ids) if identity is not None
+            identity
+            for identity in (response_id, conversation_id, *file_ids)
+            if identity is not None
         )
         self._cancel_once("cleanup")
         return ProviderCleanupReceipt(
             deletions=tuple(
                 ProviderResourceDeletion(
-                    resource_kind=("CONVERSATION" if identity == conversation_id else "FILE"),
+                    resource_kind=(
+                        "RESPONSE"
+                        if identity == response_id
+                        else "CONVERSATION"
+                        if identity == conversation_id
+                        else "FILE"
+                    ),
                     resource_id=identity,
                     client_request_id=f"delete-{identity}",
                     provider_request_id=None,
@@ -687,7 +695,7 @@ class CancellablePreparationAdapter(DeterministicAdapter):
                     retryable=False,
                     duration_ms=1,
                 )
-                for identity in (conversation_id, *file_ids)
+                for identity in (response_id, conversation_id, *file_ids)
                 if identity is not None
             )
         )
@@ -1011,11 +1019,23 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
         def source_set_hash(sources):
             return SOURCE_SET_HASH
 
-        async def release_resource_ids(self, conversation_id, file_ids):
+        async def release_resource_ids(
+            self, conversation_id, file_ids, *, response_id=None
+        ):
             self.calls += 1
             if self.calls == 1:
                 return ProviderCleanupReceipt(
                     deletions=(
+                        ProviderResourceDeletion(
+                            "RESPONSE",
+                            response_id,
+                            "delete-response",
+                            None,
+                            "UNCONFIRMED",
+                            "DELETE_TIMEOUT",
+                            True,
+                            60_000,
+                        ),
                         ProviderResourceDeletion(
                             "CONVERSATION", conversation_id, "delete-conversation", None,
                             "DELETED", None, False, 2,
@@ -1026,17 +1046,24 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
                         ),
                         ProviderResourceDeletion(
                             "FILE", file_ids[1], "delete-file-technical", None,
-                            "UNCONFIRMED", "DELETE_TIMEOUT", True, 60_000,
+                            "DELETED", None, False, 4,
                         ),
                     )
                 )
             assert conversation_id is None
-            assert file_ids == ("file_technical",)
+            assert file_ids == ()
+            assert response_id == "resp_cleanup"
             return ProviderCleanupReceipt(
                 deletions=(
                     ProviderResourceDeletion(
-                        "FILE", "file_technical", "delete-file-technical", None,
-                        "ALREADY_ABSENT", None, False, 4,
+                        "RESPONSE",
+                        "resp_cleanup",
+                        "delete-response",
+                        None,
+                        "ALREADY_ABSENT",
+                        None,
+                        False,
+                        4,
                     ),
                 )
             )
@@ -1051,6 +1078,7 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
             pm_file_id="file_pm",
             technical_file_id="file_technical",
             provider_conversation_id="conversation_cleanup",
+            bootstrap_response_id="resp_cleanup",
         )
         foundation.set_preparation_phase(
             CASE_ID, "FAILED", failure_code="ABANDONED", cleanup_state="PENDING"
@@ -1081,13 +1109,17 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
         remaining = foundation.preparation_resources(CASE_ID)
         assert remaining["provider_conversation_id"] is None
         assert remaining["pm_file_id"] is None
-        assert remaining["technical_file_id"] == "file_technical"
+        assert remaining["technical_file_id"] is None
+        assert remaining["bootstrap_response_id"] == "resp_cleanup"
 
         clock.advance(30)
         second = await orchestrator.cleanup_preparation()
         assert second["cleanup_state"] == "COMPLETED"
         assert adapter.calls == 2
-        assert foundation.preparation_resources(CASE_ID)["technical_file_id"] is None
+        assert (
+            foundation.preparation_resources(CASE_ID)["bootstrap_response_id"]
+            is None
+        )
 
     asyncio.run(scenario())
 
@@ -1483,6 +1515,7 @@ def test_explicit_voice_completion_binds_final_transcript_and_finishes_analysis(
         ] == "COMPLETE"
         assert foundation.active_analyzer_context(app.state.bootstrap.case_id) is None
         assert adapter.cleanup_attempts == 1
+        assert "resp_bootstrap" in adapter.cleaned_resources
 
     asyncio.run(scenario())
 

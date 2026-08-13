@@ -79,7 +79,7 @@ class ProviderLifecycleEvent:
 class ProviderResourceDeletion:
     """Content-free terminal observation for one provider resource DELETE."""
 
-    resource_kind: Literal["CONVERSATION", "FILE"]
+    resource_kind: Literal["RESPONSE", "CONVERSATION", "FILE"]
     resource_id: str
     client_request_id: str
     provider_request_id: str | None
@@ -365,9 +365,15 @@ class StoredConversationOpenAIAdapter:
         )
 
     async def release_resource_ids(
-        self, conversation_id: str | None, file_ids: tuple[str, ...]
+        self,
+        conversation_id: str | None,
+        file_ids: tuple[str, ...],
+        *,
+        response_id: str | None = None,
     ) -> ProviderCleanupReceipt:
-        return await self._release_prepared_ids(conversation_id, file_ids)
+        return await self._release_prepared_ids(
+            conversation_id, file_ids, response_id=response_id
+        )
 
     async def bootstrap(
         self,
@@ -613,6 +619,7 @@ class StoredConversationOpenAIAdapter:
         return await self._release_prepared_ids(
             context.provider_conversation_id,
             tuple(item.provider_file_id for item in context.source_set.ordered_sources),
+            response_id=context.bootstrap_response_id,
         )
 
     async def release_prepared(
@@ -624,13 +631,17 @@ class StoredConversationOpenAIAdapter:
         )
 
     async def _release_prepared_ids(
-        self, conversation_id: str | None, file_ids: tuple[str, ...]
+        self,
+        conversation_id: str | None,
+        file_ids: tuple[str, ...],
+        *,
+        response_id: str | None = None,
     ) -> ProviderCleanupReceipt:
         async def bounded(
             resource: Any,
             identifier: str,
             request_id: str,
-            resource_kind: Literal["CONVERSATION", "FILE"],
+            resource_kind: Literal["RESPONSE", "CONVERSATION", "FILE"],
         ) -> ProviderResourceDeletion:
             started_at = self._monotonic()
             delete = getattr(resource, "delete", None)
@@ -707,8 +718,19 @@ class StoredConversationOpenAIAdapter:
                 )
                 self._record_cleanup_event(result)
                 return result
-            deleted = getattr(response, "deleted", None) is True
-            returned_id = _safe_provider_identifier(getattr(response, "id", None))
+            # AsyncOpenAI.responses.delete() casts a successful HTTP response to
+            # None, so completion of that await is the Response DELETE receipt.
+            # Conversation and File deletes expose deleted:true plus the ID.
+            response_delete_completed = resource_kind == "RESPONSE"
+            deleted = (
+                response_delete_completed
+                or getattr(response, "deleted", None) is True
+            )
+            returned_id = (
+                identifier
+                if response_delete_completed
+                else _safe_provider_identifier(getattr(response, "id", None))
+            )
             result = ProviderResourceDeletion(
                 resource_kind=resource_kind,
                 resource_id=identifier,
@@ -727,6 +749,15 @@ class StoredConversationOpenAIAdapter:
             return result
 
         results: list[ProviderResourceDeletion] = []
+        if response_id is not None:
+            results.append(
+                await bounded(
+                    self._client.responses,
+                    response_id,
+                    f"specops-response-delete-{response_id}",
+                    "RESPONSE",
+                )
+            )
         if conversation_id is not None:
             results.append(
                 await bounded(

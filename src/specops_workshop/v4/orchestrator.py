@@ -531,6 +531,7 @@ class V4ProductionOrchestrator:
                         )
                         if identity is not None
                     ),
+                    response_id=resources["bootstrap_response_id"],
                 )
             except asyncio.CancelledError:
                 # IN_PROGRESS is deliberately resumable. The adapter receives
@@ -566,6 +567,11 @@ class V4ProductionOrchestrator:
                         cleared["pm_file_id"] = None
                     if deletion.resource_id == resources["technical_file_id"]:
                         cleared["technical_file_id"] = None
+                if (
+                    deletion.resource_kind == "RESPONSE"
+                    and deletion.resource_id == resources["bootstrap_response_id"]
+                ):
+                    cleared["bootstrap_response_id"] = None
             if cleared:
                 self.foundation.checkpoint_preparation_resource(self.case_id, **cleared)
             remaining = self.foundation.preparation_resources(self.case_id)
@@ -575,6 +581,7 @@ class V4ProductionOrchestrator:
                     "pm_file_id",
                     "technical_file_id",
                     "provider_conversation_id",
+                    "bootstrap_response_id",
                 )
                 if remaining[name] is not None
             )

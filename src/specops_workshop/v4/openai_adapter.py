@@ -370,9 +370,14 @@ class StoredConversationOpenAIAdapter:
         file_ids: tuple[str, ...],
         *,
         response_id: str | None = None,
+        response_ids: tuple[str, ...] = (),
     ) -> ProviderCleanupReceipt:
+        bootstrap_response_ids = () if response_id is None else (response_id,)
+        tracked_response_ids = tuple(
+            dict.fromkeys((*bootstrap_response_ids, *response_ids))
+        )
         return await self._release_prepared_ids(
-            conversation_id, file_ids, response_id=response_id
+            conversation_id, file_ids, response_ids=tracked_response_ids
         )
 
     async def bootstrap(
@@ -585,6 +590,25 @@ class StoredConversationOpenAIAdapter:
         candidate, _ = await self._execute(request, bootstrap=False)
         return candidate
 
+    async def execute_with_response_checkpoint(
+        self,
+        request: contracts.AnalyzerProviderRequest,
+        *,
+        context: contracts.AnalyzerContextBinding,
+        checkpoint: Callable[[str], None],
+    ) -> contracts.AnalyzerProviderCandidate:
+        """Checkpoint a stored Response ID before parsing provider output."""
+
+        if request.request_type is contracts.AnalyzerOperation.BOOTSTRAP:
+            raise ValueError("use bootstrap() for the initial provider request")
+        self._validate_context(request, context)
+        candidate, _ = await self._execute(
+            request,
+            bootstrap=False,
+            response_checkpoint=checkpoint,
+        )
+        return candidate
+
     async def context_is_available(self, context: contracts.AnalyzerContextBinding) -> bool:
         if context.status is not contracts.ContextStatus.ACTIVE:
             return False
@@ -619,7 +643,7 @@ class StoredConversationOpenAIAdapter:
         return await self._release_prepared_ids(
             context.provider_conversation_id,
             tuple(item.provider_file_id for item in context.source_set.ordered_sources),
-            response_id=context.bootstrap_response_id,
+            response_ids=(context.bootstrap_response_id,),
         )
 
     async def release_prepared(
@@ -635,7 +659,7 @@ class StoredConversationOpenAIAdapter:
         conversation_id: str | None,
         file_ids: tuple[str, ...],
         *,
-        response_id: str | None = None,
+        response_ids: tuple[str, ...] = (),
     ) -> ProviderCleanupReceipt:
         async def bounded(
             resource: Any,
@@ -749,7 +773,7 @@ class StoredConversationOpenAIAdapter:
             return result
 
         results: list[ProviderResourceDeletion] = []
-        if response_id is not None:
+        for response_id in response_ids:
             results.append(
                 await bounded(
                     self._client.responses,
@@ -778,7 +802,13 @@ class StoredConversationOpenAIAdapter:
             )
         return ProviderCleanupReceipt(deletions=tuple(results))
 
-    async def _execute(self, request: contracts.AnalyzerProviderRequest, *, bootstrap: bool):
+    async def _execute(
+        self,
+        request: contracts.AnalyzerProviderRequest,
+        *,
+        bootstrap: bool,
+        response_checkpoint: Callable[[str], None] | None = None,
+    ):
         operation = contracts.AnalyzerOperation(request.request_type)
         _, _, candidate_type = native_schema_for(operation)
         arguments = self._response_arguments(request, bootstrap=bootstrap)
@@ -834,6 +864,8 @@ class StoredConversationOpenAIAdapter:
         response_id = _safe_provider_identifier(getattr(response, "id", None))
         if response_id is None:
             raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
+        if response_checkpoint is not None:
+            response_checkpoint(response_id)
         try:
             candidate = candidate_type.model_validate_json(response.output_text)
             self._validate_candidate_echo(request, candidate)

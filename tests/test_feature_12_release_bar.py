@@ -2876,7 +2876,7 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
     engine = engine_for(harness.database_url)
     inspector = inspect(engine)
     assert set(inspector.get_table_names()) == set(metadata.tables) | {"alembic_version"}
-    assert len(metadata.tables) == 46
+    assert len(metadata.tables) == 47
     assert str(inspector.get_columns("source_artifacts")[4]["type"]).upper() == "TEXT"
     assert str(inspector.get_columns("projection_plan_versions")[4]["type"]).upper() == "TEXT"
     for table_name, column_name in (
@@ -2956,7 +2956,7 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
         assert actual_checks == expected_checks
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
         triggers = {
             row[0]
             for row in connection.execute(

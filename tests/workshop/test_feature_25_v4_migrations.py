@@ -35,7 +35,7 @@ def test_0002_database_upgrades_to_0003_with_exact_v4_tables(tmp_path):
         column["name"] for column in inspector.get_columns("workshop_artifact_confirmations")
     }
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
     assert set(ARTIFACT_QUALITY_TABLE_NAMES).issubset(inspector.get_table_names())
 
 
@@ -61,7 +61,7 @@ def test_0005_database_adds_provider_resource_lifecycle_without_rebuild(tmp_path
         "cleanup_last_error_code",
     }.issubset(after)
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
 
 
 def test_semantic_adapters_never_guess_confirmation_or_identity_bindings():

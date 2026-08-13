@@ -37,6 +37,7 @@ V4_TABLE_NAMES = (
 V0_RUNTIME_TABLE_NAMES = (
     "workshop_preparations",
     "workshop_preparation_resources",
+    "workshop_provider_responses",
     "workshop_runway_items",
     "workshop_analyzer_jobs",
 )
@@ -278,6 +279,20 @@ def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
         Column("bootstrap_candidate_json", Text),
         Column("context_json", Text),
         Column("updated_at", Text, nullable=False),
+    )
+    table(
+        "workshop_provider_responses",
+        Column(
+            "case_id",
+            Text,
+            ForeignKey("cases.id", ondelete="RESTRICT"),
+            primary_key=True,
+        ),
+        Column("client_request_id", Text, primary_key=True),
+        Column("operation", Text, nullable=False),
+        Column("provider_response_id", Text, unique=True),
+        Column("recorded_at", Text, nullable=False),
+        Column("cleared_at", Text),
     )
     table(
         "workshop_runway_items",

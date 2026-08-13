@@ -596,13 +596,29 @@ async def _stored_conversation_bootstrap_case():
         evidence_findings=(),
     )
     fake.outputs.append(turn_candidate.model_dump_json())
-    returned = await adapter.execute(turn_request, context=result.context)
+    checkpoints: list[str] = []
+    returned = await adapter.execute_with_response_checkpoint(
+        turn_request,
+        context=result.context,
+        checkpoint=checkpoints.append,
+    )
     assert returned == turn_candidate
+    assert checkpoints == ["resp_2"]
     turn_call = fake.response_calls[1]
     assert turn_call["conversation"] == "conv_workshop"
     assert turn_call["store"] is True
     assert "previous_response_id" not in turn_call
     assert [item["type"] for item in turn_call["input"][0]["content"]] == ["input_text"]
+
+    fake.outputs.append("not-json")
+    invalid_checkpoints: list[str] = []
+    with pytest.raises(ProviderAdapterError):
+        await adapter.execute_with_response_checkpoint(
+            turn_request,
+            context=result.context,
+            checkpoint=invalid_checkpoints.append,
+        )
+    assert invalid_checkpoints == ["resp_3"]
 
 
 def test_background_bootstrap_polls_one_stored_response_past_60_second_slow_observation():

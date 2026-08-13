@@ -125,7 +125,7 @@ def _admit_brief(foundation, *, unsafe_question_index: int | None = None):
     return foundation.execute(c.AdmitInterviewBriefCommand(**values))
 
 
-def test_real_0004_database_upgrades_additively_to_0006(tmp_path):
+def test_real_0004_database_upgrades_additively_to_0007(tmp_path):
     url, original = _runtime(tmp_path)
     original_case = original.get_case(CASE_ID)
     config = Config("alembic.ini")
@@ -138,13 +138,14 @@ def test_real_0004_database_upgrades_additively_to_0006(tmp_path):
         assert "workshop_preparations" not in engine_for(url).dialect.get_table_names(connection)
     migrate(url)
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
         tables = set(engine_for(url).dialect.get_table_names(connection))
     assert {
         "workshop_preparations",
         "workshop_preparation_resources",
         "workshop_runway_items",
         "workshop_analyzer_jobs",
+        "workshop_provider_responses",
     }.issubset(tables)
     restarted = type(original)(url, now=lambda: NOW)
     restarted.register_case(
@@ -154,6 +155,77 @@ def test_real_0004_database_upgrades_additively_to_0006(tmp_path):
     )
     assert restarted.preparation_projection(CASE_ID)["phase"] == "VALIDATING_DOCUMENTS"
     assert restarted.preparation_resources(CASE_ID)["source_set_hash"] == SOURCE_SET_HASH
+
+
+def test_post_bootstrap_response_identity_is_durable_idempotent_and_clearable(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    values = {
+        "client_request_id": "specops-turn_analysis-durable",
+        "operation": "TURN_ANALYSIS",
+        "provider_response_id": "resp_turn_durable",
+    }
+    foundation.checkpoint_provider_response(CASE_ID, **values)
+    foundation.checkpoint_provider_response(CASE_ID, **values)
+    pending = foundation.pending_provider_responses(CASE_ID)
+    assert len(pending) == 1
+    assert pending[0]["provider_response_id"] == "resp_turn_durable"
+    with pytest.raises(RuntimeError, match="identity conflict"):
+        foundation.checkpoint_provider_response(
+            CASE_ID,
+            client_request_id=values["client_request_id"],
+            operation=values["operation"],
+            provider_response_id="resp_conflict",
+        )
+    foundation.clear_provider_response(CASE_ID, "resp_turn_durable")
+    assert foundation.pending_provider_responses(CASE_ID) == ()
+
+
+def test_analyzer_worker_checkpoints_stored_response_before_admission(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    context = foundation.active_analyzer_context(CASE_ID)
+
+    class CheckpointingAdapter(DeterministicAdapter):
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def execute_with_response_checkpoint(
+            self, request, *, context, checkpoint
+        ):
+            checkpoint("resp_turn_worker")
+            return await self.execute(request, context=context)
+
+    adapter = CheckpointingAdapter()
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=adapter,
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    asyncio.run(
+        orchestrator.record_final_transcript(
+            FinalTranscriptInput(
+                turn_sequence=1,
+                text="The finalized turn must retain its stored Response identity.",
+                provider_request_id="task-27-response-checkpoint",
+                speaker_actor_id=foundation.case_actor(CASE_ID, "PM"),
+                actor="PM",
+            )
+        )
+    )
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="response-checkpoint-worker")
+    assert asyncio.run(worker.run_once()) is True
+    assert foundation.analyzer_jobs(CASE_ID)[0]["state"] == "COMPLETED"
+    pending = foundation.pending_provider_responses(CASE_ID)
+    assert len(pending) == 1
+    assert pending[0]["operation"] == "TURN_ANALYSIS"
+    assert pending[0]["provider_response_id"] == "resp_turn_worker"
 
 
 def test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_three(tmp_path):
@@ -669,11 +741,18 @@ class CancellablePreparationAdapter(DeterministicAdapter):
         self._cancel_once("bootstrap")
         return self.bootstrap_result
 
-    async def release_resource_ids(self, conversation_id, file_ids, *, response_id=None):
+    async def release_resource_ids(
+        self,
+        conversation_id,
+        file_ids,
+        *,
+        response_id=None,
+        response_ids=(),
+    ):
         self.cleanup_attempts += 1
         self.cleaned_resources.update(
             identity
-            for identity in (response_id, conversation_id, *file_ids)
+            for identity in (response_id, *response_ids, conversation_id, *file_ids)
             if identity is not None
         )
         self._cancel_once("cleanup")
@@ -682,7 +761,7 @@ class CancellablePreparationAdapter(DeterministicAdapter):
                 ProviderResourceDeletion(
                     resource_kind=(
                         "RESPONSE"
-                        if identity == response_id
+                        if identity == response_id or identity in response_ids
                         else "CONVERSATION"
                         if identity == conversation_id
                         else "FILE"
@@ -695,7 +774,7 @@ class CancellablePreparationAdapter(DeterministicAdapter):
                     retryable=False,
                     duration_ms=1,
                 )
-                for identity in (response_id, conversation_id, *file_ids)
+                for identity in (response_id, *response_ids, conversation_id, *file_ids)
                 if identity is not None
             )
         )
@@ -1020,10 +1099,16 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
             return SOURCE_SET_HASH
 
         async def release_resource_ids(
-            self, conversation_id, file_ids, *, response_id=None
+            self,
+            conversation_id,
+            file_ids,
+            *,
+            response_id=None,
+            response_ids=(),
         ):
             self.calls += 1
             if self.calls == 1:
+                assert response_ids == ("resp_turn_cleanup",)
                 return ProviderCleanupReceipt(
                     deletions=(
                         ProviderResourceDeletion(
@@ -1035,6 +1120,16 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
                             "DELETE_TIMEOUT",
                             True,
                             60_000,
+                        ),
+                        ProviderResourceDeletion(
+                            "RESPONSE",
+                            response_ids[0],
+                            "delete-turn-response",
+                            None,
+                            "DELETED",
+                            None,
+                            False,
+                            2,
                         ),
                         ProviderResourceDeletion(
                             "CONVERSATION", conversation_id, "delete-conversation", None,
@@ -1053,6 +1148,7 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
             assert conversation_id is None
             assert file_ids == ()
             assert response_id == "resp_cleanup"
+            assert response_ids == ()
             return ProviderCleanupReceipt(
                 deletions=(
                     ProviderResourceDeletion(
@@ -1079,6 +1175,12 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
             technical_file_id="file_technical",
             provider_conversation_id="conversation_cleanup",
             bootstrap_response_id="resp_cleanup",
+        )
+        foundation.checkpoint_provider_response(
+            CASE_ID,
+            client_request_id="specops-turn_analysis-cleanup",
+            operation="TURN_ANALYSIS",
+            provider_response_id="resp_turn_cleanup",
         )
         foundation.set_preparation_phase(
             CASE_ID, "FAILED", failure_code="ABANDONED", cleanup_state="PENDING"
@@ -1111,6 +1213,7 @@ def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_pa
         assert remaining["pm_file_id"] is None
         assert remaining["technical_file_id"] is None
         assert remaining["bootstrap_response_id"] == "resp_cleanup"
+        assert foundation.pending_provider_responses(CASE_ID) == ()
 
         clock.advance(30)
         second = await orchestrator.cleanup_preparation()

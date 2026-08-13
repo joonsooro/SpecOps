@@ -191,7 +191,7 @@ class DurableAnalyzerWorker:
         candidate = (
             TypeAdapter(c.AnalyzerProviderCandidate).validate_json(job["candidate_json"])
             if job["candidate_json"]
-            else await self.orchestrator.adapter.execute(request, context=context)
+            else await self.orchestrator._execute_provider(request, context=context)
         )
         if not job["candidate_json"]:
             self.foundation.checkpoint_analyzer_job(

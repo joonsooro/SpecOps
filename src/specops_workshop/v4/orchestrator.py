@@ -520,6 +520,9 @@ class V4ProductionOrchestrator:
                 cleanup_available_at=None,
             )
             resources = self.foundation.preparation_resources(self.case_id)
+            provider_responses = self.foundation.pending_provider_responses(
+                self.case_id
+            )
             try:
                 receipt = await self.adapter.release_resource_ids(
                     resources["provider_conversation_id"],
@@ -532,6 +535,9 @@ class V4ProductionOrchestrator:
                         if identity is not None
                     ),
                     response_id=resources["bootstrap_response_id"],
+                    response_ids=tuple(
+                        item["provider_response_id"] for item in provider_responses
+                    ),
                 )
             except asyncio.CancelledError:
                 # IN_PROGRESS is deliberately resumable. The adapter receives
@@ -572,9 +578,19 @@ class V4ProductionOrchestrator:
                     and deletion.resource_id == resources["bootstrap_response_id"]
                 ):
                     cleared["bootstrap_response_id"] = None
+                if deletion.resource_kind == "RESPONSE" and any(
+                    deletion.resource_id == item["provider_response_id"]
+                    for item in provider_responses
+                ):
+                    self.foundation.clear_provider_response(
+                        self.case_id, deletion.resource_id
+                    )
             if cleared:
                 self.foundation.checkpoint_preparation_resource(self.case_id, **cleared)
             remaining = self.foundation.preparation_resources(self.case_id)
+            remaining_provider_responses = self.foundation.pending_provider_responses(
+                self.case_id
+            )
             remaining_ids = tuple(
                 remaining[name]
                 for name in (
@@ -584,6 +600,9 @@ class V4ProductionOrchestrator:
                     "bootstrap_response_id",
                 )
                 if remaining[name] is not None
+            ) + tuple(
+                item["provider_response_id"]
+                for item in remaining_provider_responses
             )
             if not remaining_ids:
                 self.foundation.set_provider_resource_lifecycle(
@@ -819,7 +838,7 @@ class V4ProductionOrchestrator:
             raise ValueError("operation is not bound to the active context")
         if request.request_hash != analyzer_request_hash(request.model_dump(mode="json")):
             raise ValueError("operation request hash is invalid")
-        candidate = await self.adapter.execute(request, context=context)
+        candidate = await self._execute_provider(request, context=context)
         common = dict(
             provider_request_hash=request.request_hash,
             candidate=candidate,
@@ -858,6 +877,32 @@ class V4ProductionOrchestrator:
         values.update(command_type=command_type, **common)
         receipt = self.foundation.execute(model(**values))
         return ProviderOperationAdmission(candidate=candidate, receipt=receipt)
+
+    async def _execute_provider(
+        self,
+        request: c.AnalyzerProviderRequest,
+        *,
+        context: c.AnalyzerContextBinding,
+    ) -> c.AnalyzerProviderCandidate:
+        checkpointed_execute = getattr(
+            self.adapter, "execute_with_response_checkpoint", None
+        )
+        if checkpointed_execute is None:
+            return await self.adapter.execute(request, context=context)
+
+        def checkpoint(response_id: str) -> None:
+            self.foundation.checkpoint_provider_response(
+                self.case_id,
+                client_request_id=request.client_request_id,
+                operation=c.AnalyzerOperation(request.request_type).value,
+                provider_response_id=response_id,
+            )
+
+        return await checkpointed_execute(
+            request,
+            context=context,
+            checkpoint=checkpoint,
+        )
 
     async def replenish_guidance(
         self, runway_state: c.RunwayStateSnapshot, *, operation_key: str

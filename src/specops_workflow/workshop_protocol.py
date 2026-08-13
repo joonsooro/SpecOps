@@ -437,6 +437,73 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 ).mappings().one()
             )
 
+    def checkpoint_provider_response(
+        self,
+        case_id: UUID,
+        *,
+        client_request_id: str,
+        operation: str,
+        provider_response_id: str,
+    ) -> None:
+        """Durably retain one stored post-bootstrap Response until cleanup."""
+
+        table = V0_RUNTIME_TABLES["workshop_provider_responses"]
+        now = _instant(self.now())
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(table).where(
+                    table.c.case_id == str(case_id),
+                    table.c.client_request_id == client_request_id,
+                )
+            ).mappings().one_or_none()
+            if existing is not None:
+                if (
+                    existing["operation"] != operation
+                    or existing["provider_response_id"] != provider_response_id
+                ):
+                    raise RuntimeError("provider Response identity conflict")
+                return
+            connection.execute(
+                insert(table).values(
+                    case_id=str(case_id),
+                    client_request_id=client_request_id,
+                    operation=operation,
+                    provider_response_id=provider_response_id,
+                    recorded_at=now,
+                    cleared_at=None,
+                )
+            )
+
+    def pending_provider_responses(self, case_id: UUID) -> tuple[dict[str, Any], ...]:
+        table = V0_RUNTIME_TABLES["workshop_provider_responses"]
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.provider_response_id.is_not(None),
+                )
+                .order_by(table.c.recorded_at, table.c.client_request_id)
+            ).mappings().all()
+        return tuple(dict(row) for row in rows)
+
+    def clear_provider_response(self, case_id: UUID, provider_response_id: str) -> None:
+        table = V0_RUNTIME_TABLES["workshop_provider_responses"]
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.provider_response_id == provider_response_id,
+                )
+                .values(
+                    provider_response_id=None,
+                    cleared_at=_instant(self.now()),
+                )
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("tracked provider Response was not found")
+
     def checkpoint_preparation_resource(self, case_id: UUID, **values: Any) -> None:
         allowed = {
             "pm_file_id",

@@ -64,6 +64,9 @@ NATIVE_SCHEMA_SPECS: tuple[NativeSchemaSpec, ...] = (
 
 
 _PRESENTATION_KEYS = frozenset({"title", "description", "examples", "default", "$schema"})
+_QUESTION_DEFINITION_NAMES = frozenset(
+    {"QuestionCandidate", "TurnQuestionCandidate", "TurnQuestionRevisionCandidate"}
+)
 _UNSUPPORTED_KEYS = frozenset(
     {
         "allOf",
@@ -91,6 +94,15 @@ def _compile_node(value: Any) -> Any:
 
     compiled: dict[str, Any] = {}
     for key, item in value.items():
+        if key == "properties" and isinstance(item, dict):
+            # Keys inside a properties map are domain field names.  A field may
+            # legitimately be named "title" or "description" even though those
+            # same keys are presentation metadata on a schema node.
+            compiled[key] = {
+                property_name: _compile_node(property_schema)
+                for property_name, property_schema in item.items()
+            }
+            continue
         if key in _PRESENTATION_KEYS or key == "discriminator":
             continue
         translated = "anyOf" if key == "oneOf" else key
@@ -101,6 +113,75 @@ def _compile_node(value: Any) -> Any:
         compiled["required"] = list(properties)
         compiled["additionalProperties"] = False
     return compiled
+
+
+def _question_branch(
+    properties: dict[str, Any],
+    *,
+    question_shape: dict[str, Any],
+    answer_minimum: int | None = None,
+    answer_maximum: int | None = None,
+    capture_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    branch_properties = deepcopy(properties)
+    branch_properties["question_shape"] = question_shape
+    if capture_policy is not None:
+        branch_properties["capture_policy"] = capture_policy
+    answer_options = branch_properties["answer_options"]
+    if answer_minimum is not None:
+        answer_options["minItems"] = answer_minimum
+    if answer_maximum is not None:
+        answer_options["maxItems"] = answer_maximum
+    return {
+        "type": "object",
+        "properties": branch_properties,
+        "required": list(branch_properties),
+        "additionalProperties": False,
+    }
+
+
+def _encode_question_invariants(schema: dict[str, Any]) -> None:
+    """Make provider structure enforce the local question-shape validator."""
+
+    definitions = schema.get("$defs", {})
+    for name in _QUESTION_DEFINITION_NAMES:
+        definition = definitions.get(name)
+        if not isinstance(definition, dict):
+            continue
+        properties = definition.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        definitions[name] = {
+            "anyOf": [
+                _question_branch(
+                    properties,
+                    question_shape={"const": "CLOSED_ENUM", "type": "string"},
+                    answer_minimum=2,
+                ),
+                _question_branch(
+                    properties,
+                    question_shape={"const": "OPEN_TEXT", "type": "string"},
+                    answer_maximum=0,
+                    capture_policy={
+                        "enum": ["CLARIFICATION_ONLY", "BINDING_DECISION"],
+                        "type": "string",
+                    },
+                ),
+                _question_branch(
+                    properties,
+                    question_shape={
+                        "enum": [
+                            "CLOSED_BOOLEAN",
+                            "CLOSED_INTEGER",
+                            "CLOSED_DECIMAL",
+                            "CLOSED_TEXT",
+                        ],
+                        "type": "string",
+                    },
+                    answer_maximum=0,
+                ),
+            ]
+        }
 
 
 def _walk(value: Any):
@@ -185,6 +266,7 @@ def validate_openai_strict_schema(schema: dict[str, Any]) -> None:
 def compile_openai_strict_schema(model: type[ModelT]) -> dict[str, Any]:
     local_schema = model.model_json_schema(mode="validation")
     compiled = _compile_node(deepcopy(local_schema))
+    _encode_question_invariants(compiled)
     validate_openai_strict_schema(compiled)
     return compiled
 

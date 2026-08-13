@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 import httpx
+from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI
 
 from specops_workshop.v4 import contracts as c
@@ -274,6 +276,63 @@ def test_all_six_native_schemas_are_openai_strict_root_objects():
         assert '"oneOf"' not in encoded
         assert '"discriminator"' not in encoded
         assert '"allOf"' not in encoded
+
+
+def test_native_schema_compiler_preserves_domain_property_names_at_every_object():
+    for spec in NATIVE_SCHEMA_SPECS:
+        local = spec.candidate_type.model_json_schema(mode="validation")
+        compiled = compile_openai_strict_schema(spec.candidate_type)
+        assert set(compiled["properties"]) == set(local["properties"])
+        for name, local_definition in local.get("$defs", {}).items():
+            local_properties = local_definition.get("properties")
+            if not isinstance(local_properties, dict):
+                continue
+            compiled_definition = compiled["$defs"][name]
+            property_maps = (
+                [compiled_definition["properties"]]
+                if "properties" in compiled_definition
+                else [branch["properties"] for branch in compiled_definition["anyOf"]]
+            )
+            assert property_maps
+            assert all(set(properties) == set(local_properties) for properties in property_maps)
+
+    bootstrap = compile_openai_strict_schema(c.InterviewBriefCandidate)
+    cluster = bootstrap["$defs"]["ProblemClusterCandidate"]
+    assert "title" in cluster["properties"]
+    assert "title" in cluster["required"]
+
+
+def test_bootstrap_provider_schema_enforces_local_question_shape_invariants():
+    adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
+    sources = (
+        _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+        _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical.md", b"Technical"),
+    )
+    prepared = adapter.prepared_from_ids(
+        sources, ("file_pm", "file_technical"), "conv_schema_parity"
+    )
+    payload = _brief(_bootstrap_request(prepared)).model_dump(mode="json")
+    schema = compile_openai_strict_schema(c.InterviewBriefCandidate)
+    validator = Draft202012Validator(schema)
+    validator.validate(payload)
+
+    invalid_options = deepcopy(payload)
+    invalid_options["questions"][0]["question_shape"] = "CLOSED_TEXT"
+    invalid_options["questions"][0]["answer_options"] = ["one", "two"]
+    assert list(validator.iter_errors(invalid_options))
+
+    invalid_open_fact = deepcopy(payload)
+    invalid_open_fact["questions"][0]["capture_policy"] = "LOW_RISK_FACT"
+    assert list(validator.iter_errors(invalid_open_fact))
+
+    valid_enum = deepcopy(payload)
+    valid_enum["questions"][0]["question_shape"] = "CLOSED_ENUM"
+    valid_enum["questions"][0]["answer_options"] = ["one", "two"]
+    validator.validate(valid_enum)
+
+    valid_boolean = deepcopy(payload)
+    valid_boolean["questions"][0]["question_shape"] = "CLOSED_BOOLEAN"
+    validator.validate(valid_boolean)
 
 
 def test_stored_conversation_bootstrap_uploads_exactly_two_files_and_reuses_conversation():

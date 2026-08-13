@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LiveAudioClient } from "./audio/liveClient";
+import { WorkshopPresenceClient } from "./presenceClient";
 import { INITIAL_RUNWAY_DEPTH, workshopStartEnabled } from "./uiModel";
 import type { components as WorkshopProtocolComponents } from "./generated/workshopProtocol";
 
@@ -150,6 +151,8 @@ export function App() {
   };
 
   useEffect(() => {
+    const presence = new WorkshopPresenceClient();
+    presence.start();
     const startedAt = performance.now();
     Promise.all([
       fetch("/api/bootstrap").then((response) => {
@@ -174,7 +177,10 @@ export function App() {
         reportBrowserSpan(startedAt, "ERROR");
         setFailure("Workshop setup failed. Check the local server configuration and source fixtures.");
       });
-    return () => live.current?.end();
+    return () => {
+      presence.stop();
+      live.current?.end();
+    };
   }, []);
 
   useEffect(() => {

@@ -428,9 +428,56 @@ def test_release_context_deletes_conversation_and_both_uploaded_files():
         request = _bootstrap_request(prepared)
         fake.outputs.append(_brief(request).model_dump_json())
         context = (await adapter.bootstrap(request, prepared=prepared, session_id=SESSION_ID)).context
-        await adapter.release_context(context)
+        receipt = await adapter.release_context(context)
+        assert receipt.completed is True
+        assert {item.outcome for item in receipt.deletions} == {"DELETED"}
         assert [value[0] for value in fake.deleted_conversations] == ["conv_workshop"]
         assert [value[0] for value in fake.deleted_files] == ["file_1", "file_2"]
+
+    asyncio.run(scenario())
+
+
+def test_release_keeps_uncertain_resource_identity_and_accepts_explicit_absence():
+    class DeleteFailure(RuntimeError):
+        def __init__(self, status_code: int | None = None):
+            super().__init__("raw provider cleanup body must not enter the receipt")
+            self.status_code = status_code
+            self.request_id = "req_delete_safe"
+
+    class Conversations:
+        async def delete(self, conversation_id, **kwargs):
+            raise DeleteFailure(404)
+
+    class Files:
+        async def delete(self, file_id, **kwargs):
+            if file_id == "file_timeout":
+                raise TimeoutError("raw source content")
+            return SimpleNamespace(id=file_id, deleted=False, _request_id="req_false")
+
+    async def scenario():
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(conversations=Conversations(), files=Files()),
+            now=lambda: NOW,
+        )
+        receipt = await adapter.release_resource_ids(
+            "conv_absent", ("file_timeout", "file_unconfirmed")
+        )
+        assert receipt.completed is False
+        assert receipt.retryable is True
+        assert [item.outcome for item in receipt.deletions] == [
+            "ALREADY_ABSENT",
+            "UNCONFIRMED",
+            "UNCONFIRMED",
+        ]
+        assert receipt.deletions[1].safe_error_code == "DELETE_TIMEOUT"
+        assert receipt.deletions[2].safe_error_code == "DELETE_NOT_CONFIRMED"
+        assert receipt.deletions[1].client_request_id == (
+            "specops-file-delete-file_timeout"
+        )
+        encoded = json.dumps([item.__dict__ for item in adapter.cleanup_events])
+        assert "raw provider cleanup body" not in encoded
+        assert "raw source content" not in encoded
 
     asyncio.run(scenario())
 

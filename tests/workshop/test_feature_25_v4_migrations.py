@@ -35,8 +35,33 @@ def test_0002_database_upgrades_to_0003_with_exact_v4_tables(tmp_path):
         column["name"] for column in inspector.get_columns("workshop_artifact_confirmations")
     }
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
     assert set(ARTIFACT_QUALITY_TABLE_NAMES).issubset(inspector.get_table_names())
+
+
+def test_0005_database_adds_provider_resource_lifecycle_without_rebuild(tmp_path):
+    url = f"sqlite:///{tmp_path / 'provider-lifecycle.sqlite'}"
+    migrate(url)
+    command.downgrade(_alembic(url), "0005")
+    before = {
+        item["name"] for item in inspect(engine_for(url)).get_columns("workshop_preparations")
+    }
+    assert "restart_grace_until" not in before
+
+    migrate(url)
+    after = {
+        item["name"] for item in inspect(engine_for(url)).get_columns("workshop_preparations")
+    }
+    assert {
+        "cleanup_reason",
+        "last_client_disconnected_at",
+        "restart_grace_until",
+        "workshop_complete_at",
+        "cleanup_available_at",
+        "cleanup_last_error_code",
+    }.issubset(after)
+    with engine_for(url).connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
 
 
 def test_semantic_adapters_never_guess_confirmation_or_identity_bindings():

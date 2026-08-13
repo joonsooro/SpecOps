@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 from uuid import UUID, uuid5
 
@@ -20,7 +20,11 @@ from specops_contracts import workshop_v1 as c
 from specops_contracts.canonical import analyzer_request_hash, canonical_bytes, domain_hash, transcript_hash
 from specops_workflow.workshop_protocol import WorkshopFoundationService
 
-from .openai_adapter import ProviderSourceUpload, StoredConversationOpenAIAdapter
+from .openai_adapter import (
+    ProviderCleanupReceipt,
+    ProviderSourceUpload,
+    StoredConversationOpenAIAdapter,
+)
 from .artifact_quality import build_audit_bundle
 from .artifact_quality_adapter import (
     ArtifactQualityEvaluator,
@@ -30,6 +34,8 @@ from .artifact_quality_adapter import (
 
 PRODUCTION_NAMESPACE = UUID("e52d201a-e1d0-4df7-90e5-39ac4091998d")
 ZERO_HASH = "sha256:" + "0" * 64
+RESTART_GRACE_SECONDS = 15 * 60
+CLEANUP_RETRY_SECONDS = 30
 
 
 def _stable_id(*parts: object) -> UUID:
@@ -38,6 +44,12 @@ def _stable_id(*parts: object) -> UUID:
 
 def _hash_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _parse_instant(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 def _request(model, values: dict[str, Any]):
@@ -283,7 +295,7 @@ class V4ProductionOrchestrator:
                                 self.case_id,
                                 "FAILED",
                                 failure_code="BOOTSTRAP_RESPONSE_ID_UNCERTAIN",
-                                cleanup_state="PENDING",
+                                cleanup_state="RETAIN_UNCERTAIN",
                             )
                             raise
                         self.foundation.checkpoint_preparation_resource(
@@ -346,26 +358,153 @@ class V4ProductionOrchestrator:
                 self.foundation.set_preparation_phase(self.case_id, "READY")
             return self.foundation.preparation_projection(self.case_id)
 
-    async def cleanup_preparation(self) -> dict[str, Any]:
-        """Resume best-effort cleanup without weakening admitted Foundation data."""
+    async def note_client_connected(self) -> str:
+        """Cancel an unexpired last-client grace period or request safe rebuild."""
 
         async with self._context_lock:
             projection = self.foundation.preparation_projection(self.case_id)
-            if projection["cleanup_state"] not in {"PENDING", "IN_PROGRESS"}:
+            state = projection["cleanup_state"]
+            if projection["workshop_complete_at"] is not None:
+                return "WORKSHOP_COMPLETE"
+            if state == "RESTART_GRACE":
+                deadline = _parse_instant(projection["restart_grace_until"])
+                if deadline is not None and self.now() < deadline:
+                    self.foundation.set_provider_resource_lifecycle(
+                        self.case_id,
+                        cleanup_state="NOT_REQUIRED",
+                        cleanup_reason=None,
+                        last_client_disconnected_at=None,
+                        restart_grace_until=None,
+                        cleanup_available_at=None,
+                        cleanup_last_error_code=None,
+                    )
+                    return "RESUMED_WITHIN_GRACE"
+                return "REBUILD_AFTER_CLEANUP"
+            if (
+                state == "COMPLETED"
+                and projection["cleanup_reason"] == "RESTART_GRACE_EXPIRED"
+            ):
+                self.foundation.reset_preparation_after_provider_cleanup(self.case_id)
+                return "REBUILD_REQUIRED"
+            if state in {"PENDING", "IN_PROGRESS", "RETRY_WAIT"}:
+                return "REBUILD_AFTER_CLEANUP"
+            if state == "RETAIN_UNCERTAIN":
+                return "PROVIDER_OUTCOME_UNCERTAIN"
+            return "ACTIVE"
+
+    async def note_last_client_disconnected(
+        self, *, disconnected_at: datetime | None = None
+    ) -> str:
+        """Start the 15-minute provider-retention grace at the observed disconnect."""
+
+        observed_at = disconnected_at or self.now()
+        async with self._context_lock:
+            projection = self.foundation.preparation_projection(self.case_id)
+            state = projection["cleanup_state"]
+            if projection["workshop_complete_at"] is not None:
+                return "WORKSHOP_COMPLETE"
+            if state in {
+                "RETAIN_UNCERTAIN",
+                "PENDING",
+                "IN_PROGRESS",
+                "RETRY_WAIT",
+                "COMPLETED",
+            }:
+                return state
+            self.foundation.set_provider_resource_lifecycle(
+                self.case_id,
+                cleanup_state="RESTART_GRACE",
+                cleanup_reason=None,
+                last_client_disconnected_at=observed_at.astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                restart_grace_until=(
+                    observed_at + timedelta(seconds=RESTART_GRACE_SECONDS)
+                )
+                .astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                cleanup_available_at=None,
+                cleanup_last_error_code=None,
+            )
+            return "RESTART_GRACE"
+
+    async def expire_restart_grace(self) -> bool:
+        """Make stale tracked resources cleanup-eligible after jobs become terminal."""
+
+        async with self._context_lock:
+            projection = self.foundation.preparation_projection(self.case_id)
+            if projection["cleanup_state"] != "RESTART_GRACE":
+                return False
+            deadline = _parse_instant(projection["restart_grace_until"])
+            if deadline is None or self.now() < deadline:
+                return False
+            if any(
+                job["state"] not in {"COMPLETED", "FAILED"}
+                for job in self.foundation.analyzer_jobs(self.case_id)
+            ):
+                return False
+            context = self.foundation.active_analyzer_context(self.case_id)
+            if context is not None:
+                values = self._command_base(
+                    "INVALIDATE_ANALYZER_CONTEXT",
+                    f"restart-grace-{context.context_id}",
+                    expected_revision=self.foundation.case_revision(self.case_id),
+                )
+                values.update(
+                    command_type="INVALIDATE_ANALYZER_CONTEXT",
+                    context_id=context.context_id,
+                    reason_code="WORKSHOP_CLOSED",
+                )
+                self.foundation.execute(c.InvalidateAnalyzerContextCommand(**values))
+            self.foundation.set_preparation_phase(
+                self.case_id,
+                "FAILED",
+                failure_code="RESTART_GRACE_EXPIRED",
+                cleanup_state="PENDING",
+            )
+            self.foundation.set_provider_resource_lifecycle(
+                self.case_id,
+                cleanup_state="PENDING",
+                cleanup_reason="RESTART_GRACE_EXPIRED",
+                cleanup_available_at=self.now()
+                .astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                cleanup_last_error_code=None,
+            )
+            return True
+
+    async def cleanup_preparation(self) -> dict[str, Any]:
+        """Release only tracked resources whose provider outcome is confirmed."""
+
+        async with self._context_lock:
+            projection = self.foundation.preparation_projection(self.case_id)
+            if projection["cleanup_state"] not in {
+                "PENDING",
+                "IN_PROGRESS",
+                "RETRY_WAIT",
+            }:
+                return projection
+            available_at = _parse_instant(projection["cleanup_available_at"])
+            if (
+                projection["cleanup_state"] == "RETRY_WAIT"
+                and available_at is not None
+                and self.now() < available_at
+            ):
                 return projection
             if self.foundation.active_analyzer_context(self.case_id) is not None:
                 raise RuntimeError("active Analyzer context cannot be preparation-cleaned")
             if not hasattr(self.adapter, "release_resource_ids"):
                 raise RuntimeError("provider adapter cannot resume preparation cleanup")
-            self.foundation.set_preparation_phase(
+            self.foundation.set_provider_resource_lifecycle(
                 self.case_id,
-                projection["phase"],
-                failure_code=projection["failure_code"],
                 cleanup_state="IN_PROGRESS",
+                cleanup_available_at=None,
             )
             resources = self.foundation.preparation_resources(self.case_id)
             try:
-                await self.adapter.release_resource_ids(
+                receipt = await self.adapter.release_resource_ids(
                     resources["provider_conversation_id"],
                     tuple(
                         identity
@@ -381,25 +520,81 @@ class V4ProductionOrchestrator:
                 # the same resource identities on the next worker lease.
                 raise
             except Exception:
-                self.foundation.set_preparation_phase(
+                self.foundation.set_provider_resource_lifecycle(
                     self.case_id,
-                    projection["phase"],
-                    failure_code=projection["failure_code"],
-                    cleanup_state="PENDING",
+                    cleanup_state="RETAIN_UNCERTAIN",
+                    cleanup_available_at=None,
+                    cleanup_last_error_code="DELETE_ADAPTER_EXCEPTION",
                 )
-                raise
-            self.foundation.checkpoint_preparation_resource(
-                self.case_id,
-                pm_file_id=None,
-                technical_file_id=None,
-                provider_conversation_id=None,
+                return self.foundation.preparation_projection(self.case_id)
+            if not isinstance(receipt, ProviderCleanupReceipt):
+                self.foundation.set_provider_resource_lifecycle(
+                    self.case_id,
+                    cleanup_state="RETAIN_UNCERTAIN",
+                    cleanup_available_at=None,
+                    cleanup_last_error_code="DELETE_RECEIPT_MISSING",
+                )
+                return self.foundation.preparation_projection(self.case_id)
+            cleared: dict[str, None] = {}
+            for deletion in receipt.deletions:
+                if not deletion.confirmed_absent:
+                    continue
+                if (
+                    deletion.resource_kind == "CONVERSATION"
+                    and deletion.resource_id == resources["provider_conversation_id"]
+                ):
+                    cleared["provider_conversation_id"] = None
+                if deletion.resource_kind == "FILE":
+                    if deletion.resource_id == resources["pm_file_id"]:
+                        cleared["pm_file_id"] = None
+                    if deletion.resource_id == resources["technical_file_id"]:
+                        cleared["technical_file_id"] = None
+            if cleared:
+                self.foundation.checkpoint_preparation_resource(self.case_id, **cleared)
+            remaining = self.foundation.preparation_resources(self.case_id)
+            remaining_ids = tuple(
+                remaining[name]
+                for name in (
+                    "pm_file_id",
+                    "technical_file_id",
+                    "provider_conversation_id",
+                )
+                if remaining[name] is not None
             )
-            self.foundation.set_preparation_phase(
-                self.case_id,
-                projection["phase"],
-                failure_code=projection["failure_code"],
-                cleanup_state="COMPLETED",
-            )
+            if not remaining_ids:
+                self.foundation.set_provider_resource_lifecycle(
+                    self.case_id,
+                    cleanup_state="COMPLETED",
+                    cleanup_available_at=None,
+                    cleanup_last_error_code=None,
+                )
+            else:
+                failed = tuple(
+                    item for item in receipt.deletions if not item.confirmed_absent
+                )
+                safe_code = next(
+                    (item.safe_error_code for item in failed if item.safe_error_code),
+                    "DELETE_RECEIPT_INCOMPLETE",
+                )
+                if any(item.retryable for item in failed):
+                    self.foundation.set_provider_resource_lifecycle(
+                        self.case_id,
+                        cleanup_state="RETRY_WAIT",
+                        cleanup_available_at=(
+                            self.now() + timedelta(seconds=CLEANUP_RETRY_SECONDS)
+                        )
+                        .astimezone(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        cleanup_last_error_code=safe_code,
+                    )
+                else:
+                    self.foundation.set_provider_resource_lifecycle(
+                        self.case_id,
+                        cleanup_state="RETAIN_UNCERTAIN",
+                        cleanup_available_at=None,
+                        cleanup_last_error_code=safe_code,
+                    )
             return self.foundation.preparation_projection(self.case_id)
 
     async def record_final_transcript(

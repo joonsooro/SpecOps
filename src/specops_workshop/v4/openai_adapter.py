@@ -16,7 +16,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 from uuid import UUID
 
 from openai import AsyncOpenAI
@@ -73,6 +73,39 @@ class ProviderLifecycleEvent:
     output_tokens: int | None
     reasoning_output_tokens: int | None
     total_tokens: int | None
+
+
+@dataclass(frozen=True)
+class ProviderResourceDeletion:
+    """Content-free terminal observation for one provider resource DELETE."""
+
+    resource_kind: Literal["CONVERSATION", "FILE"]
+    resource_id: str
+    client_request_id: str
+    provider_request_id: str | None
+    outcome: Literal["DELETED", "ALREADY_ABSENT", "UNCONFIRMED", "CANCELLED"]
+    safe_error_code: str | None
+    retryable: bool
+    duration_ms: int
+
+    @property
+    def confirmed_absent(self) -> bool:
+        return self.outcome in {"DELETED", "ALREADY_ABSENT"}
+
+
+@dataclass(frozen=True)
+class ProviderCleanupReceipt:
+    """Truthful aggregate; incomplete cleanup never masquerades as success."""
+
+    deletions: tuple[ProviderResourceDeletion, ...]
+
+    @property
+    def completed(self) -> bool:
+        return all(item.confirmed_absent for item in self.deletions)
+
+    @property
+    def retryable(self) -> bool:
+        return any(not item.confirmed_absent and item.retryable for item in self.deletions)
 
 
 class ProviderAdapterError(RuntimeError):
@@ -214,6 +247,7 @@ class StoredConversationOpenAIAdapter:
         self._logger = logger or logging.getLogger("specops.workshop.provider")
         self._failures: deque[contracts.ProviderFailureReceipt] = deque(maxlen=32)
         self._lifecycle_events: deque[ProviderLifecycleEvent] = deque(maxlen=128)
+        self._cleanup_events: deque[ProviderResourceDeletion] = deque(maxlen=128)
         self._background_responses: dict[str, Any] = {}
         self._background_started_at: dict[str, float] = {}
 
@@ -224,6 +258,16 @@ class StoredConversationOpenAIAdapter:
     @property
     def lifecycle_events(self) -> tuple[ProviderLifecycleEvent, ...]:
         return tuple(self._lifecycle_events)
+
+    @property
+    def cleanup_events(self) -> tuple[ProviderResourceDeletion, ...]:
+        return tuple(self._cleanup_events)
+
+    def _record_cleanup_event(self, value: ProviderResourceDeletion) -> None:
+        self._cleanup_events.append(value)
+        self._logger.info(
+            json.dumps(value.__dict__, sort_keys=True, separators=(",", ":"))
+        )
 
     async def prepare_context(
         self,
@@ -322,8 +366,8 @@ class StoredConversationOpenAIAdapter:
 
     async def release_resource_ids(
         self, conversation_id: str | None, file_ids: tuple[str, ...]
-    ) -> None:
-        await self._release_prepared_ids(conversation_id, file_ids)
+    ) -> ProviderCleanupReceipt:
+        return await self._release_prepared_ids(conversation_id, file_ids)
 
     async def bootstrap(
         self,
@@ -556,7 +600,9 @@ class StoredConversationOpenAIAdapter:
             return False
         return getattr(value, "id", None) == context.provider_conversation_id
 
-    async def release_context(self, context: contracts.AnalyzerContextBinding) -> None:
+    async def release_context(
+        self, context: contracts.AnalyzerContextBinding
+    ) -> ProviderCleanupReceipt:
         """Best-effort provider cleanup after Foundation has invalidated a binding.
 
         Foundation invalidation is authoritative and happens first. Cleanup is
@@ -564,47 +610,142 @@ class StoredConversationOpenAIAdapter:
         retained when a remote object has already disappeared.
         """
 
-        await self._release_prepared_ids(
+        return await self._release_prepared_ids(
             context.provider_conversation_id,
             tuple(item.provider_file_id for item in context.source_set.ordered_sources),
         )
 
-    async def release_prepared(self, prepared: PreparedProviderContext) -> None:
-        await self._release_prepared_ids(
+    async def release_prepared(
+        self, prepared: PreparedProviderContext
+    ) -> ProviderCleanupReceipt:
+        return await self._release_prepared_ids(
             prepared.provider_conversation_id,
             tuple(item.provider_file_id for item in prepared.source_set.ordered_sources),
         )
 
     async def _release_prepared_ids(
         self, conversation_id: str | None, file_ids: tuple[str, ...]
-    ) -> None:
-        async def bounded(resource: Any, identifier: str, request_id: str) -> None:
+    ) -> ProviderCleanupReceipt:
+        async def bounded(
+            resource: Any,
+            identifier: str,
+            request_id: str,
+            resource_kind: Literal["CONVERSATION", "FILE"],
+        ) -> ProviderResourceDeletion:
+            started_at = self._monotonic()
             delete = getattr(resource, "delete", None)
             if delete is None:
-                return
+                result = ProviderResourceDeletion(
+                    resource_kind=resource_kind,
+                    resource_id=identifier,
+                    client_request_id=request_id,
+                    provider_request_id=None,
+                    outcome="UNCONFIRMED",
+                    safe_error_code="DELETE_UNSUPPORTED",
+                    retryable=False,
+                    duration_ms=max(0, int((self._monotonic() - started_at) * 1000)),
+                )
+                self._record_cleanup_event(result)
+                return result
             try:
-                await asyncio.wait_for(
+                response = await asyncio.wait_for(
                     delete(
                         identifier,
                         extra_headers={"X-Client-Request-Id": request_id},
                     ),
                     timeout=PROVIDER_IO_TIMEOUT_SECONDS,
                 )
-            except Exception:
-                return
+            except asyncio.CancelledError:
+                result = ProviderResourceDeletion(
+                    resource_kind=resource_kind,
+                    resource_id=identifier,
+                    client_request_id=request_id,
+                    provider_request_id=None,
+                    outcome="CANCELLED",
+                    safe_error_code="CANCELLED",
+                    retryable=True,
+                    duration_ms=max(0, int((self._monotonic() - started_at) * 1000)),
+                )
+                self._record_cleanup_event(result)
+                raise
+            except Exception as exc:
+                status = getattr(exc, "status_code", None)
+                provider_request_id = _safe_provider_identifier(
+                    getattr(exc, "request_id", None)
+                )
+                if status == 404:
+                    outcome = "ALREADY_ABSENT"
+                    safe_error_code = None
+                    retryable = False
+                elif isinstance(exc, (TimeoutError, ConnectionError)):
+                    outcome = "UNCONFIRMED"
+                    safe_error_code = (
+                        "DELETE_TIMEOUT" if isinstance(exc, TimeoutError) else "DELETE_CONNECTION"
+                    )
+                    retryable = True
+                elif isinstance(status, int) and (status == 429 or status >= 500):
+                    outcome = "UNCONFIRMED"
+                    safe_error_code = f"DELETE_HTTP_{status}"
+                    retryable = True
+                elif isinstance(status, int) and 400 <= status <= 499:
+                    outcome = "UNCONFIRMED"
+                    safe_error_code = f"DELETE_HTTP_{status}"
+                    retryable = False
+                else:
+                    outcome = "UNCONFIRMED"
+                    safe_error_code = "DELETE_UNKNOWN_SAFE"
+                    retryable = False
+                result = ProviderResourceDeletion(
+                    resource_kind=resource_kind,
+                    resource_id=identifier,
+                    client_request_id=request_id,
+                    provider_request_id=provider_request_id,
+                    outcome=outcome,
+                    safe_error_code=safe_error_code,
+                    retryable=retryable,
+                    duration_ms=max(0, int((self._monotonic() - started_at) * 1000)),
+                )
+                self._record_cleanup_event(result)
+                return result
+            deleted = getattr(response, "deleted", None) is True
+            returned_id = _safe_provider_identifier(getattr(response, "id", None))
+            result = ProviderResourceDeletion(
+                resource_kind=resource_kind,
+                resource_id=identifier,
+                client_request_id=request_id,
+                provider_request_id=_safe_provider_identifier(
+                    getattr(response, "_request_id", None)
+                ),
+                outcome=("DELETED" if deleted and returned_id == identifier else "UNCONFIRMED"),
+                safe_error_code=(
+                    None if deleted and returned_id == identifier else "DELETE_NOT_CONFIRMED"
+                ),
+                retryable=False,
+                duration_ms=max(0, int((self._monotonic() - started_at) * 1000)),
+            )
+            self._record_cleanup_event(result)
+            return result
 
+        results: list[ProviderResourceDeletion] = []
         if conversation_id is not None:
-            await bounded(
-                self._client.conversations,
-                conversation_id,
-                f"specops-conversation-delete-{conversation_id}",
+            results.append(
+                await bounded(
+                    self._client.conversations,
+                    conversation_id,
+                    f"specops-conversation-delete-{conversation_id}",
+                    "CONVERSATION",
+                )
             )
         for file_id in file_ids:
-            await bounded(
-                self._client.files,
-                file_id,
-                f"specops-file-delete-{file_id}",
+            results.append(
+                await bounded(
+                    self._client.files,
+                    file_id,
+                    f"specops-file-delete-{file_id}",
+                    "FILE",
+                )
             )
+        return ProviderCleanupReceipt(deletions=tuple(results))
 
     async def _execute(self, request: contracts.AnalyzerProviderRequest, *, bootstrap: bool):
         operation = contracts.AnalyzerOperation(request.request_type)

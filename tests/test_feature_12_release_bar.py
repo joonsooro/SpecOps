@@ -2956,7 +2956,7 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
         assert actual_checks == expected_checks
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
         triggers = {
             row[0]
             for row in connection.execute(

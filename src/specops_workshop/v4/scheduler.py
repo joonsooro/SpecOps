@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from datetime import datetime
+from typing import Any, Callable
 
 from pydantic import TypeAdapter
 from specops_contracts import workshop_v1 as c
@@ -21,20 +22,40 @@ class DurableAnalyzerWorker:
         *,
         worker_id: str = "v0-analyzer-worker",
         poll_seconds: float = 0.1,
+        has_active_clients: Callable[[], bool] = lambda: False,
     ) -> None:
         self.orchestrator = orchestrator
         self.foundation = orchestrator.foundation
         self.worker_id = worker_id
         self.poll_seconds = poll_seconds
+        self.has_active_clients = has_active_clients
         self._stopping = asyncio.Event()
 
     async def run_once(self) -> bool:
         projection = self.foundation.preparation_projection(self.orchestrator.case_id)
-        if projection["phase"] == "FAILED" and projection["cleanup_state"] in {
+        if projection["cleanup_state"] == "RESTART_GRACE":
+            await self.orchestrator.expire_restart_grace()
+            projection = self.foundation.preparation_projection(self.orchestrator.case_id)
+        if projection["cleanup_state"] == "RETRY_WAIT":
+            available_at = projection["cleanup_available_at"]
+            if available_at is not None and self.foundation.now() < datetime.fromisoformat(
+                available_at.replace("Z", "+00:00")
+            ):
+                return False
+        if projection["cleanup_state"] in {
             "PENDING",
             "IN_PROGRESS",
+            "RETRY_WAIT",
         }:
-            await self.orchestrator.cleanup_preparation()
+            completed = await self.orchestrator.cleanup_preparation()
+            if (
+                completed["cleanup_state"] == "COMPLETED"
+                and completed["cleanup_reason"] == "RESTART_GRACE_EXPIRED"
+                and self.has_active_clients()
+            ):
+                self.foundation.reset_preparation_after_provider_cleanup(
+                    self.orchestrator.case_id
+                )
             return True
         if projection["phase"] not in {"READY", "FAILED"}:
             try:
@@ -42,24 +63,19 @@ class DurableAnalyzerWorker:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                resources = self.foundation.preparation_resources(
+                current = self.foundation.preparation_projection(
                     self.orchestrator.case_id
                 )
-                cleanup_required = any(
-                    resources[name]
-                    for name in (
-                        "pm_file_id",
-                        "technical_file_id",
-                        "provider_conversation_id",
-                    )
-                ) and self.foundation.active_analyzer_context(
-                    self.orchestrator.case_id
-                ) is None
+                retention_state = (
+                    current["cleanup_state"]
+                    if current["cleanup_state"] in {"RESTART_GRACE", "RETAIN_UNCERTAIN"}
+                    else "NOT_REQUIRED"
+                )
                 self.foundation.set_preparation_phase(
                     self.orchestrator.case_id,
                     "FAILED",
                     failure_code=f"PREPARATION_{type(exc).__name__.upper()}",
-                    cleanup_state="PENDING" if cleanup_required else "NOT_REQUIRED",
+                    cleanup_state=retention_state,
                 )
                 return False
         if projection["phase"] != "READY":

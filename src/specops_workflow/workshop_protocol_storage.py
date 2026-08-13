@@ -259,6 +259,12 @@ def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
         Column("ready_at", Text),
         Column("failure_code", Text),
         Column("cleanup_state", Text, nullable=False),
+        Column("cleanup_reason", Text),
+        Column("last_client_disconnected_at", Text),
+        Column("restart_grace_until", Text),
+        Column("workshop_complete_at", Text),
+        Column("cleanup_available_at", Text),
+        Column("cleanup_last_error_code", Text),
     )
     table(
         "workshop_preparation_resources",

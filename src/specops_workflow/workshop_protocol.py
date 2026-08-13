@@ -181,6 +181,12 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                         ready_at=None,
                         failure_code=None,
                         cleanup_state="NOT_REQUIRED",
+                        cleanup_reason=None,
+                        last_client_disconnected_at=None,
+                        restart_grace_until=None,
+                        workshop_complete_at=None,
+                        cleanup_available_at=None,
+                        cleanup_last_error_code=None,
                     )
                 )
             existing_resources = connection.execute(
@@ -324,6 +330,12 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             "ready_at": row["ready_at"],
             "failure_code": row["failure_code"],
             "cleanup_state": row["cleanup_state"],
+            "cleanup_reason": row["cleanup_reason"],
+            "last_client_disconnected_at": row["last_client_disconnected_at"],
+            "restart_grace_until": row["restart_grace_until"],
+            "workshop_complete_at": row["workshop_complete_at"],
+            "cleanup_available_at": row["cleanup_available_at"],
+            "cleanup_last_error_code": row["cleanup_last_error_code"],
             "delayed": delayed,
             "delayed_message": (
                 "SpecOps Analyzer is taking a little longer to formulate your Workshop plan. "
@@ -332,6 +344,55 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 else None
             ),
         }
+
+    def set_provider_resource_lifecycle(self, case_id: UUID, **values: Any) -> None:
+        """Persist content-free retention/release state independently of preparation."""
+
+        allowed = {
+            "cleanup_state",
+            "cleanup_reason",
+            "last_client_disconnected_at",
+            "restart_grace_until",
+            "workshop_complete_at",
+            "cleanup_available_at",
+            "cleanup_last_error_code",
+        }
+        if not values or not set(values).issubset(allowed):
+            raise ValueError("invalid provider resource lifecycle update")
+        values["updated_at"] = _instant(self.now())
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table).where(table.c.case_id == str(case_id)).values(**values)
+            )
+            if result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation")
+
+    def reset_preparation_after_provider_cleanup(self, case_id: UUID) -> None:
+        """Start a fresh provider context while retaining canonical Foundation state."""
+
+        now = _instant(self.now())
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(table.c.case_id == str(case_id))
+                .values(
+                    phase="VALIDATING_DOCUMENTS",
+                    started_at=now,
+                    updated_at=now,
+                    ready_at=None,
+                    failure_code=None,
+                    cleanup_state="NOT_REQUIRED",
+                    cleanup_reason=None,
+                    last_client_disconnected_at=None,
+                    restart_grace_until=None,
+                    cleanup_available_at=None,
+                    cleanup_last_error_code=None,
+                )
+            )
+            if result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation")
 
     def preparation_resources(self, case_id: UUID) -> dict[str, Any]:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]

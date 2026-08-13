@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -22,6 +23,8 @@ from specops_workshop.v4.openai_adapter import (
     BootstrapResult,
     PreparedProviderContext,
     ProviderAdapterError,
+    ProviderCleanupReceipt,
+    ProviderResourceDeletion,
 )
 from specops_workshop.v4.orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
 from specops_workshop.v4.scheduler import DurableAnalyzerWorker
@@ -118,7 +121,7 @@ def _admit_brief(foundation, *, unsafe_question_index: int | None = None):
     return foundation.execute(c.AdmitInterviewBriefCommand(**values))
 
 
-def test_real_0004_database_upgrades_additively_to_0005(tmp_path):
+def test_real_0004_database_upgrades_additively_to_0006(tmp_path):
     url, original = _runtime(tmp_path)
     original_case = original.get_case(CASE_ID)
     config = Config("alembic.ini")
@@ -131,7 +134,7 @@ def test_real_0004_database_upgrades_additively_to_0005(tmp_path):
         assert "workshop_preparations" not in engine_for(url).dialect.get_table_names(connection)
     migrate(url)
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0006"
         tables = set(engine_for(url).dialect.get_table_names(connection))
     assert {
         "workshop_preparations",
@@ -594,6 +597,22 @@ class CancellablePreparationAdapter(DeterministicAdapter):
             identity for identity in (conversation_id, *file_ids) if identity is not None
         )
         self._cancel_once("cleanup")
+        return ProviderCleanupReceipt(
+            deletions=tuple(
+                ProviderResourceDeletion(
+                    resource_kind=("CONVERSATION" if identity == conversation_id else "FILE"),
+                    resource_id=identity,
+                    client_request_id=f"delete-{identity}",
+                    provider_request_id=None,
+                    outcome="DELETED",
+                    safe_error_code=None,
+                    retryable=False,
+                    duration_ms=1,
+                )
+                for identity in (conversation_id, *file_ids)
+                if identity is not None
+            )
+        )
 
 
 class SplitBootstrapCancellationAdapter(CancellablePreparationAdapter):
@@ -669,7 +688,7 @@ def test_cancelled_bootstrap_create_without_response_id_fails_closed_without_ret
     )
     assert failed["phase"] == "FAILED"
     assert failed["failure_code"] == "BOOTSTRAP_RESPONSE_ID_UNCERTAIN"
-    assert failed["cleanup_state"] == "PENDING"
+    assert failed["cleanup_state"] == "RETAIN_UNCERTAIN"
 
     assert asyncio.run(orchestrator.prepare_workshop())["phase"] == "FAILED"
     assert adapter.start_calls == 1
@@ -748,6 +767,251 @@ def test_real_cleanup_cancellation_stays_resumable_and_idempotent(tmp_path):
         "file_technical",
         "conversation_cleanup",
     }
+
+
+def test_last_browser_client_gets_exact_fifteen_minute_resume_grace(tmp_path):
+    class MutableClock:
+        value = NOW
+
+        def now(self):
+            return self.value
+
+        def advance(self, seconds: int):
+            self.value += timedelta(seconds=seconds)
+
+    async def scenario():
+        clock = MutableClock()
+        adapter = CancellablePreparationAdapter("never")
+        app = create_app(
+            settings=configured(tmp_path),
+            clock=clock,
+            source_catalog=SourceCatalog(ROOT),
+            live_provider=object(),
+            analyzer_adapter=adapter,
+        )
+        orchestrator = app.state.workshop_protocol_orchestrator
+        foundation = app.state.workshop_protocol_foundation
+        await orchestrator.prepare_workshop()
+        original = foundation.active_analyzer_context(app.state.bootstrap.case_id)
+
+        assert await orchestrator.note_last_client_disconnected() == "RESTART_GRACE"
+        grace = foundation.preparation_projection(app.state.bootstrap.case_id)
+        assert grace["last_client_disconnected_at"] == "2026-08-12T12:00:00Z"
+        assert grace["restart_grace_until"] == "2026-08-12T12:15:00Z"
+
+        clock.advance(899)
+        assert await orchestrator.note_client_connected() == "RESUMED_WITHIN_GRACE"
+        assert foundation.active_analyzer_context(app.state.bootstrap.case_id) == original
+        assert foundation.preparation_projection(app.state.bootstrap.case_id)[
+            "cleanup_state"
+        ] == "NOT_REQUIRED"
+
+        assert await orchestrator.note_last_client_disconnected() == "RESTART_GRACE"
+        clock.advance(900)
+        assert await orchestrator.expire_restart_grace() is True
+        expired = foundation.preparation_projection(app.state.bootstrap.case_id)
+        assert expired["cleanup_state"] == "PENDING"
+        assert expired["cleanup_reason"] == "RESTART_GRACE_EXPIRED"
+        assert foundation.active_analyzer_context(app.state.bootstrap.case_id) is None
+
+        completed = await orchestrator.cleanup_preparation()
+        assert completed["cleanup_state"] == "COMPLETED"
+        assert await orchestrator.note_client_connected() == "REBUILD_REQUIRED"
+        assert foundation.preparation_projection(app.state.bootstrap.case_id)[
+            "phase"
+        ] == "VALIDATING_DOCUMENTS"
+
+    asyncio.run(scenario())
+
+
+def test_presence_websocket_starts_grace_only_after_last_browser_page_closes(tmp_path):
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=DeterministicAdapter(),
+    )
+    asyncio.run(app.state.workshop_protocol_orchestrator.prepare_workshop())
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/presence"):
+            assert app.state.client_presence.has_active_clients() is True
+            with client.websocket_connect("/ws/live") as live:
+                assert live.receive_json() == {"type": "CALL_STATE", "state": "CONNECTING"}
+                assert live.receive_json()["state"] == "DISCONNECTED"
+                live.send_json({"type": "END"})
+            assert app.state.workshop_protocol_foundation.preparation_projection(
+                app.state.bootstrap.case_id
+            )["cleanup_state"] == "NOT_REQUIRED"
+            with client.websocket_connect("/ws/presence"):
+                assert app.state.workshop_protocol_foundation.preparation_projection(
+                    app.state.bootstrap.case_id
+                )["cleanup_state"] == "NOT_REQUIRED"
+            assert app.state.client_presence.has_active_clients() is True
+            assert app.state.workshop_protocol_foundation.preparation_projection(
+                app.state.bootstrap.case_id
+            )["cleanup_state"] == "NOT_REQUIRED"
+        assert app.state.client_presence.has_active_clients() is False
+        assert app.state.workshop_protocol_foundation.preparation_projection(
+            app.state.bootstrap.case_id
+        )["cleanup_state"] == "RESTART_GRACE"
+
+        with client.websocket_connect("/ws/presence"):
+            assert app.state.workshop_protocol_foundation.preparation_projection(
+                app.state.bootstrap.case_id
+            )["cleanup_state"] == "NOT_REQUIRED"
+
+
+def test_expired_grace_waits_for_analyzer_job_terminal_state(tmp_path):
+    class MutableClock:
+        value = NOW
+
+        def now(self):
+            return self.value
+
+        def advance(self, seconds: int):
+            self.value += timedelta(seconds=seconds)
+
+    async def scenario():
+        clock = MutableClock()
+        adapter = CancellablePreparationAdapter("never")
+        app = create_app(
+            settings=configured(tmp_path),
+            clock=clock,
+            source_catalog=SourceCatalog(ROOT),
+            live_provider=object(),
+            analyzer_adapter=adapter,
+        )
+        orchestrator = app.state.workshop_protocol_orchestrator
+        foundation = app.state.workshop_protocol_foundation
+        await orchestrator.prepare_workshop()
+        await orchestrator.record_final_transcript(
+            FinalTranscriptInput(
+                turn_sequence=1,
+                text="A committed final turn still needs its Analyzer stage.",
+                provider_request_id="grace-terminal-gate-turn",
+                speaker_actor_id=foundation.case_actor(app.state.bootstrap.case_id, "PM"),
+                actor="PM",
+            )
+        )
+        assert foundation.analyzer_jobs(app.state.bootstrap.case_id)[0][
+            "state"
+        ] == "ANALYSIS_PENDING"
+        await orchestrator.note_last_client_disconnected()
+        clock.advance(900)
+
+        assert await orchestrator.expire_restart_grace() is False
+        assert foundation.active_analyzer_context(app.state.bootstrap.case_id) is not None
+
+        worker = DurableAnalyzerWorker(orchestrator)
+        assert await worker.run_once() is True
+        assert foundation.analyzer_jobs(app.state.bootstrap.case_id)[0]["state"] == "COMPLETED"
+        assert foundation.active_analyzer_context(app.state.bootstrap.case_id) is not None
+
+        assert await worker.run_once() is True
+        assert foundation.active_analyzer_context(app.state.bootstrap.case_id) is None
+        assert foundation.preparation_projection(app.state.bootstrap.case_id)[
+            "cleanup_state"
+        ] == "COMPLETED"
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id(tmp_path):
+    class MutableNow:
+        value = NOW
+
+        def __call__(self):
+            return self.value
+
+        def advance(self, seconds: int):
+            self.value += timedelta(seconds=seconds)
+
+    class PartialCleanupAdapter:
+        calls = 0
+
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def release_resource_ids(self, conversation_id, file_ids):
+            self.calls += 1
+            if self.calls == 1:
+                return ProviderCleanupReceipt(
+                    deletions=(
+                        ProviderResourceDeletion(
+                            "CONVERSATION", conversation_id, "delete-conversation", None,
+                            "DELETED", None, False, 2,
+                        ),
+                        ProviderResourceDeletion(
+                            "FILE", file_ids[0], "delete-file-pm", None,
+                            "DELETED", None, False, 3,
+                        ),
+                        ProviderResourceDeletion(
+                            "FILE", file_ids[1], "delete-file-technical", None,
+                            "UNCONFIRMED", "DELETE_TIMEOUT", True, 60_000,
+                        ),
+                    )
+                )
+            assert conversation_id is None
+            assert file_ids == ("file_technical",)
+            return ProviderCleanupReceipt(
+                deletions=(
+                    ProviderResourceDeletion(
+                        "FILE", "file_technical", "delete-file-technical", None,
+                        "ALREADY_ABSENT", None, False, 4,
+                    ),
+                )
+            )
+
+    async def scenario():
+        url, original = _runtime(tmp_path)
+        clock = MutableNow()
+        foundation = type(original)(url, now=clock)
+        foundation.test_source_set = original.test_source_set
+        foundation.checkpoint_preparation_resource(
+            CASE_ID,
+            pm_file_id="file_pm",
+            technical_file_id="file_technical",
+            provider_conversation_id="conversation_cleanup",
+        )
+        foundation.set_preparation_phase(
+            CASE_ID, "FAILED", failure_code="ABANDONED", cleanup_state="PENDING"
+        )
+        _activate(foundation)
+        analyzer_contract = foundation.active_analyzer_context(CASE_ID).analyzer_contract
+        values = _base(foundation.case_revision(CASE_ID))
+        values.update(
+            command_type="INVALIDATE_ANALYZER_CONTEXT",
+            context_id=CONTEXT_ID,
+            reason_code="WORKSHOP_CLOSED",
+        )
+        foundation.execute(c.InvalidateAnalyzerContextCommand(**values))
+        adapter = PartialCleanupAdapter()
+        orchestrator = V4ProductionOrchestrator(
+            foundation=foundation,
+            adapter=adapter,
+            case_id=CASE_ID,
+            session_id=foundation.get_case(CASE_ID).session_id,
+            sources=(),
+            analyzer_contract=analyzer_contract,
+            now=clock,
+        )
+
+        first = await orchestrator.cleanup_preparation()
+        assert first["cleanup_state"] == "RETRY_WAIT"
+        assert first["cleanup_last_error_code"] == "DELETE_TIMEOUT"
+        remaining = foundation.preparation_resources(CASE_ID)
+        assert remaining["provider_conversation_id"] is None
+        assert remaining["pm_file_id"] is None
+        assert remaining["technical_file_id"] == "file_technical"
+
+        clock.advance(30)
+        second = await orchestrator.cleanup_preparation()
+        assert second["cleanup_state"] == "COMPLETED"
+        assert adapter.calls == 2
+        assert foundation.preparation_resources(CASE_ID)["technical_file_id"] is None
+
+    asyncio.run(scenario())
 
 
 def test_cancelled_analysis_lease_reclaims_provider_completed_stage_without_another_call(tmp_path):

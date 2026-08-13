@@ -28,6 +28,7 @@ from .providers import GeminiLiveProvider
 from .sources import SourceCatalog, SourceName
 from .v4.api import install_workshop_protocol_api
 from .v4.live_transport import V4LiveTransport
+from .v4.client_presence import WorkshopClientPresence
 from .v4.openai_adapter import ProviderAdapterError, ProviderSourceUpload, StoredConversationOpenAIAdapter
 from .v4.artifact_quality_adapter import (
     ArtifactQualityEvaluatorError,
@@ -148,8 +149,11 @@ def create_app(
         model=runtime_settings.gemini_model,
     )
     live_transport = V4LiveTransport(voice, orchestrator)
+    client_presence = WorkshopClientPresence(orchestrator)
 
-    worker = DurableAnalyzerWorker(orchestrator)
+    worker = DurableAnalyzerWorker(
+        orchestrator, has_active_clients=client_presence.has_active_clients
+    )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -169,6 +173,7 @@ def create_app(
     app.state.session_id = DEMO_SESSION_ID
     app.state.live_provider = voice
     app.state.live_transport = live_transport
+    app.state.client_presence = client_presence
     app.state.v4_source_uploads = sources
     app.state.v4_source_set_hash = source_set_hash
     app.state.workshop_protocol_orchestrator = orchestrator
@@ -267,6 +272,10 @@ def create_app(
     @app.websocket("/ws/live")
     async def live_socket(websocket: WebSocket) -> None:
         await live_transport.handle(websocket)
+
+    @app.websocket("/ws/presence")
+    async def presence_socket(websocket: WebSocket) -> None:
+        await client_presence.handle(websocket)
 
     frontend_dist = BACKEND_ROOT / "frontend" / "dist"
     if frontend_dist.is_dir():

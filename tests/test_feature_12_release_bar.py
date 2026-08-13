@@ -2876,7 +2876,7 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
     engine = engine_for(harness.database_url)
     inspector = inspect(engine)
     assert set(inspector.get_table_names()) == set(metadata.tables) | {"alembic_version"}
-    assert len(metadata.tables) == 39
+    assert len(metadata.tables) == 42
     assert str(inspector.get_columns("source_artifacts")[4]["type"]).upper() == "TEXT"
     assert str(inspector.get_columns("projection_plan_versions")[4]["type"]).upper() == "TEXT"
     for table_name, column_name in (
@@ -2956,7 +2956,7 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
         assert actual_checks == expected_checks
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0003"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0004"
         triggers = {
             row[0]
             for row in connection.execute(
@@ -2967,7 +2967,12 @@ def test_fresh_migration_matches_metadata_and_append_only_contract(tmp_path):
             text("SELECT occurred_at FROM audit_events WHERE case_id=:case_id"),
             {"case_id": str(harness.case_id)},
         ).scalar_one()
-    assert triggers == {"audit_events_no_update", "audit_events_no_delete"}
+    assert triggers == {
+        "audit_events_no_update",
+        "audit_events_no_delete",
+        "artifact_quality_admitted_no_update",
+        "artifact_quality_admitted_no_delete",
+    }
     assert occurred == "2026-08-07T12:00:00.000000Z"
     assert harness.audit_events()[0].occurred_at == FROZEN_NOW
     with pytest.raises(DatabaseError, match="AUDIT_APPEND_ONLY"):

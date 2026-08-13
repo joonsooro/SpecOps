@@ -18,8 +18,13 @@ def test_openapi_publishes_strict_command_union_and_narrow_voice_operations():
         "/api/v4/cases/{case_id}/artifact-review",
         "/api/v4/cases/{case_id}/artifacts/{artifact_type}",
         "/api/v4/cases/{case_id}/decision-review",
+        "/api/v4/artifacts/{artifact_type}/synthesize",
+        "/api/v4/artifacts/{artifact_type}/review",
+        "/api/v4/artifacts/current/confirm",
+        "/api/v4/decisions/current/respond",
         "/api/v4/foundation/commands",
         "/api/v4/voice/decision-responses",
+        "/api/v4/voice/decision-selections",
         "/api/v4/voice/final-transcripts",
     }
     foundation = paths["/api/v4/foundation/commands"]["post"]["requestBody"]["content"]["application/json"]["schema"]

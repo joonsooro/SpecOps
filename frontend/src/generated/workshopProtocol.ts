@@ -4,6 +4,57 @@
  */
 
 export interface paths {
+    "/api/v4/artifacts/current/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Current Artifact */
+        post: operations["confirm_current_artifact_api_v4_artifacts_current_confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v4/artifacts/{artifact_type}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Materialize Artifact Review */
+        post: operations["materialize_artifact_review_api_v4_artifacts__artifact_type__review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v4/artifacts/{artifact_type}/synthesize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Synthesize Artifact */
+        post: operations["synthesize_artifact_api_v4_artifacts__artifact_type__synthesize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v4/cases/{case_id}/artifact-review": {
         parameters: {
             query?: never;
@@ -55,6 +106,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v4/decisions/current/respond": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply Browser Decision Selection */
+        post: operations["apply_browser_decision_selection_api_v4_decisions_current_respond_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v4/foundation/commands": {
         parameters: {
             query?: never;
@@ -89,6 +157,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v4/voice/decision-selections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Apply Voice Decision Selection */
+        post: operations["apply_voice_decision_selection_api_v4_voice_decision_selections_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v4/voice/final-transcripts": {
         parameters: {
             query?: never;
@@ -110,6 +195,43 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AdmittedQualityFinding */
+        AdmittedQualityFinding: {
+            /** Artifact Pointers */
+            artifact_pointers: string[];
+            /**
+             * Audit Id
+             * Format: uuid
+             */
+            audit_id: string;
+            /** Candidate Key */
+            candidate_key: string;
+            /** Category */
+            category: string;
+            /** Evidence Ids */
+            evidence_ids: string[];
+            /**
+             * Finding Id
+             * Format: uuid
+             */
+            finding_id: string;
+            /**
+             * Finding Version
+             * @constant
+             */
+            finding_version: 1;
+            /** Message */
+            message: string;
+            /** Rule Id */
+            rule_id: string;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+            /** Transcript Event Ids */
+            transcript_event_ids: string[];
+        };
         /** AnalyzerContextCommandReceipt */
         AnalyzerContextCommandReceipt: {
             command: components["schemas"]["FoundationCommandReceipt"];
@@ -167,6 +289,47 @@ export interface components {
              * @enum {string}
              */
             receipt_type: "ARTIFACT_CONFIRMATION";
+        };
+        /** ArtifactQualityAuditReceipt */
+        ArtifactQualityAuditReceipt: {
+            /**
+             * Artifact Id
+             * Format: uuid
+             */
+            artifact_id: string;
+            /** Artifact Version */
+            artifact_version: number;
+            /**
+             * Audit Id
+             * Format: uuid
+             */
+            audit_id: string;
+            /** Audited Record Revision */
+            audited_record_revision: number;
+            /** Combined Rule Results */
+            combined_rule_results: components["schemas"]["CombinedQualityRuleResult"][];
+            /** Findings */
+            findings: components["schemas"]["AdmittedQualityFinding"][];
+            outcome: components["schemas"]["AuditOutcome"];
+            /**
+             * Protocol Version
+             * @constant
+             */
+            protocol_version: "1.0.0";
+            /** Replayed */
+            replayed: boolean;
+            /** Request Hash */
+            request_hash: string;
+            /** Resulting Case Revision */
+            resulting_case_revision: number;
+            /** Resulting Record Revision */
+            resulting_record_revision: number;
+            state: components["schemas"]["AuditState"];
+        };
+        /** ArtifactReviewIntent */
+        ArtifactReviewIntent: {
+            /** Operation Key */
+            operation_key: string;
         };
         /** ArtifactReviewProjection */
         ArtifactReviewProjection: {
@@ -242,6 +405,26 @@ export interface components {
             /** Record Revision */
             record_revision: number;
         };
+        /** ArtifactSynthesisIntent */
+        ArtifactSynthesisIntent: {
+            /** Operation Key */
+            operation_key: string;
+        };
+        /** ArtifactSynthesisResult */
+        ArtifactSynthesisResult: {
+            quality_audit: components["schemas"]["ArtifactQualityAuditReceipt"];
+            synthesis: components["schemas"]["ArtifactSynthesisAdmissionReceipt"];
+        };
+        /**
+         * AuditOutcome
+         * @enum {string}
+         */
+        AuditOutcome: "PENDING_AUDIT" | "PASS" | "NEEDS_CLARIFICATION" | "CONDITIONAL" | "BLOCKED" | "REJECTED";
+        /**
+         * AuditState
+         * @enum {string}
+         */
+        AuditState: "PENDING_PROVIDER" | "CONTEXT_READY" | "ADMITTED";
         /** CandidateIdentityMapping */
         CandidateIdentityMapping: {
             /**
@@ -264,11 +447,30 @@ export interface components {
             /** Record Version */
             record_version: number;
         };
+        /** CombinedQualityRuleResult */
+        CombinedQualityRuleResult: {
+            /** Explanation */
+            explanation: string;
+            failure_effect: components["schemas"]["FailureEffect"];
+            /** Finding Refs */
+            finding_refs: string[];
+            /** Foundation Subchecks */
+            foundation_subchecks: components["schemas"]["FoundationSubcheck"][];
+            result: components["schemas"]["ComponentResult"];
+            /** Rule Id */
+            rule_id: string;
+            semantic_result: components["schemas"]["SemanticAssessmentResult"] | null;
+        };
         /**
          * CommandOutcome
          * @enum {string}
          */
         CommandOutcome: "APPLIED" | "NO_OP_REPLAY" | "REJECTED";
+        /**
+         * ComponentResult
+         * @enum {string}
+         */
+        ComponentResult: "PASS" | "FAIL" | "PENDING";
         /** ConfirmedArtifactProjection */
         ConfirmedArtifactProjection: {
             /**
@@ -425,6 +627,11 @@ export interface components {
          * @enum {string}
          */
         Domain: "PRODUCT" | "TECHNICAL" | "CROSS_DOMAIN" | "POLICY" | "SECURITY" | "PRIVACY" | "DATA" | "ACCEPTANCE";
+        /**
+         * FailureEffect
+         * @enum {string}
+         */
+        FailureEffect: "NEEDS_CLARIFICATION" | "BLOCKED" | "CONDITIONAL" | "REJECT_MUTATION";
         /** FoundationCommandReceipt */
         FoundationCommandReceipt: {
             /**
@@ -464,6 +671,19 @@ export interface components {
          * @enum {string}
          */
         FoundationRejectionCode: "STALE_STATE" | "STALE_VIEW" | "STALE_ENTITY" | "AUTHORITY_FAILED" | "SOURCE_BINDING_FAILED" | "EVIDENCE_BINDING_FAILED" | "PROVIDER_REQUEST_BINDING_FAILED" | "TRANSCRIPT_BINDING_FAILED" | "IDENTITY_PLAN_FAILED" | "PAYLOAD_SCHEMA_FAILED" | "CONFIRMATION_BINDING_FAILED" | "DUPLICATE_CONFLICT" | "UNKNOWN_REFERENCE" | "INVALID_TRANSITION" | "MALFORMED_COMMAND";
+        /** FoundationSubcheck */
+        FoundationSubcheck: {
+            /**
+             * Check Type
+             * @enum {string}
+             */
+            check_type: "structural" | "referential" | "authority" | "human";
+            /** Evidence Codes */
+            evidence_codes: string[];
+            /** Explanation */
+            explanation: string;
+            result: components["schemas"]["ComponentResult"];
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -567,6 +787,11 @@ export interface components {
             /** Path */
             path: string[];
         };
+        /**
+         * SemanticAssessmentResult
+         * @enum {string}
+         */
+        SemanticAssessmentResult: "PASS" | "FAIL" | "NOT_APPLICABLE" | "ABSTAIN";
         /** TranscriptRecordedReceipt */
         TranscriptRecordedReceipt: {
             command: components["schemas"]["FoundationCommandReceipt"];
@@ -1091,7 +1316,7 @@ export interface components {
              * Semantic Quality Contract Version
              * @constant
              */
-            semantic_quality_contract_version: "2.0.0";
+            semantic_quality_contract_version: "2.1.0";
         };
         /** ApplyDecisionBatchResponseCommand */
         V4_ApplyDecisionBatchResponseCommand: {
@@ -2597,6 +2822,117 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    confirm_current_artifact_api_v4_artifacts_current_confirm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Actor Authentication */
+                    actor_authentication: components["schemas"]["V4_VerbalSelfAssertion"] | components["schemas"]["V4_EnterpriseSsoAuthentication"];
+                    /**
+                     * Confirmation Transcript Event Id
+                     * Format: uuid
+                     */
+                    confirmation_transcript_event_id: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactConfirmationReceipt"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContractValidationEnvelope"];
+                };
+            };
+        };
+    };
+    materialize_artifact_review_api_v4_artifacts__artifact_type__review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artifact_type: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArtifactReviewIntent"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactReviewReceipt"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    synthesize_artifact_api_v4_artifacts__artifact_type__synthesize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                artifact_type: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArtifactSynthesisIntent"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactSynthesisResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     current_artifact_review_api_v4_cases__case_id__artifact_review_get: {
         parameters: {
             query?: never;
@@ -2687,6 +3023,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    apply_browser_decision_selection_api_v4_decisions_current_respond_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Actor Authentication */
+                    actor_authentication: components["schemas"]["V4_VerbalSelfAssertion"] | components["schemas"]["V4_EnterpriseSsoAuthentication"];
+                    /** Operation Key */
+                    operation_key: string;
+                    /**
+                     * Response Transcript Event Id
+                     * Format: uuid
+                     */
+                    response_transcript_event_id: string;
+                    /** Selections */
+                    selections: components["schemas"]["V4_VoiceConfirmationSelectionItemCandidate"][];
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionBatchResponseReceipt"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContractValidationEnvelope"];
                 };
             };
         };
@@ -2828,6 +3209,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FoundationErrorEnvelope"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContractValidationEnvelope"];
+                };
+            };
+        };
+    };
+    apply_voice_decision_selection_api_v4_voice_decision_selections_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** Actor Authentication */
+                    actor_authentication: components["schemas"]["V4_VerbalSelfAssertion"] | components["schemas"]["V4_EnterpriseSsoAuthentication"];
+                    selection: components["schemas"]["V4_VoiceConfirmationSelectionCandidate"];
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DecisionBatchResponseReceipt"];
                 };
             };
             /** @description Unprocessable Entity */

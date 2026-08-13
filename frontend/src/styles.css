@@ -17,9 +17,9 @@
 * { box-sizing: border-box; }
 html { background: var(--drafting-mist); }
 body { margin: 0; min-width: 320px; }
-button, textarea { font: inherit; }
+button, textarea, select { font: inherit; }
 button { color: inherit; }
-button:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--binding-blue); outline-offset: 3px; }
+button:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--binding-blue); outline-offset: 3px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 .workshop-shell { min-height: 100dvh; display: grid; grid-template-columns: 32fr 42fr 26fr; background: var(--paper); }
@@ -114,9 +114,37 @@ h3, h4 { font-weight: 650; }
 .decision-review-view li > strong { display: grid; place-items: center; width: 1.75rem; height: 1.75rem; background: var(--binding-blue); color: white; font: 800 .72rem "SFMono-Regular", Menlo, monospace; }
 .decision-review-view li p { margin: 0; font-size: .74rem; font-weight: 700; }
 .decision-review-view li small, .decision-review-view li em { display: block; margin-top: .3rem; color: var(--muted); font-size: .62rem; line-height: 1.4; }
+.artifact-review-view { margin: 1rem 0 1.35rem; border: 1px solid var(--binding-blue); background: #fbfcff; }
+.artifact-review-view > header, .artifact-review-view > footer { display: flex; align-items: flex-start; justify-content: space-between; gap: .7rem; padding: .75rem; border-bottom: 1px solid #c7d2e8; }
+.artifact-review-view > header p { margin: 0; color: var(--binding-blue); font: 800 .54rem "SFMono-Regular", Menlo, monospace; text-transform: uppercase; }
+.artifact-review-view > header h3 { margin: .25rem 0 0; font: 600 1rem "Iowan Old Style", Charter, serif; }
+.artifact-review-view > header span, .artifact-review-view > footer span { color: var(--decision-ochre); font: 800 .54rem "SFMono-Regular", Menlo, monospace; }
+.artifact-review-summary { display: grid; grid-template-columns: 1fr auto auto; gap: .6rem; padding: .75rem; border-bottom: 1px solid #d6ddec; font-size: .62rem; }
+.artifact-review-view article { padding: .75rem; border-bottom: 1px solid #d6ddec; }
+.artifact-review-view article h4, .artifact-review-view article p { margin: 0; }
+.artifact-review-view article p { margin-top: .3rem; color: var(--muted); font-size: .68rem; }
+.artifact-review-view > footer { border: 0; flex-wrap: wrap; font: 700 .53rem "SFMono-Regular", Menlo, monospace; }
 .decision-review-view li em { padding-left: .45rem; border-left: .14rem solid var(--evidence-cyan); font-style: normal; }
 .decision-review-view footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .35rem; padding: .5rem .75rem; }
 .decision-review-view footer code { color: var(--muted); font: .52rem "SFMono-Regular", Menlo, monospace; }
+.decision-action { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: .55rem; margin-top: .65rem; }
+.decision-action span { color: var(--muted); font: 700 .54rem "SFMono-Regular", Menlo, monospace; text-transform: uppercase; }
+.decision-action select, .production-controls select { min-width: 0; border: 1px solid #8b9bbd; border-radius: 0; background: #fff; color: var(--ledger-ink); padding: .42rem; font-size: .64rem; }
+.review-commit-button { margin: .65rem .75rem .3rem; border: 0; background: var(--binding-blue); color: white; padding: .58rem .7rem; font-size: .68rem; font-weight: 750; }
+.partial-policy { display: block; padding: 0 .75rem .75rem; color: var(--muted); font-size: .57rem; line-height: 1.45; }
+.production-controls { margin: 1rem 0 1.35rem; border: 1px solid var(--ledger-ink); background: #e7ecea; box-shadow: .35rem .35rem 0 #a8dbde; }
+.production-controls > header { display: flex; justify-content: space-between; gap: .7rem; padding: .75rem; border-bottom: 1px solid var(--ledger-ink); }
+.production-controls > header p { margin: 0; color: var(--binding-blue); font: 800 .54rem "SFMono-Regular", Menlo, monospace; text-transform: uppercase; }
+.production-controls > header h3 { margin: .2rem 0 0; font: 600 1rem "Iowan Old Style", Charter, serif; }
+.production-controls > header > span { color: var(--governed-teal); font: 800 .52rem "SFMono-Regular", Menlo, monospace; }
+.production-controls > label { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: .65rem; padding: .65rem .75rem; border-bottom: 1px solid #afbbb7; }
+.production-controls > label > span { font: 800 .54rem "SFMono-Regular", Menlo, monospace; text-transform: uppercase; }
+.production-controls ol { list-style: none; margin: 0; padding: 0; }
+.production-controls li { display: grid; grid-template-columns: 1.75rem minmax(7rem, .8fr) 1fr; align-items: center; gap: .55rem; padding: .65rem .75rem; border-bottom: 1px solid #c0cac7; }
+.production-controls li:last-child { border: 0; }
+.production-controls li > span { color: var(--binding-blue); font: 800 .55rem "SFMono-Regular", Menlo, monospace; }
+.production-controls button { border: 1px solid var(--ledger-ink); background: var(--paper); padding: .48rem .55rem; text-align: left; font-size: .65rem; font-weight: 750; }
+.production-controls small { color: var(--muted); font-size: .56rem; line-height: 1.35; }
 .proposal-sheet { position: relative; margin: 1.15rem 0 1.65rem; padding: 1rem .85rem 1rem 1.15rem; background: #fff; border: 1px solid #93a5a0; clip-path: polygon(0 0, calc(100% - 1rem) 0, 100% 1rem, 100% 100%, 0 100%); }
 .proposal-sheet::after { content: ""; position: absolute; top: 0; right: 0; width: 1rem; height: 1rem; background: #dfe7e4; border-left: 1px solid #93a5a0; border-bottom: 1px solid #93a5a0; }
 .proposal-binding { position: absolute; left: -.2rem; top: 1rem; bottom: 1rem; width: .4rem; display: flex; flex-direction: column; justify-content: space-around; }
@@ -183,6 +211,9 @@ h3, h4 { font-weight: 650; }
   .document-toolbar > div { max-width: 60%; }
   .source-lines { font-size: .65rem; }
   .source-lines p { grid-template-columns: 2.25rem minmax(0, 1fr); }
+  .production-controls li { grid-template-columns: 1.5rem 1fr; }
+  .production-controls li small { grid-column: 2; }
+  .decision-action { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -61,7 +61,17 @@ def write_or_check(path: Path, content: bytes, *, check: bool) -> None:
 def generate(*, check: bool) -> None:
     source = locate_contract_bundle()
     contract_source = (source / "workshop_interaction_protocol_v1.py").read_bytes()
+    audit_contract_source = (source / "artifact_quality_audit_v1.py").read_bytes()
+    quality_contract_source = (source / "semantic-quality-contract.yaml").read_bytes()
     write_or_check(SHARED_PACKAGE / "workshop_v1.py", contract_source, check=check)
+    write_or_check(
+        SHARED_PACKAGE / "artifact_quality_v1.py", audit_contract_source, check=check
+    )
+    write_or_check(
+        SHARED_PACKAGE / "semantic-quality-contract.yaml",
+        quality_contract_source,
+        check=check,
+    )
     for filename in CONTRACT_FILENAMES:
         payload = json.dumps(
             json.loads((source / filename).read_text(encoding="utf-8")),
@@ -77,11 +87,27 @@ def generate(*, check: bool) -> None:
     for operation, schema in compiler.all_native_schemas().items():
         payload = json.dumps(schema, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8") + b"\n"
         write_or_check(NATIVE_DESTINATION / f"{operation.lower()}.schema.json", payload, check=check)
+    audit_schema = json.dumps(
+        compiler.artifact_quality_native_schema(),
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    write_or_check(
+        NATIVE_DESTINATION / "artifact_quality_audit.schema.json",
+        audit_schema,
+        check=check,
+    )
 
     provenance = {
         "contract_source": "workshop_interaction_protocol_v1.py",
         "contract_sha256": hashlib.sha256(contract_source).hexdigest(),
         "protocol_version": "1.0.0",
+        "artifact_quality_audit_protocol_version": "1.0.0",
+        "artifact_quality_contract_source": "artifact_quality_audit_v1.py",
+        "artifact_quality_contract_sha256": hashlib.sha256(audit_contract_source).hexdigest(),
+        "semantic_quality_contract_version": "2.1.0",
+        "semantic_quality_contract_sha256": hashlib.sha256(quality_contract_source).hexdigest(),
         "artifact_schema_versions": {
             "envelope": "2.0.0",
             "spec_package": "4.0.0",
@@ -89,6 +115,7 @@ def generate(*, check: bool) -> None:
             "read_models": "3.0.0",
         },
         "openai_operations": sorted(compiler.all_native_schemas()),
+        "openai_artifact_quality_schema": "artifact_quality_audit",
     }
     write_or_check(
         GENERATED_PACKAGE / "generated" / "provenance.json",

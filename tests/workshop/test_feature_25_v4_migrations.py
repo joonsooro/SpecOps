@@ -14,6 +14,7 @@ from specops_contracts.migrations import (
 from specops_workflow import migrate
 from specops_workflow.persistence import engine_for
 from specops_workflow.workshop_protocol_storage import V4_TABLE_NAMES
+from specops_workflow.artifact_quality_storage import ARTIFACT_QUALITY_TABLE_NAMES
 
 
 def _alembic(url: str) -> Config:
@@ -34,7 +35,8 @@ def test_0002_database_upgrades_to_0003_with_exact_v4_tables(tmp_path):
         column["name"] for column in inspector.get_columns("workshop_artifact_confirmations")
     }
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0003"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0004"
+    assert set(ARTIFACT_QUALITY_TABLE_NAMES).issubset(inspector.get_table_names())
 
 
 def test_semantic_adapters_never_guess_confirmation_or_identity_bindings():

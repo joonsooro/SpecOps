@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from specops_workflow import FrozenClock
-from specops_workshop.api import DEMO_SESSION_ID, create_app
+from specops_workshop.legacy_test_app import DEMO_SESSION_ID, create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
 from specops_workshop.contracts import CallState, ConversationPhase
 from specops_workshop.live_transport import BoundedAudioBuffer, INPUT_AUDIO_LIMIT, OUTPUT_AUDIO_LIMIT

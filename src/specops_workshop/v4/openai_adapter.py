@@ -215,6 +215,9 @@ class StoredConversationOpenAIAdapter:
                     contracts.ProviderSourceBinding(source=item.source, provider_file_id=file_id)
                 )
             except Exception as exc:
+                await self._release_prepared_ids(
+                    None, tuple(binding.provider_file_id for binding in uploaded)
+                )
                 raise self._provider_error(
                     exc,
                     stage=contracts.ProviderProcessingStage.FILE_UPLOAD,
@@ -236,6 +239,9 @@ class StoredConversationOpenAIAdapter:
             if conversation_id is None:
                 raise ValueError("unsafe provider Conversation identifier")
         except Exception as exc:
+            await self._release_prepared_ids(
+                None, tuple(binding.provider_file_id for binding in uploaded)
+            )
             raise self._provider_error(
                 exc,
                 stage=contracts.ProviderProcessingStage.CONVERSATION_CREATE,
@@ -316,6 +322,56 @@ class StoredConversationOpenAIAdapter:
             )
             return False
         return getattr(value, "id", None) == context.provider_conversation_id
+
+    async def release_context(self, context: contracts.AnalyzerContextBinding) -> None:
+        """Best-effort provider cleanup after Foundation has invalidated a binding.
+
+        Foundation invalidation is authoritative and happens first. Cleanup is
+        bounded and idempotent; no source content or provider error text is
+        retained when a remote object has already disappeared.
+        """
+
+        await self._release_prepared_ids(
+            context.provider_conversation_id,
+            tuple(item.provider_file_id for item in context.source_set.ordered_sources),
+        )
+
+    async def release_prepared(self, prepared: PreparedProviderContext) -> None:
+        await self._release_prepared_ids(
+            prepared.provider_conversation_id,
+            tuple(item.provider_file_id for item in prepared.source_set.ordered_sources),
+        )
+
+    async def _release_prepared_ids(
+        self, conversation_id: str | None, file_ids: tuple[str, ...]
+    ) -> None:
+        async def bounded(resource: Any, identifier: str, request_id: str) -> None:
+            delete = getattr(resource, "delete", None)
+            if delete is None:
+                return
+            try:
+                await asyncio.wait_for(
+                    delete(
+                        identifier,
+                        extra_headers={"X-Client-Request-Id": request_id},
+                    ),
+                    timeout=REQUEST_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                return
+
+        if conversation_id is not None:
+            await bounded(
+                self._client.conversations,
+                conversation_id,
+                f"specops-conversation-delete-{conversation_id}",
+            )
+        for file_id in file_ids:
+            await bounded(
+                self._client.files,
+                file_id,
+                f"specops-file-delete-{file_id}",
+            )
 
     async def _execute(self, request: contracts.AnalyzerProviderRequest, *, bootstrap: bool):
         operation = contracts.AnalyzerOperation(request.request_type)

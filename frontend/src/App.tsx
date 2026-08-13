@@ -1,9 +1,9 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LiveAudioClient } from "./audio/liveClient";
 import type { components as WorkshopProtocolComponents } from "./generated/workshopProtocol";
-import { formulationEnabled, proposalControlPayload } from "./uiModel";
 
 type DecisionBatchReviewView = WorkshopProtocolComponents["schemas"]["DecisionBatchReviewView"];
+type ArtifactReviewProjection = WorkshopProtocolComponents["schemas"]["ArtifactReviewProjection"];
 
 type LineRange = { kind: "LINE_RANGE"; start: number; end: number };
 type SourceRef = { artifact_id: string; version: number; content_hash: string; location: LineRange };
@@ -18,38 +18,12 @@ type Bootstrap = {
   technical_source_lines: [number, string][];
 };
 type Transcript = {
+  event_id: string;
   turn_sequence: number;
   version: number;
   normalized_text: string;
   correction_of_version: number | null;
-};
-type ProposalUnit = {
-  proposal_key: string;
-  statement: string;
-  domain: "BUSINESS" | "TECHNICAL" | "CROSS_DOMAIN";
-  source_refs: SourceRef[];
-};
-type ProposalCheck = ProposalUnit & { related_unit_proposal_keys: string[] };
-type ProposalItem = {
-  proposal_key: string;
-  title: string;
-  requirement_proposal_keys: string[];
-  technical_decision_proposal_keys: string[];
-  acceptance_check_proposal_keys: string[];
-};
-type CompleteProposal = {
-  requirements: ProposalUnit[];
-  technical_decisions: ProposalUnit[];
-  acceptance_checks: ProposalCheck[];
-  items: ProposalItem[];
-};
-type PendingProposal = {
-  record: { proposal_ref: string; status: string; version: number };
-  result: {
-    acknowledgement: string | null;
-    next_question: string | null;
-    complete_package_proposal: CompleteProposal;
-  };
+  speaker_actor_id: string | null;
 };
 type GovernanceItem = {
   binding: { item_id: string; item_version: number; semantic_hash: string };
@@ -68,7 +42,7 @@ type WorkshopProjection = {
     revision_lock_reason: string | null;
   };
   final_transcripts: Transcript[];
-  pending_proposal: PendingProposal | null;
+  pending_proposal: null;
   governance: {
     package_readiness: string;
     items: GovernanceItem[];
@@ -82,6 +56,9 @@ type WorkshopProjection = {
     transcript_source_refs: SourceRef[];
   };
 };
+
+type ArtifactType = "SPEC_PACKAGE" | "TECHNICAL_CONTRACT";
+type DecisionAction = "CONFIRM" | "REVISE" | "REJECT" | "DEFER";
 
 const formatDate = (value: string) => new Intl.DateTimeFormat("en-GB", {
   day: "2-digit", month: "short", year: "numeric", timeZone: "UTC",
@@ -102,16 +79,7 @@ const reportBrowserSpan = (startedAt: number, outcome: "OK" | "ERROR") => {
   });
 };
 
-function EvidenceLink({ sourceRef, onFocus }: { sourceRef: SourceRef; onFocus: (line: number) => void }) {
-  const line = sourceRef.location.start;
-  return (
-    <button className="evidence-link" type="button" onClick={() => onFocus(line)} aria-label={`Focus technical source line ${line}`}>
-      <span aria-hidden="true">§</span> L{line}
-    </button>
-  );
-}
-
-function ItemDomain({ domain }: { domain: GovernanceItem["domain"] | ProposalUnit["domain"] }) {
+function ItemDomain({ domain }: { domain: GovernanceItem["domain"] }) {
   return <span className={`domain domain-${domain.toLowerCase()}`}>{domain.replace("_", " ")}</span>;
 }
 
@@ -126,9 +94,11 @@ export function App() {
   const [started, setStarted] = useState(false);
   const [muted, setMuted] = useState(false);
   const [boundLine, setBoundLine] = useState<number | null>(null);
-  const [editOpen, setEditOpen] = useState(false);
-  const [editInstruction, setEditInstruction] = useState("");
   const [decisionReview, setDecisionReview] = useState<DecisionBatchReviewView | null>(null);
+  const [artifactReview, setArtifactReview] = useState<ArtifactReviewProjection | null>(null);
+  const [artifactType, setArtifactType] = useState<ArtifactType>("SPEC_PACKAGE");
+  const [decisionActions, setDecisionActions] = useState<Record<string, DecisionAction | "">>({});
+  const [busyAction, setBusyAction] = useState<string | null>(null);
   const live = useRef<LiveAudioClient | null>(null);
 
   const loadDecisionReview = async (caseId: string) => {
@@ -140,13 +110,25 @@ export function App() {
     }
   };
 
+  const loadArtifactReview = async (caseId: string) => {
+    try {
+      const response = await fetch(`/api/v4/cases/${caseId}/artifact-review`);
+      setArtifactReview(response.ok ? await response.json() as ArtifactReviewProjection | null : null);
+    } catch {
+      setArtifactReview(null);
+    }
+  };
+
   const refresh = async () => {
     const response = await fetch("/api/workshop");
     if (!response.ok) throw new Error("Workshop projection unavailable");
     const value = await response.json() as WorkshopProjection;
     setWorkshop(value);
     setCallState(value.session.call_state);
-    if (bootstrap?.case_id) await loadDecisionReview(bootstrap.case_id);
+    if (bootstrap?.case_id) await Promise.all([
+      loadDecisionReview(bootstrap.case_id),
+      loadArtifactReview(bootstrap.case_id),
+    ]);
   };
 
   useEffect(() => {
@@ -167,6 +149,7 @@ export function App() {
         setCallState(nextWorkshop.session.call_state);
         setNotice("Foundation and delegation verified");
         void loadDecisionReview(nextBootstrap.case_id);
+        void loadArtifactReview(nextBootstrap.case_id);
         reportBrowserSpan(startedAt, "OK");
       })
       .catch(() => {
@@ -254,47 +237,113 @@ export function App() {
     });
   };
 
-  const controlProposal = async (intent: "CONFIRM" | "EDIT" | "REJECT") => {
-    const proposalRef = workshop?.pending_proposal?.record.proposal_ref;
-    if (!proposalRef) return;
+  const runArtifactAction = async (action: "synthesize" | "review" | "confirm") => {
+    const latestTranscript = workshop?.final_transcripts.at(-1);
+    if (action === "confirm" && (!latestTranscript || !bootstrap)) {
+      setFailure("Add a final spoken or text confirmation before confirming the exact artifact review.");
+      return;
+    }
     setFailure(null);
+    setBusyAction(action);
     try {
-      const response = await fetch("/api/proposals/control", {
+      const operationKey = `browser-${action}-${artifactType.toLowerCase()}-${crypto.randomUUID()}`;
+      const endpoint = action === "synthesize"
+        ? `/api/v4/artifacts/${artifactType}/synthesize`
+        : action === "review"
+          ? `/api/v4/artifacts/${artifactType}/review`
+          : "/api/v4/artifacts/current/confirm";
+      const body = action === "confirm" && latestTranscript && bootstrap
+        ? {
+            actor_authentication: {
+              authentication_method: "VERBAL_SELF_ASSERTION",
+              assurance_level: "SELF_ASSERTED",
+              actor_id: bootstrap.pm_actor_id,
+              asserted_display_name: "Product Manager",
+              claimed_role: "Product Manager",
+              assertion_transcript_event_id: latestTranscript.event_id,
+            },
+            confirmation_transcript_event_id: latestTranscript.event_id,
+          }
+        : { operation_key: operationKey };
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(proposalControlPayload(intent, proposalRef, editInstruction)),
+        body: JSON.stringify(body),
       });
-      if (!response.ok) throw new Error();
-      setEditOpen(false);
-      setEditInstruction("");
-      await refresh();
-      setNotice(intent === "CONFIRM" ? "Proposal committed to the governed package" : `Proposal ${intent.toLowerCase()}ed`);
-    } catch {
-      setFailure("The proposal control did not commit. Review the current proposal and try again.");
-    }
-  };
-
-  const finishWorkshop = async () => {
-    setFailure(null);
-    setNotice("Running final governance audit…");
-    try {
-      const response = await fetch("/api/finish", { method: "POST" });
       if (!response.ok) {
-        const body = await response.json() as { detail?: string };
-        throw new Error(body.detail ?? "Finish refused");
+        const payload = await response.json() as { detail?: { code?: string } | string };
+        const detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.code;
+        throw new Error(detail ?? "Foundation refused the artifact action");
       }
       await refresh();
-      setNotice("Workshop formulation is frozen. The handoff summary remains live.");
+      setNotice({
+        synthesize: `${artifactType === "SPEC_PACKAGE" ? "Spec Package" : "Technical Contract"} synthesized and quality-audited`,
+        review: "Exact Foundation review projection opened",
+        confirm: "Exact artifact version confirmed",
+      }[action]);
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : "Finish was refused by the final audit.");
+      setFailure(error instanceof Error ? error.message : "Foundation refused the artifact action.");
+    } finally {
+      setBusyAction(null);
     }
   };
 
-  const proposed = workshop?.pending_proposal?.result.complete_package_proposal;
+  const applyDecisionSelection = async () => {
+    const latestTranscript = workshop?.final_transcripts.at(-1);
+    const selected = decisionReview?.items.filter((item) => decisionActions[item.handle]);
+    if (!bootstrap || !latestTranscript || !selected?.length) {
+      setFailure("Add a final decision response and select at least one displayed decision.");
+      return;
+    }
+    setFailure(null);
+    setBusyAction("decisions");
+    try {
+      const response = await fetch("/api/v4/decisions/current/respond", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operation_key: `browser-decisions-${crypto.randomUUID()}`,
+          response_transcript_event_id: latestTranscript.event_id,
+          actor_authentication: {
+            authentication_method: "VERBAL_SELF_ASSERTION",
+            assurance_level: "SELF_ASSERTED",
+            actor_id: bootstrap.pm_actor_id,
+            asserted_display_name: "Product Manager",
+            claimed_role: "Product Manager",
+            assertion_transcript_event_id: latestTranscript.event_id,
+          },
+          selections: selected.map((item) => {
+            const action = decisionActions[item.handle] as DecisionAction;
+            return {
+              handle: item.handle,
+              action,
+              revision_span: action === "REVISE" ? {
+                transcript_event_id: latestTranscript.event_id,
+                start_character: 0,
+                end_character_exclusive: latestTranscript.normalized_text.length,
+              } : null,
+            };
+          }),
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json() as { detail?: { code?: string } | string };
+        const detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.code;
+        throw new Error(detail ?? "Foundation refused the decision response");
+      }
+      setDecisionActions({});
+      await refresh();
+      setNotice("Selected decisions committed atomically; unselected decisions remain pending");
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : "Foundation refused the decision response.");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const blocked = workshop?.governance?.items.filter((item) => item.review_obligation === "DECISION_REQUIRED") ?? [];
   const later = workshop?.governance?.items.filter((item) => item.review_obligation === "LATER_REVIEW") ?? [];
   const phase = workshop?.session.conversation_phase ?? "WORKSHOP";
-  const canFormulate = formulationEnabled(phase, workshop?.session.revision_locked ?? false);
   const lineMap = useMemo(() => new Map(bootstrap?.technical_source_lines ?? []), [bootstrap]);
 
   return (
@@ -407,7 +456,7 @@ export function App() {
         {workshop?.session.revision_locked && <div className="blocked-banner" role="alert"><strong>Package changes blocked</strong><span>{workshop.session.revision_lock_reason ?? "Foundation state needs recovery."}</span></div>}
 
         <div className="rollup">
-          <div><span>Items</span><strong>{workshop?.governance?.items.length ?? proposed?.items.length ?? 0}</strong></div>
+          <div><span>Items</span><strong>{workshop?.governance?.items.length ?? 0}</strong></div>
           <div><span>Ready</span><strong>{workshop?.governance?.items.filter((item) => item.readiness === "READY").length ?? 0}</strong></div>
           <div><span>Decisions</span><strong>{blocked.length}</strong></div>
         </div>
@@ -431,6 +480,23 @@ export function App() {
                     {item.problem_origins.map((origin) => (
                       <em key={origin.problem_id}>{origin.problem_statement}</em>
                     ))}
+                    <label className="decision-action">
+                      <span>Action for {item.handle}</span>
+                      <select
+                        aria-label={`Action for ${item.handle}`}
+                        value={decisionActions[item.handle] ?? ""}
+                        onChange={(event) => setDecisionActions((current) => ({
+                          ...current,
+                          [item.handle]: event.target.value as DecisionAction | "",
+                        }))}
+                      >
+                        <option value="">Leave pending</option>
+                        <option value="CONFIRM">Confirm exact decision</option>
+                        <option value="REVISE">Request revision from final response</option>
+                        <option value="REJECT">Reject</option>
+                        <option value="DEFER">Defer</option>
+                      </select>
+                    </label>
                   </div>
                 </li>
               ))}
@@ -439,38 +505,95 @@ export function App() {
               <code>VIEW {shortId(decisionReview.view_id)}</code>
               <code>HASH {decisionReview.view_hash.slice(7, 19)}…</code>
             </footer>
+            <button
+              className="review-commit-button"
+              type="button"
+              onClick={applyDecisionSelection}
+              disabled={busyAction !== null || !Object.values(decisionActions).some(Boolean)}
+            >
+              {busyAction === "decisions" ? "Applying selection…" : "Apply selected decisions"}
+            </button>
+            <small className="partial-policy">Unselected handles remain pending. Valid items commit independently in one Foundation transaction.</small>
           </section>
         )}
 
-        {workshop?.pending_proposal && proposed && (
-          <section className="proposal-sheet" aria-labelledby="proposal-title">
-            <div className="proposal-binding" aria-hidden="true"><i /><i /><i /></div>
-            <header>
-              <p>Proposed · awaiting PM confirmation</p>
-              <span>PATCH {workshop.pending_proposal.record.version.toString().padStart(2, "0")}</span>
-              <h3 id="proposal-title">{proposed.items.map((item) => item.title).join(" + ")}</h3>
-            </header>
-            {proposed.items.map((item) => {
-              const requirements = proposed.requirements.filter((unit) => item.requirement_proposal_keys.includes(unit.proposal_key));
-              const decisions = proposed.technical_decisions.filter((unit) => item.technical_decision_proposal_keys.includes(unit.proposal_key));
-              const checks = proposed.acceptance_checks.filter((check) => item.acceptance_check_proposal_keys.includes(check.proposal_key));
-              const domain = [...requirements, ...decisions, ...checks].some((unit) => unit.domain === "CROSS_DOMAIN") || (requirements.length && decisions.length) ? "CROSS_DOMAIN" : decisions.length ? "TECHNICAL" : "BUSINESS";
-              return <div className="proposal-item" key={item.proposal_key}>
-                <div className="item-title"><h4>{item.title}</h4><ItemDomain domain={domain} /></div>
-                <div className="statement-group"><span>Requirement</span>{requirements.map((unit) => <p key={unit.proposal_key}>{unit.statement} {unit.source_refs.map((ref) => <EvidenceLink key={`${ref.artifact_id}-${ref.location.start}`} sourceRef={ref} onFocus={focusEvidence} />)}</p>)}</div>
-                <div className="statement-group"><span>Decision</span>{decisions.map((unit) => <p key={unit.proposal_key}>{unit.statement} {unit.source_refs.map((ref) => <EvidenceLink key={`${ref.artifact_id}-${ref.location.start}`} sourceRef={ref} onFocus={focusEvidence} />)}</p>)}</div>
-                <div className="statement-group"><span>Acceptance</span>{checks.map((check) => <p key={check.proposal_key}>{check.statement} {check.source_refs.map((ref) => <EvidenceLink key={`${ref.artifact_id}-${ref.location.start}`} sourceRef={ref} onFocus={focusEvidence} />)}</p>)}</div>
-              </div>;
-            })}
-            {workshop.pending_proposal.result.next_question && <p className="confirmation-question">{workshop.pending_proposal.result.next_question}</p>}
-            {editOpen && <label className="edit-field">Edit instruction<textarea rows={3} value={editInstruction} onChange={(event) => setEditInstruction(event.target.value)} autoFocus /></label>}
-            <div className="proposal-controls">
-              <button className="confirm" type="button" onClick={() => controlProposal("CONFIRM")} disabled={!canFormulate}>Confirm</button>
-              {editOpen ? <button type="button" onClick={() => controlProposal("EDIT")} disabled={!editInstruction.trim()}>Apply edit</button> : <button type="button" onClick={() => setEditOpen(true)} disabled={!canFormulate}>Edit</button>}
-              <button type="button" onClick={() => controlProposal("REJECT")} disabled={!canFormulate}>Reject</button>
+        <section className="production-controls" aria-labelledby="artifact-pipeline-title">
+          <header>
+            <div>
+              <p>V4 production seam</p>
+              <h3 id="artifact-pipeline-title">Artifact pipeline</h3>
             </div>
-          </section>
-        )}
+            <span>FOUNDATION OWNED</span>
+          </header>
+          <label>
+            <span>Artifact</span>
+            <select
+              aria-label="Artifact type"
+              value={artifactType}
+              onChange={(event) => setArtifactType(event.target.value as ArtifactType)}
+              disabled={busyAction !== null}
+            >
+              <option value="SPEC_PACKAGE">Spec Package</option>
+              <option value="TECHNICAL_CONTRACT">Technical Contract</option>
+            </select>
+          </label>
+          <ol>
+            <li>
+              <span>01</span>
+              <button type="button" onClick={() => runArtifactAction("synthesize")} disabled={busyAction !== null}>
+                {busyAction === "synthesize" ? "Synthesizing + auditing…" : "Synthesize + audit"}
+              </button>
+              <small>A fresh Terra audit Conversation evaluates the exact immutable draft.</small>
+            </li>
+            <li>
+              <span>02</span>
+              <button type="button" onClick={() => runArtifactAction("review")} disabled={busyAction !== null}>
+                {busyAction === "review" ? "Opening review…" : "Open exact review"}
+              </button>
+              <small>Foundation projects the full payload and binds the displayed hash.</small>
+            </li>
+            <li>
+              <span>03</span>
+              <button type="button" onClick={() => runArtifactAction("confirm")} disabled={busyAction !== null || !artifactReview}>
+                {busyAction === "confirm" ? "Confirming…" : "Confirm exact artifact"}
+              </button>
+              <small>First add a final confirmation statement; the transcript, view, and payload bind together.</small>
+            </li>
+          </ol>
+        </section>
+
+        {artifactReview && (() => {
+          const view = artifactReview.view as {
+            view_type?: string;
+            mode?: string;
+            header?: { package_name?: string; contract_name?: string; overall_readiness?: string; readiness?: string };
+            items?: Array<{ id: string; title: string; summary: string }>;
+            contract_content?: Record<string, unknown>;
+            projection_integrity?: { all_material_items_included?: boolean };
+          };
+          return (
+            <section className="artifact-review-view" aria-labelledby="artifact-review-title">
+              <header>
+                <div>
+                  <p>Foundation artifact projection · immutable review instance</p>
+                  <h3 id="artifact-review-title">{view.header?.package_name ?? view.header?.contract_name ?? "Artifact review"}</h3>
+                </div>
+                <span>{(view.mode ?? "review").toUpperCase()}</span>
+              </header>
+              <div className="artifact-review-summary">
+                <strong>{view.header?.overall_readiness ?? view.header?.readiness ?? "FORMULATING"}</strong>
+                <span>{view.items?.length ?? Object.keys(view.contract_content ?? {}).length} material sections</span>
+                <span>{view.projection_integrity?.all_material_items_included ? "Complete projection" : "Projection blocked"}</span>
+              </div>
+              {view.items?.map((item) => <article key={item.id}><h4>{item.title}</h4><p>{item.summary}</p></article>)}
+              <footer>
+                <code>VIEW {shortId(artifactReview.view_id)}</code>
+                <code>HASH {artifactReview.view_hash.slice(7, 19)}…</code>
+                <span>{artifactReview.confirmed ? "CONFIRMED" : "AWAITING HUMAN CONFIRMATION"}</span>
+              </footer>
+            </section>
+          );
+        })()}
 
         <div className="committed-ledger">
           <div className="section-rule"><h3>Committed items</h3><span>STATE MACHINE</span></div>
@@ -505,9 +628,8 @@ export function App() {
             <p><strong>Later review</strong><span>{workshop.handoff.later_review_requests.length}</span></p>
             {workshop.handoff.later_review_requests.map((request) => <code key={request.review_request_id}>LATER · {shortId(request.item_binding.item_id)}</code>)}
             <p><strong>Transcript refs</strong><span>{workshop.handoff.transcript_source_refs.length}</span></p>
-          </div> : <p>Finish the workshop to freeze formulation and expose the exact handoff manifest.</p>}
+          </div> : <p>Confirm the governed artifacts to expose the exact read-only handoff manifest.</p>}
         </div>
-        <button className="finish-button" type="button" onClick={finishWorkshop} disabled={!workshop?.governance || !!workshop?.pending_proposal || phase !== "WORKSHOP"}>Finish workshop <span aria-hidden="true">→</span></button>
       </section>
     </main>
   );

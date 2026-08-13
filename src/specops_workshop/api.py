@@ -1,50 +1,67 @@
+"""Production FastAPI application for the deterministic V4 Workshop seam."""
+
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
-from pydantic import ValidationError
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from specops_contracts import workshop_v1 as c
+import specops_contracts
 from specops_workflow import SystemClock
-from specops_workflow.errors import DomainError
-from specops_workflow.models import QueryOne, UUIDListQuery
-from specops_workflow.workshop_protocol import WorkshopFoundationService
+from specops_workflow.workshop_protocol import FoundationProtocolError, WorkshopFoundationService
 
-from .analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
 from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
 from .boundary import assert_downstream_boundary
 from .config import Settings
-from .contracts import FinalTurnInput, RecoveryView
+from .contracts import FinalTurnInput
 from .delegation import load_delegation_fixture
-from .evidence import (
-    EvidenceIndexer,
-    EvidenceSourceRole,
-    RegisteredMarkdownSnapshot,
-)
-from .gate import RegisteredEvidenceGrounding, WorkshopGate
-from .finish import FinishCoordinator, FinishResult
-from .final_turn import FinalTurnProcessor
-from .live_transport import LiveTransport
-from .orchestration import WorkshopCoordinator
 from .ports import LiveVoiceProvider
-from .provider_context import build_analyzer_business_context
 from .providers import GeminiLiveProvider
-from .providers.openai_responses import TerraResponsesProvider
-from .projections import PendingProposalView, ProposalControlInput, WorkshopProjection
-from .sessions import WorkshopStore
 from .sources import SourceCatalog, SourceName
-from .telemetry import BrowserSpanInput, LatencySpan, TelemetryRecorder
-from .v4 import contracts as v4_contracts
 from .v4.api import install_workshop_protocol_api
-from .v4.openai_adapter import ProviderSourceUpload, StoredConversationOpenAIAdapter
+from .v4.live_transport import V4LiveTransport
+from .v4.openai_adapter import ProviderAdapterError, ProviderSourceUpload, StoredConversationOpenAIAdapter
+from .v4.artifact_quality_adapter import (
+    ArtifactQualityEvaluatorError,
+    FreshConversationTerraQualityEvaluator,
+)
+from .v4.orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 SPEC_ENG_ROOT = BACKEND_ROOT.parent / "Spec_Eng"
+V4_ROOT = SPEC_ENG_ROOT / "spec-workshop-contracts-and-interaction-model-v4"
+QUALITY_CONTRACT_PATH = Path(specops_contracts.__file__).resolve().parent / "semantic-quality-contract.yaml"
 DEMO_SESSION_ID = stable_id("csv-export-workshop:session")
+
+
+def _sha256(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _analyzer_contract() -> c.AnalyzerContractBinding:
+    instruction = (
+        b"SpecOps Workshop Analyzer 1: propose semantics only through six narrow operations; "
+        b"Foundation owns identity, authority, confirmation, readiness, audit, and handoff."
+    )
+    return c.AnalyzerContractBinding(
+        protocol_version=c.PROTOCOL_VERSION,
+        instruction_set_id="specops-workshop-analyzer",
+        instruction_set_version=1,
+        instruction_set_hash="sha256:" + hashlib.sha256(instruction).hexdigest(),
+        semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
+        semantic_quality_contract_version="2.1.0",
+        semantic_quality_contract_hash=_sha256(QUALITY_CONTRACT_PATH),
+        provider_schema_version="1.0.0",
+        model="gpt-5.6-terra",
+        reasoning_effort=c.ReasoningEffort.MEDIUM,
+    )
 
 
 def create_app(
@@ -53,9 +70,8 @@ def create_app(
     clock=None,
     source_catalog: SourceCatalog | None = None,
     live_provider: LiveVoiceProvider | None = None,
-    analyzer_provider=None,
-    grounding_checker=None,
-    idle_timeout_seconds: float = 30 * 60,
+    analyzer_adapter: StoredConversationOpenAIAdapter | Any | None = None,
+    quality_evaluator: Any | None = None,
 ) -> FastAPI:
     runtime_clock = clock or SystemClock()
     assert_downstream_boundary(BACKEND_ROOT)
@@ -65,41 +81,12 @@ def create_app(
     )
     catalog = source_catalog or SourceCatalog(SPEC_ENG_ROOT)
     fixture = load_delegation_fixture(catalog, now=runtime_clock.now())
-    workflow, bootstrap = bootstrap_foundation(
-        runtime_settings,
-        catalog,
-        fixture,
-        clock=runtime_clock,
+    _, bootstrap = bootstrap_foundation(
+        runtime_settings, catalog, fixture, clock=runtime_clock
     )
-    workshop_store = WorkshopStore(runtime_settings.workshop_database_url)
-    telemetry = TelemetryRecorder(workshop_store, clock=runtime_clock)
-    coordinator = WorkshopCoordinator(
-        workshop_store, workflow, clock=runtime_clock, telemetry=telemetry
-    )
-    coordinator.start_session(DEMO_SESSION_ID, case_id=bootstrap.case_id, pm_actor_id=bootstrap.pm_actor_id)
-    registered_by_id = {
-        identity.artifact_id: identity
-        for identity in bootstrap.registered_source_identities
-    }
-    evidence_snapshots = (
-            RegisteredMarkdownSnapshot.from_registered(
-                EvidenceSourceRole.PM_SPEC,
-                registered_by_id[bootstrap.pm_source_id],
-                catalog.read_text(SourceName.PM_SPEC),
-            ),
-            RegisteredMarkdownSnapshot.from_registered(
-                EvidenceSourceRole.TECHNICAL_SPEC,
-                registered_by_id[bootstrap.technical_source_id],
-                catalog.read_text(SourceName.TECHNICAL_SPEC),
-            ),
-        )
-    evidence_index = EvidenceIndexer().build(
-        case_id=bootstrap.case_id,
-        snapshots=evidence_snapshots,
-    )
-    v4_sources = tuple(
+    sources = tuple(
         ProviderSourceUpload(
-            source=v4_contracts.SourceIdentity(
+            source=c.SourceIdentity(
                 source_id=source_id,
                 role=role,
                 version=1,
@@ -111,221 +98,136 @@ def create_app(
             content=catalog.read_bytes(name),
         )
         for source_id, role, name in (
-            (bootstrap.pm_source_id, v4_contracts.SourceRole.PM_SPEC, SourceName.PM_SPEC),
+            (bootstrap.pm_source_id, c.SourceRole.PM_SPEC, SourceName.PM_SPEC),
             (
                 bootstrap.v4_technical_contract_source_id,
-                v4_contracts.SourceRole.TECHNICAL_CONTRACT,
+                c.SourceRole.TECHNICAL_CONTRACT,
                 SourceName.TECHNICAL_CONTRACT,
             ),
         )
     )
-    v4_source_set_hash = StoredConversationOpenAIAdapter.source_set_hash(
-        tuple(item.source for item in v4_sources)
+    source_set_hash = StoredConversationOpenAIAdapter.source_set_hash(
+        tuple(item.source for item in sources)
     )
-    workshop_protocol_foundation = WorkshopFoundationService(
-        runtime_settings.specops_database_url,
-        now=runtime_clock.now,
+    foundation = WorkshopFoundationService(
+        runtime_settings.specops_database_url, now=runtime_clock.now
     )
-    workshop_protocol_foundation.register_case(
+    foundation.register_case(
         case_id=bootstrap.case_id,
         session_id=DEMO_SESSION_ID,
-        source_set_hash=v4_source_set_hash,
+        source_set_hash=source_set_hash,
     )
-    voice_provider = live_provider or GeminiLiveProvider(
+    adapter = analyzer_adapter or StoredConversationOpenAIAdapter(
+        api_key=runtime_settings.openai_api_key.get_secret_value(), now=runtime_clock.now
+    )
+    evaluator = quality_evaluator or FreshConversationTerraQualityEvaluator(
+        api_key=runtime_settings.openai_api_key.get_secret_value(), now=runtime_clock.now
+    )
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=adapter,
+        case_id=bootstrap.case_id,
+        session_id=DEMO_SESSION_ID,
+        sources=sources,
+        analyzer_contract=_analyzer_contract(),
+        quality_evaluator=evaluator,
+        now=runtime_clock.now,
+    )
+    voice = live_provider or GeminiLiveProvider(
         api_key=runtime_settings.gemini_api_key.get_secret_value(),
         model=runtime_settings.gemini_model,
     )
-    resolved_analyzer = analyzer_provider
-    if resolved_analyzer is None and live_provider is None:
-        resolved_analyzer = TerraResponsesProvider(
-            api_key=runtime_settings.openai_api_key.get_secret_value(),
-            model=runtime_settings.terra_model,
-        )
-    gate = None
-    analyzer_business_context = build_analyzer_business_context(catalog)
-    if resolved_analyzer is not None:
-        grounding = grounding_checker or RegisteredEvidenceGrounding(
-            static_refs={
-                bootstrap.pm_source_id: (
-                    1,
-                    catalog.digest(SourceName.PM_SPEC),
-                    tuple(line for _, line in catalog.numbered_lines(SourceName.PM_SPEC)),
-                ),
-                bootstrap.technical_source_id: (
-                    1,
-                    catalog.digest(SourceName.TECHNICAL_SPEC),
-                    tuple(line for _, line in catalog.numbered_lines(SourceName.TECHNICAL_SPEC)),
-                ),
-            },
-            store=workshop_store, session_id=DEMO_SESSION_ID,
-        )
-        gate = WorkshopGate(
-            workshop_store,
-            workflow,
-            resolved_analyzer,
-            grounding,
-            clock=runtime_clock,
-            evidence_index=evidence_index,
-            evidence_snapshots=evidence_snapshots,
-            business_context=analyzer_business_context,
-            dev_lead_actor_id=bootstrap.dev_lead_actor_id,
-            telemetry=telemetry,
-            default_effort=runtime_settings.analyzer_reasoning_effort,
-        )
-    finish_coordinator = None if gate is None else FinishCoordinator(
-        workshop_store, workflow, gate, clock=runtime_clock
-    )
-    final_turn_processor = FinalTurnProcessor(coordinator, gate)
-    live_transport = LiveTransport(
-        voice_provider, coordinator, workshop_store,
-        session_id=DEMO_SESSION_ID, idle_timeout_seconds=idle_timeout_seconds, gate=gate,
-        finish_coordinator=finish_coordinator, telemetry=telemetry,
-        final_turn_processor=final_turn_processor,
-    )
+    live_transport = V4LiveTransport(voice, orchestrator)
+
     app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
     app.state.settings = runtime_settings
-    app.state.workflow = workflow
     app.state.bootstrap = bootstrap
     app.state.source_catalog = catalog
-    app.state.evidence_index = evidence_index
-    app.state.evidence_snapshots = evidence_snapshots
-    app.state.workshop_store = workshop_store
-    app.state.coordinator = coordinator
     app.state.session_id = DEMO_SESSION_ID
-    app.state.live_provider = voice_provider
+    app.state.live_provider = voice
     app.state.live_transport = live_transport
-    app.state.gate = gate
-    app.state.final_turn_processor = final_turn_processor
-    app.state.analyzer_business_context = analyzer_business_context
-    app.state.finish_coordinator = finish_coordinator
-    app.state.telemetry = telemetry
-    app.state.v4_source_uploads = v4_sources
-    app.state.v4_source_set_hash = v4_source_set_hash
-    install_workshop_protocol_api(app, workshop_protocol_foundation)
+    app.state.v4_source_uploads = sources
+    app.state.v4_source_set_hash = source_set_hash
+    app.state.workshop_protocol_orchestrator = orchestrator
+    app.state.openai_adapter = adapter
+    app.state.artifact_quality_evaluator = evaluator
+    install_workshop_protocol_api(app, foundation)
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:
-        return app.state.bootstrap
+        return bootstrap
 
-    @app.get("/api/session", response_model=RecoveryView)
-    async def recover_session() -> RecoveryView:
-        return app.state.coordinator.recover(app.state.session_id)
-
-    @app.get("/api/analyzer/recovery")
-    async def analyzer_recovery():
-        if app.state.gate is None:
-            return None
-        return app.state.gate.latest_recovery(app.state.session_id)
+    @app.get("/api/workshop")
+    async def workshop_projection():
+        case = foundation.get_case(bootstrap.case_id)
+        transcripts = foundation.final_transcripts(bootstrap.case_id)
+        return {
+            "protocol_version": c.PROTOCOL_VERSION,
+            "case_id": str(case.case_id),
+            "session_id": str(case.session_id),
+            "case_revision": foundation.case_revision(case.case_id),
+            "readiness": case.readiness.value,
+            "review_obligation": case.review_obligation.value,
+            "session": {
+                "workshop_state": "ACTIVE",
+                "conversation_phase": "WORKSHOP",
+                "call_state": "READY",
+                "revision_locked": False,
+                "revision_lock_reason": None,
+            },
+            "final_transcripts": [
+                {
+                    "event_id": str(item.event_id),
+                    "turn_sequence": item.sequence_number,
+                    "version": item.transcript_version,
+                    "normalized_text": item.text,
+                    "correction_of_version": None,
+                    "speaker_actor_id": (
+                        None if item.speaker_actor_id is None else str(item.speaker_actor_id)
+                    ),
+                }
+                for item in transcripts
+            ],
+            "pending_proposal": None,
+            "governance": None,
+            "review_requests": [],
+            "handoff": None,
+            "analyzer_context_status": (
+                "ACTIVE"
+                if foundation.active_analyzer_context(case.case_id) is not None
+                else "REBUILD_REQUIRED"
+            ),
+            "last_final_transcript_sequence": (
+                None if not transcripts else transcripts[-1].sequence_number
+            ),
+            "decision_review": foundation.current_decision_view(case.case_id),
+            "artifact_review": foundation.current_artifact_review(case.case_id),
+        }
 
     @app.post("/api/session/final-turn")
     async def final_turn(value: FinalTurnInput):
-        processed = await app.state.final_turn_processor.process(
-            app.state.session_id,
-            turn_sequence=value.turn_sequence,
-            text=value.text,
-            provider_request_id=value.provider_request_id,
-            correction_of_version=value.correction_of_version,
-        )
-        return processed.committed
-
-    @app.post(
-        "/api/telemetry/spans",
-        response_model=LatencySpan,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {"schema": BrowserSpanInput.model_json_schema()}
-                },
-            }
-        },
-    )
-    async def browser_latency_span(request: Request) -> LatencySpan:
-        # FastAPI parses JSON into a Python dict before Pydantic validation.
-        # Strict UUID fields intentionally reject strings in that mode, while
-        # the same strict contract correctly accepts UUID JSON strings through
-        # ``model_validate_json``.  Parse the wire bytes at this boundary so a
-        # real browser request follows the same contract as generated clients.
         try:
-            value = BrowserSpanInput.model_validate_json(await request.body(), strict=True)
-        except ValidationError:
-            raise HTTPException(status_code=422, detail="Invalid browser latency span") from None
-        return app.state.telemetry.record_browser(app.state.session_id, value)
-
-    @app.get("/api/workshop", response_model=WorkshopProjection)
-    async def workshop_projection() -> WorkshopProjection:
-        recovered = app.state.coordinator.recover(app.state.session_id)
-        pending = app.state.workshop_store.pending_proposal(app.state.session_id)
-        proposal = None if pending is None else PendingProposalView(
-            record=pending,
-            result=AnalyzerTurnResult.model_validate_json(pending.analyzer_result_json),
-        )
-        query = QueryOne(case_id=bootstrap.case_id, acting_actor_id=bootstrap.pm_actor_id)
-        try:
-            governance = app.state.workflow.get_spec_package_governance(query)
-        except DomainError:
-            governance = None
-        reviews = app.state.workflow.list_review_requests(UUIDListQuery(
-            case_id=bootstrap.case_id,
-            acting_actor_id=bootstrap.pm_actor_id,
-        )).items
-        handoff = None
-        if recovered.session.conversation_phase.value == "HANDOFF_READY":
-            handoff = app.state.workflow.get_downstream_handoff(query)
-        return WorkshopProjection(
-            session=recovered.session,
-            final_transcripts=recovered.final_transcripts,
-            pending_proposal=proposal,
-            governance=governance,
-            review_requests=tuple(reviews),
-            handoff=handoff,
-        )
-
-    @app.post("/api/finish", response_model=FinishResult)
-    async def finish_workshop() -> FinishResult:
-        if app.state.finish_coordinator is None:
-            raise HTTPException(status_code=503, detail="Final audit is unavailable")
-        try:
-            return await app.state.finish_coordinator.finish(app.state.session_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
-
-    @app.post("/api/proposals/control")
-    async def proposal_control(value: ProposalControlInput):
-        if app.state.gate is None:
-            raise HTTPException(status_code=503, detail="Analyzer gate is unavailable")
-        snapshots = app.state.workshop_store.latest_snapshots(app.state.session_id)
-        if not snapshots:
-            raise HTTPException(status_code=409, detail="No final PM evidence is available")
-        control = AnalyzerTurnResult(
-            schema_version=1,
-            turn_source_ref=snapshots[-1].final_source_ref,
-            finding_proposals=[],
-            complete_package_proposal=None,
-            control_intent=ControlIntent(value.intent),
-            control_target=ControlTarget.WORKSHOP_PATCH,
-            target_proposal_ref=value.proposal_ref,
-            edit_instruction=value.edit_instruction,
-            acknowledgement=value.acknowledgement,
-            next_question=None,
-        )
-        try:
-            result = app.state.gate.apply_control(
-                app.state.session_id, control, confirmation_context=True
-            )
-            if value.intent == ControlIntent.EDIT:
-                await app.state.gate.analyze_final_turn(
-                    app.state.session_id,
-                    snapshots[-1].turn_sequence,
-                    edit_instruction=value.edit_instruction,
+            return await orchestrator.record_final_transcript(
+                FinalTranscriptInput(
+                    turn_sequence=value.turn_sequence,
+                    text=value.text,
+                    provider_request_id=value.provider_request_id,
+                    speaker_actor_id=bootstrap.pm_actor_id,
+                    actor="PM",
                 )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from None
-        return {"status": None if result is None else result.status.value}
+            )
+        except ProviderAdapterError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=exc.receipt.model_dump(mode="json"),
+            ) from None
+        except (FoundationProtocolError, ValueError) as exc:
+            code = exc.code.value if isinstance(exc, FoundationProtocolError) else str(exc)
+            raise HTTPException(status_code=409, detail={"code": code}) from None
 
     @app.websocket("/ws/live")
     async def live_socket(websocket: WebSocket) -> None:
-        await app.state.live_transport.handle(websocket)
+        await live_transport.handle(websocket)
 
     frontend_dist = BACKEND_ROOT / "frontend" / "dist"
     if frontend_dist.is_dir():
@@ -336,7 +238,11 @@ def create_app(
         @app.get("/{path:path}", include_in_schema=False)
         async def frontend(path: str):
             candidate = frontend_dist / path
-            if path and candidate.is_file() and candidate.resolve().is_relative_to(frontend_dist.resolve()):
+            if (
+                path
+                and candidate.is_file()
+                and candidate.resolve().is_relative_to(frontend_dist.resolve())
+            ):
                 return FileResponse(candidate)
             index = frontend_dist / "index.html"
             if index.is_file():

@@ -11,7 +11,9 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
 FRONTEND = BACKEND / "frontend"
-RECEIPT = BACKEND / "tests/workshop/sw-release-evidence.json"
+# Run 4/SW evidence is historical and immutable. Task 26 emits a separate
+# deterministic build receipt and never rewrites that release record.
+RECEIPT = BACKEND / "tests/workshop/task26-deterministic-evidence.json"
 LIVE_RECEIPT = BACKEND / "tests/workshop/live-evidence.json"
 sys.path.insert(0, str(BACKEND / "tests/workshop"))
 from sw_release_contract import SW_EVIDENCE, SW_IDS  # noqa: E402
@@ -56,6 +58,7 @@ def main() -> int:
         run("vitest", ["npm", "test"], FRONTEND),
         run("frontend-build", ["npm", "run", "build"], FRONTEND),
         run("playwright", ["npm", "run", "test:e2e"], FRONTEND),
+        run("playwright-real-v4", ["npm", "run", "test:e2e:real"], FRONTEND),
     ]
     deterministic_passed = all(value["status"] == "PASS" for value in checks)
     if args.live and deterministic_passed:

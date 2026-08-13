@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,13 +13,23 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, insert, select
 
 from specops_contracts import workshop_v1 as c
-from specops_contracts.canonical import payload_hash, transcript_hash
+from specops_contracts import artifact_quality_v1 as q
+from specops_contracts.canonical import domain_hash, payload_hash, transcript_hash
 from specops_workflow import WorkflowService, migrate
 from specops_workflow.enums import SourceArtifactType
 from specops_workflow.models import CreateCaseCommand, RegisterSourceArtifactCommand, SourceArtifactIdentity
 from specops_workflow.persistence import WORKSHOP_PROTOCOL_TABLES, audit_events, cases, engine_for
 from specops_workflow.workshop_protocol import FoundationProtocolError, WorkshopFoundationService
+from specops_workflow.artifact_projection import draft_governance
 from specops_workshop.v4.api import install_workshop_protocol_api
+from specops_workshop.v4.artifact_quality import build_audit_bundle, quality_contract_hash
+from specops_workshop.v4.openai_adapter import ProviderSourceUpload
+from v4_payload_factory import PayloadFactory, bind_planned_identities
+from v4_quality_factory import (
+    admit_all_pass_quality,
+    all_pass_candidate,
+    stable_id as quality_stable_id,
+)
 
 
 NOW = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
@@ -27,7 +39,27 @@ PM_ID = UUID("10000000-0000-4000-8000-000000000003")
 DEV_ID = UUID("10000000-0000-4000-8000-000000000004")
 CONTEXT_ID = UUID("10000000-0000-4000-8000-000000000005")
 RUN_ID = UUID("10000000-0000-4000-8000-000000000006")
-SOURCE_SET_HASH = "sha256:" + "1" * 64
+PM_SOURCE_BYTES = b"Export filtered orders.\n"
+TECHNICAL_SOURCE_BYTES = b"\n" * 530 + b"CSV output uses UTF-8 and one header row.\n"
+PM_SOURCE_HASH = "sha256:" + hashlib.sha256(PM_SOURCE_BYTES).hexdigest()
+TECHNICAL_SOURCE_HASH = "sha256:" + hashlib.sha256(TECHNICAL_SOURCE_BYTES).hexdigest()
+SOURCE_SET_HASH = domain_hash(
+    "SPECOPS:SOURCE_SET:v1",
+    [
+        {
+            "source_id": "10000000-0000-4000-8000-000000000005",
+            "role": "PM_SPEC",
+            "version": 1,
+            "payload_hash": PM_SOURCE_HASH,
+        },
+        {
+            "source_id": "10000000-0000-4000-8000-000000000006",
+            "role": "TECHNICAL_CONTRACT",
+            "version": 1,
+            "payload_hash": TECHNICAL_SOURCE_HASH,
+        },
+    ],
+)
 REQUEST_HASH = "sha256:" + "2" * 64
 
 
@@ -38,8 +70,8 @@ def _contract() -> c.AnalyzerContractBinding:
         instruction_set_version=1,
         instruction_set_hash="sha256:" + "3" * 64,
         semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-        semantic_quality_contract_version="2.0.0",
-        semantic_quality_contract_hash="sha256:" + "4" * 64,
+        semantic_quality_contract_version="2.1.0",
+        semantic_quality_contract_hash=quality_contract_hash(),
         provider_schema_version="1.0.0",
         model="gpt-5.6-terra",
         reasoning_effort="medium",
@@ -131,11 +163,8 @@ def _runtime(tmp_path):
     )
     pm_path = tmp_path / "pm-spec.md"
     technical_path = tmp_path / "technical-contract.md"
-    pm_path.write_text("Export filtered orders.\n", encoding="utf-8")
-    technical_path.write_text(
-        "\n" * 530 + "CSV output uses UTF-8 and one header row.\n",
-        encoding="utf-8",
-    )
+    pm_path.write_bytes(PM_SOURCE_BYTES)
+    technical_path.write_bytes(TECHNICAL_SOURCE_BYTES)
     locators = (str(pm_path), str(technical_path))
     hashes = tuple(hashlib.sha256(Path(value).read_bytes()).hexdigest() for value in locators)
     revision = 1
@@ -199,6 +228,185 @@ def _activate(foundation):
         ),
     )
     return foundation.execute(c.ActivateAnalyzerContextCommand(**values))
+
+
+def _quality_bundle(foundation, artifact_type: str):
+    record = foundation.latest_artifact_record(CASE_ID, artifact_type)
+    sources = tuple(
+        ProviderSourceUpload(
+            source=item.source,
+            content=Path(item.source.canonical_locator).read_bytes(),
+        )
+        for item in foundation.test_source_set.ordered_sources
+    )
+    bundle = build_audit_bundle(
+        audit_id=uuid4(),
+        evaluator_run_id=uuid4(),
+        case_id=CASE_ID,
+        session_id=SESSION_ID,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        artifact_record=record,
+        sources=sources,
+        transcripts=foundation.final_transcripts(CASE_ID),
+        semantic_snapshot=foundation.semantic_snapshot(CASE_ID),
+        semantic_quality_contract_hash=_contract().semantic_quality_contract_hash,
+        confirmed_spec=(
+            foundation.confirmed_spec_binding(CASE_ID)
+            if artifact_type == "TECHNICAL_CONTRACT"
+            else None
+        ),
+    )
+    return bundle
+
+
+def _admit_quality(foundation, artifact_type: str):
+    return admit_all_pass_quality(
+        foundation, _quality_bundle(foundation, artifact_type)
+    )
+
+
+def _insert_minimal_spec_artifact(foundation):
+    artifact_id = uuid4()
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
+    digest = payload_hash(payload)
+    governance = draft_governance(
+        artifact_type="SPEC_PACKAGE",
+        payload=payload,
+        target=SimpleNamespace(next_artifact_version=1),
+        quality_hash=quality_contract_hash(),
+        now=NOW,
+        new_id=uuid4,
+    )
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            insert(WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]).values(
+                artifact_id=str(artifact_id),
+                artifact_version=1,
+                case_id=str(CASE_ID),
+                artifact_type="SPEC_PACKAGE",
+                artifact_key="SPEC-QUALITY-NEGATIVE",
+                record_revision=1,
+                payload_hash=digest,
+                payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                governance_json=json.dumps(
+                    governance, separators=(",", ":"), sort_keys=True
+                ),
+                status="DRAFT",
+                confirmed_from_json=None,
+                created_at=NOW.isoformat(),
+            )
+        )
+    return artifact_id
+
+
+def _prepare_quality_candidate(foundation, bundle):
+    foundation.prepare_artifact_quality_audit(
+        q.PrepareArtifactQualityAuditCommand(
+            protocol_version=q.PROTOCOL_VERSION,
+            command_id=quality_stable_id(bundle.audit_id, "prepare-negative"),
+            idempotency_key=f"quality-negative-prepare-{bundle.audit_id}",
+            expected_case_revision=bundle.based_on_case_revision,
+            bundle=bundle,
+        )
+    )
+    foundation.bind_artifact_quality_evaluator(
+        q.BindArtifactQualityEvaluatorCommand(
+            protocol_version=q.PROTOCOL_VERSION,
+            command_id=quality_stable_id(bundle.audit_id, "bind-negative"),
+            audit_id=bundle.audit_id,
+            request_hash=bundle.request_hash,
+            provider="OPENAI",
+            model="gpt-5.6-terra",
+            reasoning_effort="medium",
+            provider_conversation_id=f"conv_negative_{str(bundle.audit_id)[:12]}",
+            client_request_id=f"aqa-negative-{bundle.request_hash[7:23]}",
+            started_at=NOW,
+        )
+    )
+
+
+def _admit_quality_candidate(foundation, bundle, candidate):
+    return foundation.admit_artifact_quality_audit(
+        q.AdmitArtifactQualityAuditCommand(
+            protocol_version=q.PROTOCOL_VERSION,
+            command_id=quality_stable_id(bundle.audit_id, "admit-negative"),
+            idempotency_key=f"quality-negative-admit-{bundle.audit_id}",
+            expected_case_revision=bundle.based_on_case_revision,
+            bundle=bundle,
+            execution=q.EvaluatorExecutionBinding(
+                provider="OPENAI",
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+                provider_conversation_id=f"conv_negative_{str(bundle.audit_id)[:12]}",
+                provider_response_id=f"resp_negative_{str(bundle.audit_id)[:12]}",
+                client_request_id=f"aqa-negative-response-{bundle.request_hash[7:23]}",
+                store_enabled=True,
+                started_at=NOW,
+                completed_at=NOW,
+            ),
+            candidate=candidate,
+        )
+    )
+
+
+def _bind_fixture_refs(payload: dict, confirmed_spec_payload: dict | None = None) -> None:
+    by_group = {
+        "requirement_refs": payload.get("requirements", []),
+        "decision_refs": payload.get("decisions", []),
+        "acceptance_check_refs": payload.get("acceptance_checks", []),
+        "dependency_refs": payload.get("dependencies", []),
+        "constraint_refs": payload.get("constraints", []),
+        "risk_refs": payload.get("risks", []),
+        "open_item_refs": payload.get("open_items", []),
+        "scenario_refs": payload.get("scenarios", []),
+        "outcome_refs": payload.get("outcomes", []),
+        "actor_refs": payload.get("actors", []),
+    }
+    actor_id = next((item["id"] for item in payload.get("actors", [])), None)
+    owned_ids = list(WorkshopFoundationService._artifact_identity_kinds(payload))
+    spec_ids = (
+        list(WorkshopFoundationService._artifact_identity_kinds(confirmed_spec_payload))
+        if confirmed_spec_payload is not None
+        else []
+    )
+
+    def bind(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in by_group:
+                    group = by_group[key]
+                    value[key] = (
+                        [entry["id"] for entry in group][: max(1, len(item))]
+                        if item and group
+                        else []
+                    )
+                elif key in {
+                    "primary_customer", "beneficiary_actor_ref", "primary_actor_ref", "actor_ref"
+                } and actor_id is not None:
+                    value[key] = actor_id
+                elif key == "implements_spec_refs" and spec_ids:
+                    value[key] = spec_ids[: max(1, len(item))] if item else []
+                elif key in {"from_ref", "trigger_interface_ref", "failure_ref", "component_ref"} and owned_ids:
+                    value[key] = owned_ids[0]
+                elif key == "to_ref" and owned_ids:
+                    value[key] = owned_ids[min(1, len(owned_ids) - 1)]
+                else:
+                    bind(item)
+        elif isinstance(value, list):
+            for item in value:
+                bind(item)
+
+    bind(payload)
+    for requirement in payload.get("requirements", []):
+        if not requirement["source_evidence_refs"] and not requirement["decision_refs"]:
+            requirement["priority"] = "should"
+    if confirmed_spec_payload is not None:
+        promise = confirmed_spec_payload["product_thesis"]["customer_promise"]
+        for value in payload["contract_intent"].values():
+            if isinstance(value, dict) and "spec_json_pointer" in value:
+                value["spec_json_pointer"] = "/product_thesis/customer_promise"
+                value["value"] = promise
 
 
 def _turn_candidate(transcript_id: UUID, revision: int) -> c.TurnAnalysisCandidate:
@@ -469,8 +677,18 @@ def test_voice_and_generic_http_endpoints_share_the_foundation_handler(tmp_path)
 def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refresh(tmp_path):
     url, foundation = _runtime(tmp_path)
     _activate(foundation)
-    artifact_id, view_id, confirmation_id = uuid4(), uuid4(), uuid4()
-    digest = payload_hash({})
+    artifact_id = uuid4()
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
+    digest = payload_hash(payload)
+    governance = draft_governance(
+        artifact_type="SPEC_PACKAGE",
+        payload=payload,
+        target=SimpleNamespace(next_artifact_version=1),
+        quality_hash=quality_contract_hash(),
+        now=NOW,
+        new_id=uuid4,
+    )
     tables = WORKSHOP_PROTOCOL_TABLES
     with engine_for(url).begin() as connection:
         connection.execute(
@@ -482,34 +700,35 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
                 artifact_key="SPEC-TEST",
                 record_revision=1,
                 payload_hash=digest,
-                payload_json="{}",
-                governance_json="{}",
+                payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                governance_json=json.dumps(governance, separators=(",", ":"), sort_keys=True),
                 status="DRAFT",
                 confirmed_from_json=None,
                 created_at=NOW.isoformat(),
             )
         )
-        connection.execute(
-            insert(tables["workshop_artifact_reviews"]).values(
-                view_id=str(view_id),
-                confirmation_id=str(confirmation_id),
-                case_id=str(CASE_ID),
-                artifact_id=str(artifact_id),
-                artifact_version=1,
-                record_revision=1,
-                payload_hash=digest,
-                view_hash="sha256:" + "a" * 64,
-                view_mode="FINAL",
-                view_json='{"exact":"displayed review"}',
-                current=1,
-                confirmed=0,
-                generated_at=NOW.isoformat(),
-            )
-        )
-
-    transcript = _transcript_command(4, 1, "I confirm the displayed Spec Package.")
+    audit = _admit_quality(foundation, "SPEC_PACKAGE")
+    assert audit.outcome is q.AuditOutcome.PASS
+    review_values = _base(5)
+    review_values.update(
+        command_type="MATERIALIZE_ARTIFACT_REVIEW",
+        subject=c.ArtifactReviewSubjectBinding(
+            artifact_type="SPEC_PACKAGE",
+            artifact_id=artifact_id,
+            artifact_key="SPEC-TEST",
+            artifact_version=1,
+            record_revision=audit.resulting_record_revision,
+            payload_hash=digest,
+        ),
+        view_mode="FINAL",
+    )
+    review = foundation.execute(c.MaterializeArtifactReviewCommand(**review_values))
+    projection = foundation.current_artifact_review(CASE_ID)
+    view_id = review.view_id
+    confirmation_id = review.confirmation_id
+    transcript = _transcript_command(6, 1, "I confirm the displayed Spec Package.")
     foundation.execute(transcript)
-    values = _base(5, actor=PM_ID)
+    values = _base(7, actor=PM_ID)
     values.update(
         command_type="CONFIRM_ARTIFACT",
         actor_authentication=c.VerbalSelfAssertion(
@@ -525,11 +744,11 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
             artifact_id=artifact_id,
             artifact_key="SPEC-TEST",
             artifact_version=1,
-            record_revision=1,
+            record_revision=projection["view"]["source"]["record_revision"],
             payload_hash=digest,
             confirmation_id=confirmation_id,
             view_id=view_id,
-            view_hash="sha256:" + "a" * 64,
+            view_hash=review.view_hash,
         ),
         confirmation_transcript_event_id=transcript.transcript.event_id,
         approved_exception_ids=(),
@@ -547,7 +766,7 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
     duplicate = command.model_copy(
         update={"command_id": uuid4(), "idempotency_key": f"idem-{uuid4()}"}
     )
-    duplicate = duplicate.model_copy(update={"expected_case_revision": 6})
+    duplicate = duplicate.model_copy(update={"expected_case_revision": 8})
     with pytest.raises(FoundationProtocolError) as error:
         foundation.execute(duplicate)
     assert error.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
@@ -555,7 +774,7 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
         assert connection.execute(
             select(func.count()).select_from(tables["workshop_artifact_confirmations"])
         ).scalar_one() == 1
-        assert connection.execute(select(func.count()).select_from(audit_events)).scalar_one() == 6
+        assert connection.execute(select(func.count()).select_from(audit_events)).scalar_one() == 7
 
 
 def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependencies(tmp_path):
@@ -681,3 +900,423 @@ def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependenci
     guidance = c.AdmittedGuidance.model_validate_json(payload)
     assert guidance.recommended_question.question_id == question.foundation_id
     assert c.GuidanceInvalidationTrigger.SOURCE_SET_CHANGED in guidance.invalidation_triggers
+
+
+def test_full_spec_then_technical_contract_validation_projection_and_exact_lineage(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    factory = PayloadFactory()
+
+    def synthesize(artifact_type: str, revision: int, confirmed_spec=None):
+        filename = (
+            "spec-package-payload.schema.json"
+            if artifact_type == "SPEC_PACKAGE"
+            else "technical-contract-payload.schema.json"
+        )
+        payload = factory.payload(filename)
+        # The fixture has no evidence entries. Give Foundation a complete plan
+        # for every payload-owned UUID while preserving non-identity references.
+        identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+        plan = foundation.issue_artifact_identity_plan(
+            CASE_ID, artifact_type, tuple(identity_kinds.values())
+        )
+        payload = bind_planned_identities(
+            payload,
+            {
+                original: planned.foundation_id
+                for original, planned in zip(
+                    identity_kinds, plan.planned_identities, strict=True
+                )
+            },
+        )
+        _bind_fixture_refs(
+            payload,
+            None
+            if confirmed_spec is None
+            else json.loads(confirmed_spec.canonical_payload_json),
+        )
+        # The current schemas call semantic identifiers `id`; the Foundation
+        # guard also requires every planned identity to occur in provider JSON.
+        run_id = uuid4()
+        values = dict(
+            analyzer_run_id=run_id,
+            context_id=CONTEXT_ID,
+            request_hash=REQUEST_HASH,
+            source_set_hash=SOURCE_SET_HASH,
+            based_on_case_revision=revision,
+            foundation_artifact_id=plan.target.foundation_artifact_id,
+            identity_plan_id=plan.identity_plan_id,
+            identity_plan_version=plan.identity_plan_version,
+            semantic_state_hash=plan.semantic_state_hash,
+            candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            payload_schema_version="4.0.0",
+        )
+        if artifact_type == "SPEC_PACKAGE":
+            candidate = c.SpecPackageSynthesisCandidate(
+                **values,
+                output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+                payload_schema_id="spec-package-payload",
+            )
+            command_values = _base(revision)
+            command_values.update(
+                command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+                target=plan.target,
+                identity_plan=plan,
+                provider_request_hash=REQUEST_HASH,
+                candidate=candidate,
+            )
+            receipt = foundation.execute(c.AdmitSpecPackageSynthesisCommand(**command_values))
+        else:
+            candidate = c.TechnicalContractSynthesisCandidate(
+                **values,
+                output_type="TECHNICAL_CONTRACT_SYNTHESIS_CANDIDATE",
+                payload_schema_id="technical-contract-payload",
+            )
+            command_values = _base(revision)
+            command_values.update(
+                command_type="ADMIT_TECHNICAL_CONTRACT_SYNTHESIS",
+                target=plan.target,
+                identity_plan=plan,
+                confirmed_spec=confirmed_spec,
+                provider_request_hash=REQUEST_HASH,
+                candidate=candidate,
+            )
+            receipt = foundation.execute(c.AdmitTechnicalContractSynthesisCommand(**command_values))
+        return receipt, payload
+
+    spec_admitted, spec_payload = synthesize("SPEC_PACKAGE", 4)
+    spec_audit = _admit_quality(foundation, "SPEC_PACKAGE")
+    assert spec_audit.outcome is q.AuditOutcome.PASS
+    review_values = _base(6)
+    review_values.update(
+        command_type="MATERIALIZE_ARTIFACT_REVIEW",
+        subject=c.ArtifactReviewSubjectBinding(
+            artifact_type="SPEC_PACKAGE",
+            artifact_id=spec_admitted.artifact_id,
+            artifact_key=spec_admitted.artifact_key,
+            artifact_version=spec_admitted.artifact_version,
+            record_revision=spec_audit.resulting_record_revision,
+            payload_hash=spec_admitted.payload_hash,
+        ),
+        view_mode="REVIEW",
+    )
+    spec_review = foundation.execute(c.MaterializeArtifactReviewCommand(**review_values))
+    projection = foundation.current_artifact_review(CASE_ID)
+    assert projection["view"]["view_type"] == "spec_package_view"
+    assert projection["view"]["projection_integrity"]["all_material_items_included"] is True
+    transcript = _transcript_command(7, 1, "I confirm the exact Spec Package review.")
+    foundation.execute(transcript)
+    confirm_values = _base(8, actor=PM_ID)
+    confirm_values.update(
+        command_type="CONFIRM_ARTIFACT",
+        actor_authentication=c.VerbalSelfAssertion(
+            authentication_method=c.ActorAuthenticationMethod.VERBAL_SELF_ASSERTION,
+            assurance_level=c.AssuranceLevel.SELF_ASSERTED,
+            actor_id=PM_ID,
+            asserted_display_name="PM",
+            claimed_role="Product Manager",
+            assertion_transcript_event_id=transcript.transcript.event_id,
+        ),
+        binding=c.ArtifactConfirmationBinding(
+            artifact_type="SPEC_PACKAGE",
+            artifact_id=spec_admitted.artifact_id,
+            artifact_key=spec_admitted.artifact_key,
+            artifact_version=1,
+            record_revision=projection["view"]["source"]["record_revision"],
+            payload_hash=spec_admitted.payload_hash,
+            confirmation_id=spec_review.confirmation_id,
+            view_id=spec_review.view_id,
+            view_hash=spec_review.view_hash,
+        ),
+        confirmation_transcript_event_id=transcript.transcript.event_id,
+        approved_exception_ids=(),
+    )
+    foundation.execute(c.ConfirmArtifactCommand(**confirm_values))
+    exact = foundation.confirmed_spec_binding(CASE_ID)
+    assert exact is not None
+    assert json.loads(exact.canonical_payload_json) == spec_payload
+
+    technical_admitted, _ = synthesize("TECHNICAL_CONTRACT", 9, exact)
+    technical_audit = _admit_quality(foundation, "TECHNICAL_CONTRACT")
+    assert technical_audit.outcome is q.AuditOutcome.PASS
+    review_values = _base(11)
+    review_values.update(
+        command_type="MATERIALIZE_ARTIFACT_REVIEW",
+        subject=c.ArtifactReviewSubjectBinding(
+            artifact_type="TECHNICAL_CONTRACT",
+            artifact_id=technical_admitted.artifact_id,
+            artifact_key=technical_admitted.artifact_key,
+            artifact_version=1,
+            record_revision=technical_audit.resulting_record_revision,
+            payload_hash=technical_admitted.payload_hash,
+        ),
+        view_mode="REVIEW",
+    )
+    technical_review = foundation.execute(c.MaterializeArtifactReviewCommand(**review_values))
+    projection = foundation.current_artifact_review(CASE_ID)
+    assert projection["view"]["view_type"] == "technical_contract_view"
+    with engine_for(url).connect() as connection:
+        assert connection.execute(
+            select(func.count())
+            .select_from(WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"])
+            .where(
+                WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"].c.case_id
+                == str(CASE_ID),
+                WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"].c.current == 1,
+            )
+        ).scalar_one() == 1
+    source = projection["view"]["source"]
+    assert source["confirmed_spec_artifact_id"] == str(exact.foundation_artifact_id)
+    assert source["confirmed_spec_record_revision"] == exact.record_revision
+    assert source["confirmed_spec_confirmation_id"] == str(exact.confirmation_id)
+
+    transcript2 = _transcript_command(12, 2, "I approve the exact Technical Contract review.", actor=DEV_ID)
+    foundation.execute(transcript2)
+    tech_confirm_values = _base(13, actor=DEV_ID)
+    tech_confirm_values.update(
+        command_type="CONFIRM_ARTIFACT",
+        actor_authentication=c.VerbalSelfAssertion(
+            authentication_method=c.ActorAuthenticationMethod.VERBAL_SELF_ASSERTION,
+            assurance_level=c.AssuranceLevel.SELF_ASSERTED,
+            actor_id=DEV_ID,
+            asserted_display_name="Dev Lead",
+            claimed_role="Development Lead",
+            assertion_transcript_event_id=transcript2.transcript.event_id,
+        ),
+        binding=c.ArtifactConfirmationBinding(
+            artifact_type="TECHNICAL_CONTRACT",
+            artifact_id=technical_admitted.artifact_id,
+            artifact_key=technical_admitted.artifact_key,
+            artifact_version=1,
+            record_revision=projection["view"]["source"]["record_revision"],
+            payload_hash=technical_admitted.payload_hash,
+            confirmation_id=technical_review.confirmation_id,
+            view_id=technical_review.view_id,
+            view_hash=technical_review.view_hash,
+        ),
+        confirmation_transcript_event_id=transcript2.transcript.event_id,
+        approved_exception_ids=(),
+    )
+    confirmed = foundation.execute(c.ConfirmArtifactCommand(**tech_confirm_values))
+    assert foundation.execute(c.ConfirmArtifactCommand(**tech_confirm_values)) == confirmed
+    assert WorkshopFoundationService(url, now=lambda: NOW).confirmed_artifact(
+        CASE_ID, "TECHNICAL_CONTRACT"
+    )["payload_hash"] == technical_admitted.payload_hash
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        ("stale_request", c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED),
+        ("unknown_pointer", c.FoundationRejectionCode.UNKNOWN_REFERENCE),
+        ("unknown_evidence", c.FoundationRejectionCode.UNKNOWN_REFERENCE),
+    ],
+)
+def test_quality_attestation_bindings_and_references_fail_closed(
+    tmp_path, mutation, expected_code
+):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    candidate = all_pass_candidate(bundle)
+    if mutation == "stale_request":
+        candidate = candidate.model_copy(update={"request_hash": "sha256:" + "f" * 64})
+    else:
+        first = candidate.assessments[0]
+        if mutation == "unknown_pointer":
+            first = first.model_copy(update={"artifact_pointers": ("/missing",)})
+        else:
+            first = first.model_copy(update={"evidence_ids": (uuid4(),)})
+        candidate = candidate.model_copy(
+            update={"assessments": (first, *candidate.assessments[1:])}
+        )
+    with pytest.raises(FoundationProtocolError) as caught:
+        _admit_quality_candidate(foundation, bundle, candidate)
+    assert caught.value.code is expected_code
+    assert foundation.case_revision(CASE_ID) == bundle.based_on_case_revision
+
+
+def test_quality_abstention_is_reviewable_but_cannot_enter_confirmation_gate(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    candidate = all_pass_candidate(bundle)
+    abstained = candidate.assessments[0].model_copy(
+        update={
+            "result": q.SemanticAssessmentResult.ABSTAIN,
+            "artifact_pointers": (),
+            "explanation": "The evaluator cannot establish this semantic rule.",
+        }
+    )
+    candidate = candidate.model_copy(
+        update={"assessments": (abstained, *candidate.assessments[1:])}
+    )
+    receipt = _admit_quality_candidate(foundation, bundle, candidate)
+    assert receipt.outcome is not q.AuditOutcome.PASS
+    abstained_result = next(
+        item
+        for item in receipt.combined_rule_results
+        if item.rule_id == abstained.rule_id
+    )
+    assert abstained_result.result is q.ComponentResult.FAIL
+
+    record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    review_values = _base(foundation.case_revision(CASE_ID))
+    review_values.update(
+        command_type="MATERIALIZE_ARTIFACT_REVIEW",
+        subject=c.ArtifactReviewSubjectBinding(
+            artifact_type="SPEC_PACKAGE",
+            artifact_id=UUID(record["artifact_id"]),
+            artifact_key=record["artifact_key"],
+            artifact_version=record["artifact_version"],
+            record_revision=record["record_revision"],
+            payload_hash=record["payload_hash"],
+        ),
+        view_mode="REVIEW",
+    )
+    review = foundation.execute(c.MaterializeArtifactReviewCommand(**review_values))
+    assert review.receipt_type == "ARTIFACT_REVIEW"
+    current = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    with foundation.engine.begin() as connection:
+        with pytest.raises(FoundationProtocolError) as caught:
+            foundation.quality_audit_for_record(
+                connection, current, require_pass=True
+            )
+    assert caught.value.code is c.FoundationRejectionCode.INVALID_TRANSITION
+
+
+def test_quality_provider_mapping_and_admitted_receipt_survive_restart(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+
+    restarted = WorkshopFoundationService(url, now=lambda: NOW)
+    provider = restarted.artifact_quality_provider_context(bundle.audit_id)
+    assert provider == {
+        "provider": "OPENAI",
+        "model": "gpt-5.6-terra",
+        "reasoning_effort": "medium",
+        "provider_conversation_id": f"conv_negative_{str(bundle.audit_id)[:12]}",
+        "client_request_id": f"aqa-negative-{bundle.request_hash[7:23]}",
+        "started_at": NOW.isoformat().replace("+00:00", "Z"),
+    }
+    admitted = _admit_quality_candidate(
+        restarted, bundle, all_pass_candidate(bundle)
+    )
+    assert admitted.replayed is False
+
+    after_restart = WorkshopFoundationService(url, now=lambda: NOW)
+    replay = after_restart.prepare_artifact_quality_audit(
+        q.PrepareArtifactQualityAuditCommand(
+            protocol_version=q.PROTOCOL_VERSION,
+            command_id=quality_stable_id(bundle.audit_id, "prepare-negative"),
+            idempotency_key=f"quality-negative-prepare-{bundle.audit_id}",
+            expected_case_revision=bundle.based_on_case_revision,
+            bundle=bundle,
+        )
+    )
+    assert replay.existing_receipt is not None
+    assert replay.existing_receipt.replayed is True
+    assert replay.existing_receipt.model_copy(update={"replayed": False}) == admitted
+
+
+@pytest.mark.parametrize("shape", ["missing", "duplicate"])
+def test_semantic_attestation_requires_exactly_one_result_per_semantic_rule(shape):
+    # Use a complete runtime-shaped bundle from the strict contract fixture.
+    rules = tuple(
+        q.SemanticRuleAssessment(
+            rule_id=f"SPEC-Q-{index:03d}",
+            result=q.SemanticAssessmentResult.PASS,
+            explanation="The complete payload supports this rule.",
+            applicability_reason=None,
+            artifact_pointers=("",),
+            evidence_ids=(),
+            transcript_event_ids=(),
+            findings=(),
+        )
+        for index in range(1, 22)
+    )
+    if shape == "missing":
+        invalid = rules[:-1]
+    else:
+        invalid = (*rules[:-1], rules[0])
+    with pytest.raises(ValueError):
+        q.ArtifactSemanticAttestationCandidate(
+            protocol_version=q.PROTOCOL_VERSION,
+            output_type="ARTIFACT_SEMANTIC_ATTESTATION_CANDIDATE",
+            audit_id=uuid4(),
+            evaluator_run_id=uuid4(),
+            request_hash="sha256:" + "1" * 64,
+            artifact_id=uuid4(),
+            artifact_version=1,
+            record_revision=1,
+            payload_hash="sha256:" + "2" * 64,
+            audit_scope_manifest_hash="sha256:" + "3" * 64,
+            semantic_quality_contract_hash="sha256:" + "4" * 64,
+            assessments=invalid,
+        )
+
+
+@pytest.mark.parametrize("plan_error", ["wrong_kind", "missing_identity"])
+def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_error):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID, "SPEC_PACKAGE", tuple(identity_kinds.values())
+    )
+    payload = bind_planned_identities(
+        payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds, plan.planned_identities, strict=True
+            )
+        },
+    )
+    identities = list(plan.planned_identities)
+    if plan_error == "wrong_kind":
+        identities[0] = identities[0].model_copy(update={"entity_kind": "COMPONENT"})
+    else:
+        identities.pop()
+    invalid_plan = plan.model_copy(update={"planned_identities": tuple(identities)})
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.0",
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=invalid_plan,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+    with pytest.raises(FoundationProtocolError) as exc:
+        foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
+    assert exc.value.code is c.FoundationRejectionCode.IDENTITY_PLAN_FAILED
+    assert foundation.case_revision(CASE_ID) == 4
+    with engine_for(url).connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(
+                WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+            )
+        ).scalar_one() == 0

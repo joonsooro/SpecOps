@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from specops_workflow import FrozenClock
-from specops_workshop.api import create_app
+from specops_workshop.legacy_test_app import create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
 from specops_workshop.delegation import (
     DEV_LEAD_ACTOR_ID,

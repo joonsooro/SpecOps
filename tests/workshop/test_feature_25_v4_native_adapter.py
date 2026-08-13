@@ -41,7 +41,7 @@ def _contract() -> c.AnalyzerContractBinding:
         instruction_set_version=1,
         instruction_set_hash=ZERO_HASH,
         semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-        semantic_quality_contract_version="2.0.0",
+        semantic_quality_contract_version="2.1.0",
         semantic_quality_contract_hash=ONE_HASH,
         provider_schema_version="1.0.0",
         model="gpt-5.6-terra",
@@ -167,7 +167,13 @@ class _FakeFiles:
 
     async def create(self, **kwargs):
         self.owner.file_calls.append(kwargs)
+        if self.owner.fail_file_call == len(self.owner.file_calls):
+            raise ConnectionError("fixture content must never escape diagnostics")
         return SimpleNamespace(id=f"file_{len(self.owner.file_calls)}")
+
+    async def delete(self, file_id, **kwargs):
+        self.owner.deleted_files.append((file_id, kwargs))
+        return SimpleNamespace(id=file_id, deleted=True)
 
 
 class _FakeConversations:
@@ -176,11 +182,17 @@ class _FakeConversations:
 
     async def create(self, **kwargs):
         self.owner.conversation_calls.append(kwargs)
+        if self.owner.fail_conversation:
+            raise ConnectionError("fixture content must never escape diagnostics")
         return SimpleNamespace(id="conv_workshop")
 
     async def retrieve(self, conversation_id, **kwargs):
         self.owner.retrieve_calls.append((conversation_id, kwargs))
         return SimpleNamespace(id=conversation_id)
+
+    async def delete(self, conversation_id, **kwargs):
+        self.owner.deleted_conversations.append((conversation_id, kwargs))
+        return SimpleNamespace(id=conversation_id, deleted=True)
 
 
 class _FakeResponses:
@@ -203,6 +215,10 @@ class FakeOpenAI:
         self.retrieve_calls = []
         self.response_calls = []
         self.outputs = []
+        self.deleted_files = []
+        self.deleted_conversations = []
+        self.fail_file_call = None
+        self.fail_conversation = False
         self.files = _FakeFiles(self)
         self.conversations = _FakeConversations(self)
         self.responses = _FakeResponses(self)
@@ -224,6 +240,42 @@ def test_all_six_native_schemas_are_openai_strict_root_objects():
 
 def test_stored_conversation_bootstrap_uploads_exactly_two_files_and_reuses_conversation():
     asyncio.run(_stored_conversation_bootstrap_case())
+
+
+def test_prepare_failure_cleans_partial_upload_without_content_diagnostics():
+    async def scenario():
+        fake = FakeOpenAI()
+        fake.fail_file_call = 2
+        adapter = StoredConversationOpenAIAdapter(api_key="unused", client=fake, now=lambda: NOW)
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+            _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical-contract.md", b"private technical source"),
+        )
+        with pytest.raises(ProviderAdapterError) as captured:
+            await adapter.prepare_context(sources)
+        assert [value[0] for value in fake.deleted_files] == ["file_1"]
+        assert "private" not in captured.value.receipt.model_dump_json()
+
+    asyncio.run(scenario())
+
+
+def test_release_context_deletes_conversation_and_both_uploaded_files():
+    async def scenario():
+        fake = FakeOpenAI()
+        adapter = StoredConversationOpenAIAdapter(api_key="unused", client=fake, now=lambda: NOW)
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+            _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical-contract.md", b"Technical source"),
+        )
+        prepared = await adapter.prepare_context(sources)
+        request = _bootstrap_request(prepared)
+        fake.outputs.append(_brief(request).model_dump_json())
+        context = (await adapter.bootstrap(request, prepared=prepared, session_id=SESSION_ID)).context
+        await adapter.release_context(context)
+        assert [value[0] for value in fake.deleted_conversations] == ["conv_workshop"]
+        assert [value[0] for value in fake.deleted_files] == ["file_1", "file_2"]
+
+    asyncio.run(scenario())
 
 
 async def _stored_conversation_bootstrap_case():

@@ -10,7 +10,7 @@ from sqlalchemy.exc import DatabaseError
 
 from specops_workflow import FrozenClock
 from specops_workflow.models import AddParticipantCommand, AuditQuery, QueryOne
-from specops_workshop.api import DEMO_SESSION_ID, create_app
+from specops_workshop.legacy_test_app import DEMO_SESSION_ID, create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
 from specops_workshop.contracts import OutboxStatus, WorkshopState
 from specops_workshop.orchestration import WorkshopCoordinator

@@ -341,7 +341,7 @@
           "const": "SEMANTIC-QUALITY-CONTRACT"
         },
         "version": {
-          "const": "2.0.0"
+          "const": "2.1.0"
         }
       },
       "required": [
@@ -405,7 +405,7 @@
           "uniqueItems": true
         },
         "quality_contract_version": {
-          "const": "2.0.0"
+          "const": "2.1.0"
         },
         "result": {
           "enum": [

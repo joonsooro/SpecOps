@@ -1,0 +1,805 @@
+contract:
+  id: SEMANTIC-QUALITY-CONTRACT
+  version: "2.1.0"
+  purpose: >-
+    Define the semantic conditions under which a Spec Package may be confirmed
+    and a Technical Contract may enter downstream handoff.
+  normative_terms:
+    must: Required for the applicable readiness gate.
+    should: Required unless an explicit, authorized exception is recorded.
+    may: Optional and non-blocking.
+  check_types:
+    structural: Deterministic shape, type, presence, and allowed-value validation.
+    referential: Deterministic identity, uniqueness, reference, version, and hash validation.
+    semantic: Analyzer evaluation of meaning, completeness, clarity, consistency, and testability.
+    authority: Foundation validation of actor authority, delegation, and approval domain.
+    human: Explicit human confirmation or approval of an exact item or artifact version.
+  failure_effects:
+    NEEDS_CLARIFICATION: A human-answerable ambiguity or missing product decision remains.
+    BLOCKED: Required evidence, authority, approval, or feasible technical resolution is unavailable.
+    CONDITIONAL: The artifact may exist, but downstream use is restricted by named obligations.
+    REJECT_MUTATION: The proposed change is stale, duplicate, unauthorized, or unsupported.
+  evaluation_policy:
+    - Analyzer evaluates semantic rules and proposes findings with exact artifact references.
+    - Foundation independently enforces structural, referential, authority, freshness, and gate rules.
+    - Canonical artifacts are JSON envelopes whose payloads map directly to Pydantic models.
+    - Human-facing read models are semantically deterministic projections with unique materialization metadata and never become canonical state.
+    - Every materialized review projection has a unique Foundation-minted view ID; confirmation or approval binds that view ID and its content hash.
+    - A semantic pass is invalid if it lacks the evidence of pass required by the rule.
+    - Analyzer determines semantic applicability; Foundation admits the version-bound result only when its shape, identity, freshness, and configured gate policy are valid.
+    - Not-applicable results require a written Analyzer applicability reason bound to the exact rule and artifact version.
+    - Rules marked block_confirmation must pass before the Spec Package can be confirmed.
+    - Rules marked block_handoff must pass before the Technical Contract can enter downstream handoff.
+    - Artifact Quality Audit Protocol 1.0.0 defines the complete evaluator request, attestation binding, mixed-rule reduction, and ordered gate phases.
+    - Every rule whose check_types contains semantic receives exactly one version-bound Analyzer assessment, including a Foundation-primary mixed rule.
+    - Foundation executes every applicable structural, referential, and authority subcheck, including an Analyzer-primary mixed rule; human subchecks are satisfied only by exact Foundation confirmation or approval records.
+    - A mixed rule passes only when its semantic assessment and every applicable Foundation and human subcheck pass.
+    - Missing, duplicate, stale, abstaining, invalidly evidenced, or unequal-bound semantic assessments fail closed.
+    - Payload audit precedes review projection validation; confirmation and handoff rules execute only inside the exact atomic human mutation and cannot be pre-passed by an Analyzer.
+spec_package_rules:
+  - id: SPEC-Q-001
+    name: Exact artifact identity
+    dimension: integrity
+    check_types: [structural, referential]
+    gate: block_confirmation
+    primary_evaluator: foundation
+    requirement: >-
+      The Spec Package envelope must name its protocol and schema versions, artifact ID,
+      artifact and record versions, Foundation case-revision binding, exact lineage hashes, and payload hash.
+    pass_condition: >-
+      Every required identity field is present; all hashes validate; the artifact version
+      is current; and no input source has changed since the audit began.
+    evidence_of_pass: Foundation validation record containing resolved source identities and hashes.
+    failure_effect: REJECT_MUTATION
+
+  - id: SPEC-Q-002
+    name: Specific problem and customer
+    dimension: product_thesis
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      The primary customer and problem must identify who is affected, the situation in
+      which the problem occurs, the observable harm, and why the current alternative is inadequate.
+    pass_condition: >-
+      A reviewer unfamiliar with the workshop can distinguish the target customer and
+      problem from adjacent customers and problems without inference.
+    evidence_of_pass: Product thesis plus actor and scope references supporting every distinguishing claim.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-003
+    name: Outcome-oriented promise and negative contract
+    dimension: product_thesis
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      The customer promise must state the observable result delivered to the customer;
+      the negative contract must state the trust-breaking outcomes the product must never produce.
+    pass_condition: >-
+      Both statements can be evaluated from externally observable behavior and contain no
+      unbounded terms such as easy, fast, reliable, appropriate, or seamless.
+    evidence_of_pass: Promise and negative-contract text linked to outcomes, requirements, and acceptance checks.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-004
+    name: Actors, permissions, and decision authority are explicit
+    dimension: actors
+    check_types: [semantic, authority, referential]
+    gate: block_confirmation
+    primary_evaluator: foundation
+    requirement: >-
+      Every actor appearing in a requirement, journey, scenario, or decision must have a
+      defined role, relevant permissions, responsibility, and declared decision domains.
+    pass_condition: >-
+      All actor references resolve, permissions needed by behavior are named, and every
+      binding decision has a Foundation-valid authority or delegation record.
+    evidence_of_pass: Resolved actor references and Foundation authority-validation IDs.
+    failure_effect: BLOCKED
+
+  - id: SPEC-Q-005
+    name: Domain terms are bounded
+    dimension: glossary
+    check_types: [semantic, referential]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every domain-specific term, overloaded noun, status, threshold label, time window,
+      and qualifier material to behavior must have one unambiguous definition and boundary.
+    pass_condition: >-
+      No entity is referenced before definition, no material term has competing meanings,
+      and every numeric or temporal qualifier states unit, direction, inclusivity, and boundary.
+    evidence_of_pass: Glossary entries and zero blocking ambiguity findings for undefined entities or qualifiers.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-006
+    name: Scope is closed and non-overlapping
+    dimension: scope
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      In-scope capabilities, non-goals, and boundaries must distinguish included behavior
+      from plausible adjacent behavior.
+    pass_condition: >-
+      No requirement contradicts a non-goal; each boundary states both its inside and outside;
+      and a reasonable implementer cannot expand scope without an explicit change decision.
+    evidence_of_pass: Scope items, non-goals, boundaries, and contradiction scan.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-007
+    name: Requirements are atomic and observable
+    dimension: requirements
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Each requirement must contain one obligation with actors, trigger, preconditions,
+      observable behavior, observable outcome, and explicit exclusions.
+    pass_condition: >-
+      Each requirement can independently pass or fail; contains no bundled unrelated behavior;
+      and does not rely on unstated implementation to determine its meaning.
+    evidence_of_pass: Field-level requirement assessment with a pass/fail result per requirement.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-008
+    name: Requirements support declared outcomes
+    dimension: outcomes
+    check_types: [semantic, referential]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: Every requirement must support at least one declared customer or business outcome.
+    pass_condition: >-
+      Every requirement has a valid outcome reference and the stated behavior has a credible,
+      explainable contribution to that outcome.
+    evidence_of_pass: Requirement-to-outcome traceability edges with Analyzer explanations.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-009
+    name: Requirements have exact evidence and decision provenance
+    dimension: evidence
+    check_types: [referential]
+    gate: block_confirmation
+    primary_evaluator: foundation
+    requirement: >-
+      Every must-level requirement must bind exact admitted source evidence, an authorized
+      confirmed decision, or both.
+    pass_condition: >-
+      Every source identity, version, source hash, locator, and excerpt hash resolves; every
+      decision reference resolves to the exact current confirmed record; and all bindings are current and authorized.
+    evidence_of_pass: Foundation evidence-admission, locator-resolution, integrity, freshness, authorization, and decision-binding record.
+    failure_effect: BLOCKED
+
+  - id: SPEC-Q-010
+    name: Decisions are explicit and justified
+    dimension: decisions
+    check_types: [semantic, authority, human]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every binding decision must record the question, chosen answer, rationale, material
+      alternatives, affected items, evidence, authorized decision-maker, and explicit confirmation.
+    pass_condition: >-
+      The rationale explains why the selected option better satisfies outcomes or constraints;
+      alternatives are real options rather than strawmen; and confirmation covers the exact normalized decision.
+    evidence_of_pass: >-
+      Decision record plus exact decision version, confirmation ID, immutable decision-batch view ID/hash,
+      review item ID, transcript event, confirmer actor, authority validation, and committed case revision.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-011
+    name: Conflicts are resolved, not blended
+    dimension: consistency
+    check_types: [semantic, authority]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Conflicting claims from the business draft, technical draft, evidence, or workshop
+      must be resolved by an authorized decision or retained as a blocking open item.
+    pass_condition: >-
+      No confirmed artifact statement simultaneously preserves incompatible claims and no
+      conflict is hidden through vague wording.
+    evidence_of_pass: Conflict register with resolution decision or blocking item for every conflict.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-012
+    name: Behaviour contract protects the trust boundary
+    dimension: behaviour_contract
+    check_types: [semantic, referential]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Always, Ask First, and Never rules must capture invariant behavior, controlled changes,
+      and prohibited trust-breaking outcomes relevant to the feature.
+    pass_condition: >-
+      Every rule has a concrete trigger and obligation, traces to requirements and provenance,
+      and has at least one acceptance or scenario path that can expose a violation.
+    evidence_of_pass: Rule traceability and negative-path coverage report.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-013
+    name: Risk-based scenario coverage is complete
+    dimension: scenarios
+    check_types: [semantic, referential]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      The Spec Package must cover the main happy path and all material edge, failure, abuse,
+      and recovery conditions implied by data, permissions, dependencies, concurrency, and trust boundaries.
+    pass_condition: >-
+      Every must-level requirement has happy-path coverage and every high-impact requirement or
+      risk has applicable negative-path coverage; omitted scenario classes have accepted applicability reasons.
+    evidence_of_pass: Requirement-risk-scenario coverage matrix.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-014
+    name: User-visible states are complete
+    dimension: experience
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every user-facing surface must define all applicable initial, loading, empty, success,
+      partial, failure, unauthorized, expired, and disabled states, including recovery behavior.
+    pass_condition: >-
+      No observable workflow state leaves the user without a defined status, next action, or
+      truthful explanation; partial or failed work is never represented as complete.
+    evidence_of_pass: Surface-by-state applicability matrix with scenario and requirement links.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-015
+    name: Product data semantics are complete
+    dimension: data
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every product-visible data element must define source of truth, meaning, inclusion rules,
+      null behavior, classification, retention expectation, and temporal semantics where applicable.
+    pass_condition: >-
+      Two conforming implementations using the Spec Package would select and represent the same
+      product data for the same inputs.
+    evidence_of_pass: Data-rule assessment and boundary acceptance checks.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-016
+    name: Quality attributes are measurable
+    dimension: quality_attributes
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every quality attribute must state stimulus, operating environment, measure, numeric or
+      binary target, measurement window, and consequence of missing the target.
+    pass_condition: >-
+      A verifier can determine pass or fail without interpreting words such as fast, scalable,
+      secure, accessible, resilient, or reliable.
+    evidence_of_pass: Quality-attribute field assessment and linked acceptance checks.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-017
+    name: Acceptance checks are executable in principle
+    dimension: acceptance
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every acceptance check must state explicit preconditions, one stimulus, observable expected
+      results, applicable prohibited outcomes, and an evidence method.
+    pass_condition: >-
+      An independent verifier can produce a binary result from the check without inventing test
+      data semantics, thresholds, user identity, timing, or expected behavior.
+    evidence_of_pass: Acceptance-check lint report with one result per field and check.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-018
+    name: Acceptance coverage is complete
+    dimension: acceptance
+    check_types: [referential, semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every must-level requirement, Never rule, data invariant, and measurable quality attribute
+      must be covered by at least one acceptance check.
+    pass_condition: >-
+      Coverage is 100 percent for the required item classes and every check references at least one requirement.
+    evidence_of_pass: Complete bidirectional item-to-check coverage matrix.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-019
+    name: Open items are governed
+    dimension: readiness
+    check_types: [structural, authority]
+    gate: block_confirmation
+    primary_evaluator: foundation
+    requirement: >-
+      Every unresolved item must state its exact question, blocking status, reason, required approval
+      domain, owner, due date, and downstream effect.
+    pass_condition: >-
+      No confirmed Spec Package contains an open blocking item; every non-blocking open item has a
+      valid owner, due date, and Foundation-accepted downstream restriction.
+    evidence_of_pass: Foundation open-item validation and zero blocking-open-item count.
+    failure_effect: BLOCKED
+
+  - id: SPEC-Q-020
+    name: Package-item and semantic traceability is complete
+    dimension: traceability
+    check_types: [referential, semantic]
+    gate: block_confirmation
+    primary_evaluator: foundation
+    requirement: >-
+      Package-item references and required relationships among outcomes, requirements, rules,
+      scenarios, decisions, evidence, risks, and acceptance checks must resolve without orphan items.
+    pass_condition: >-
+      All IDs are unique; every requirement, decision, and acceptance check belongs to at least one
+      package item; every package-item reference resolves; exactly one current governance record matches
+      each package item and item version; required relationship coverage is complete; and no semantic item
+      exists only as unlinked prose.
+    evidence_of_pass: Foundation package-item and semantic-graph validation report.
+    failure_effect: BLOCKED
+
+  - id: SPEC-Q-021
+    name: Product contract is implementation-neutral
+    dimension: separation_of_concerns
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      The Spec Package must state observable behavior and binding constraints without selecting
+      architecture, libraries, internal components, or algorithms unless that choice is itself an approved constraint.
+    pass_condition: >-
+      Removing non-binding implementation suggestions does not change the customer contract, and
+      every retained implementation-specific statement references a binding constraint decision.
+    evidence_of_pass: Implementation-detail scan with decision references for retained constraints.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-022
+    name: Ambiguity audit is clean
+    dimension: ambiguity
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      The final artifact must contain no referenced-before-defined entity, unspecified required action,
+      unbounded material qualifier, unresolved contradiction, or missing binding decision.
+    pass_condition: The readiness audit contains zero blocking ambiguity findings.
+    evidence_of_pass: Version-matched ambiguity audit.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-023
+    name: Cross-section semantics are consistent
+    dimension: consistency
+    check_types: [semantic]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Product thesis, scope, journeys, requirements, rules, data semantics, scenarios, quality targets,
+      decisions, and acceptance checks must describe one compatible behavior model.
+    pass_condition: >-
+      No two active items prescribe different outcomes for the same conditions and all repeated values
+      such as thresholds, statuses, permissions, dates, and schemas are identical or explicitly contextualized.
+    evidence_of_pass: Cross-section contradiction and repeated-value report.
+    failure_effect: NEEDS_CLARIFICATION
+
+  - id: SPEC-Q-024
+    name: Confirmation binds the exact audited content
+    dimension: confirmation
+    check_types: [referential, authority, human]
+    gate: block_confirmation
+    primary_evaluator: foundation
+    requirement: >-
+      PM confirmation must identify the exact artifact ID, version, record revision, committed case revision, semantic hash,
+      immutable review view ID, review view hash, and approved exceptions, and must occur after the matching readiness audit.
+    pass_condition: >-
+      The confirmer has valid authority; the confirmation's artifact and view bindings resolve to the exact
+      current Foundation records; the stored view passed completeness validation; the audit version equals
+      the confirmed artifact version; and no mutation occurred between audit, display, and confirmation.
+    evidence_of_pass: Foundation confirmation record, stored review projection, and audit/display ordering proof.
+    failure_effect: REJECT_MUTATION
+
+  - id: SPEC-Q-025
+    name: Human review projection is faithful
+    dimension: presentation_integrity
+    check_types: [structural, referential]
+    gate: block_confirmation
+    primary_evaluator: foundation
+    requirement: >-
+      Any draft, review, diff, or final read model shown for confirmation must be generated from
+      the exact canonical payload and governance record without adding, changing, or hiding material semantics.
+    pass_condition: >-
+      The read model has a unique immutable view ID and binds to the current artifact ID, version,
+      record revision, and payload hash; its projection-integrity view ID equals its top-level view ID;
+      every displayed semantic entry resolves through its canonical pointer; all material package items,
+      blocking queues, later-review obligations, and evidence references are included; and no displayed claim lacks a canonical source.
+    evidence_of_pass: Foundation projection-validation record, view ID, payload hash, view hash, and complete pointer coverage report.
+    failure_effect: REJECT_MUTATION
+
+  - id: SPEC-Q-026
+    name: Evidence semantically supports the claim
+    dimension: evidence
+    check_types: [semantic, referential]
+    gate: block_confirmation
+    primary_evaluator: analyzer
+    requirement: >-
+      Every must-level claim that relies on evidence must have a current Analyzer finding bound
+      to the exact claim hash, evidence record, source hash, and excerpt hash.
+    pass_condition: >-
+      The admitted finding assesses the cited evidence as SUPPORTS for the exact current claim;
+      SUGGESTS, CONTRADICTS, INSUFFICIENT, or AMBIGUOUS does not satisfy this rule.
+    evidence_of_pass: Version-bound Analyzer semantic-evidence finding admitted by Foundation under the current Analyzer contract.
+    failure_effect: NEEDS_CLARIFICATION
+
+technical_contract_rules:
+  - id: TECH-Q-001
+    name: Exact confirmed-spec binding
+    dimension: integrity
+    check_types: [referential]
+    gate: block_handoff
+    primary_evaluator: foundation
+    requirement: >-
+      The Technical Contract envelope must contain exactly one specialized confirmed_from lineage
+      edge with artifact type, artifact ID, artifact version, record revision, payload hash, and confirmation ID.
+    pass_condition: >-
+      The exact Spec Package revision exists; that revision contains the named confirmation; the
+      confirmation binds the same artifact ID, version, and payload hash; the Spec was confirmed at
+      that revision; confirmation authority remains valid; the confirmation is neither revoked nor
+      superseded; and Technical Contract generation began at or after that committed Foundation state.
+    evidence_of_pass: Foundation artifact-resolution record.
+    failure_effect: REJECT_MUTATION
+
+  - id: TECH-Q-002
+    name: Faithful derivation
+    dimension: derivation
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every externally observable behavior in the Technical Contract must implement a confirmed Spec Package
+      item and must not add, weaken, or contradict product behavior.
+    pass_condition: >-
+      Every externally relevant contract item has a valid Spec reference; no contract statement changes actor,
+      trigger, outcome, prohibition, threshold, permission, or acceptance meaning.
+    evidence_of_pass: Semantic diff and contract-to-spec traceability report.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-003
+    name: Promise and negative contract are copied exactly
+    dimension: intent
+    check_types: [referential]
+    gate: block_handoff
+    primary_evaluator: foundation
+    requirement: Customer promise and negative contract must be copied verbatim from the confirmed Spec Package.
+    pass_condition: Canonical string equality holds at the declared Spec JSON pointers.
+    evidence_of_pass: Foundation equality check.
+    failure_effect: REJECT_MUTATION
+
+  - id: TECH-Q-004
+    name: Architecture boundary is explicit
+    dimension: architecture
+    check_types: [semantic]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      The contract must identify the system boundary, internal and external nodes, interaction purpose,
+      data or signal crossing each interaction, and trust-boundary crossings.
+    pass_condition: >-
+      Every component and external dependency fits into the declared context and no required integration is implicit.
+    evidence_of_pass: Architecture-context completeness review.
+    failure_effect: CONDITIONAL
+
+  - id: TECH-Q-005
+    name: Component responsibilities are complete and non-overlapping
+    dimension: components
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every component must have one primary responsibility, an owner, interfaces, data ownership,
+      dependencies, failure responsibilities, and Spec items implemented.
+    pass_condition: >-
+      Every required responsibility has exactly one accountable component and overlaps identify an explicit coordination contract.
+    evidence_of_pass: Responsibility-to-component matrix.
+    failure_effect: CONDITIONAL
+
+  - id: TECH-Q-006
+    name: Interfaces are implementable without invention
+    dimension: interfaces
+    check_types: [semantic]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every interface must define producer, consumers, purpose, versioning, input, output, preconditions,
+      postconditions, error semantics, authorization, idempotency, and timeout behavior.
+    pass_condition: >-
+      Independent producer and consumer teams could implement compatible sides without choosing unstated payload,
+      error, retry, authorization, or version behavior.
+    evidence_of_pass: Interface field and compatibility review.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-007
+    name: Data contracts preserve product semantics
+    dimension: data
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every persisted or exchanged entity must define ownership, fields, types, semantics, null behavior,
+      classification, invariants, lifecycle, retention, and consistency.
+    pass_condition: >-
+      The data contract realizes every referenced Spec data rule without changing inclusion, temporal,
+      precision, identity, classification, or null semantics.
+    evidence_of_pass: Spec-data-to-contract-data comparison and field coverage report.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-008
+    name: Workflow states and transitions are total
+    dimension: workflows
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every workflow must define states, events, guarded transitions, actions, terminal states,
+      invalid-transition behavior, and concurrency behavior.
+    pass_condition: >-
+      Every reachable event in every state has a defined transition or explicit rejection, and every terminal
+      state matches a permitted Spec outcome.
+    evidence_of_pass: State-event transition coverage table.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-009
+    name: Concurrency and idempotency are explicit
+    dimension: correctness
+    check_types: [semantic]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Operations susceptible to retries, duplicate delivery, simultaneous mutation, or stale reads must define
+      idempotency identity, ordering or conflict behavior, consistency boundary, and recovery.
+    pass_condition: >-
+      Duplicate or concurrent execution cannot silently create product behavior that violates the confirmed Spec.
+    evidence_of_pass: Concurrency hazard inventory mapped to interface and workflow rules.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-010
+    name: Failures are detected, contained, and truthful
+    dimension: failure_handling
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every material failure mode must define detection, containment, user-visible behavior, retry or recovery,
+      prohibited outcomes, accountable component, and verification.
+    pass_condition: >-
+      No partial, unauthorized, corrupt, stale, or unverified result can be represented as successful.
+    evidence_of_pass: Risk/scenario-to-failure-contract coverage matrix.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-011
+    name: Security and privacy enforcement is located
+    dimension: security_privacy
+    check_types: [semantic, authority]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Authentication, authorization, data minimization, sensitive-data handling, secret handling, enforcement points,
+      fail-closed behavior, audit evidence, and verification must be explicit.
+    pass_condition: >-
+      Every protected operation and data movement has a named enforcement point and negative verification; required
+      security or privacy approvals are valid.
+    evidence_of_pass: Threat/obligation-to-control and control-to-verification matrix plus approval records.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-012
+    name: Engineering quality budgets realize Spec targets
+    dimension: quality_budgets
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every Spec quality attribute must map to an engineering metric, numeric or binary target, scope,
+      measurement point, window, failure response, owner, and verification.
+    pass_condition: >-
+      Coverage is 100 percent and satisfying the engineering budgets is sufficient to satisfy the referenced Spec targets.
+    evidence_of_pass: Spec-NFR-to-budget-to-verification traceability matrix.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-013
+    name: Substrate and dependencies are named
+    dimension: dependencies
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every required data source, persistence layer, runtime, authentication mechanism, observability system,
+      frontend system, queue/job mechanism, and other external dependency must have an exact choice or a governed obligation.
+    pass_condition: >-
+      No implementation unit must silently select a substrate; every unresolved choice is represented by an owned review obligation.
+    evidence_of_pass: Component/interface-to-dependency coverage report.
+    failure_effect: CONDITIONAL
+
+  - id: TECH-Q-014
+    name: Credentials are described but never embedded
+    dimension: secrets
+    check_types: [structural, semantic]
+    gate: block_handoff
+    primary_evaluator: foundation
+    requirement: >-
+      The contract may state access mechanism, credential status, provisioning owner, and secure storage mechanism,
+      but must contain no credential, secret, token, reusable download URL, or secret-bearing example.
+    pass_condition: Secret scan is clean and every credential-requiring dependency names secure handling.
+    evidence_of_pass: Foundation secret scan and dependency validation.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-015
+    name: Observability and audit prove contract behavior
+    dimension: observability
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Required lifecycle events, metrics, traces, audit records, alerts, safe fields, prohibited fields,
+      retention, and review actions must be defined.
+    pass_condition: >-
+      Operators can detect contract violations, investigate outcomes, and produce required evidence without exposing prohibited data.
+    evidence_of_pass: Behavior/failure/quality-budget-to-signal coverage report.
+    failure_effect: CONDITIONAL
+
+  - id: TECH-Q-016
+    name: Rollout, migration, rollback, and recovery are executable
+    dimension: delivery_safety
+    check_types: [semantic]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      The contract must define compatibility, migration behavior, controlled rollout stages, entry and success criteria,
+      rollback triggers and actions, data recovery, and evidence that recovery works.
+    pass_condition: >-
+      A release owner can stop or reverse rollout without inventing thresholds, commands, data treatment, or ownership.
+    evidence_of_pass: Operational readiness review with scenario walkthrough.
+    failure_effect: CONDITIONAL
+
+  - id: TECH-Q-017
+    name: Build units are independently actionable
+    dimension: decomposition
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every build unit must define sequence, prerequisites, inputs, outputs, done conditions, landing zone,
+      kill switch, and Spec and technical traceability.
+    pass_condition: >-
+      A delivery team can start, stop, and verify each unit without inferring product behavior or hidden dependencies.
+    evidence_of_pass: Build-unit readiness review and dependency-graph validation.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-018
+    name: Kill switches are measurable
+    dimension: decomposition
+    check_types: [semantic]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every build unit kill switch must state a detectable condition, explicit threshold, time window, and required action.
+    pass_condition: >-
+      No kill switch relies on subjective language such as too slow, too complex, unstable, or not working.
+    evidence_of_pass: Kill-switch field assessment.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-019
+    name: Verification covers the full Spec acceptance surface
+    dimension: verification
+    check_types: [referential, semantic]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every Spec acceptance check must map to at least one contract verification item with method, pass criteria,
+      expected evidence, technical scope, and owner.
+    pass_condition: >-
+      Coverage is 100 percent and the proposed method can observe every result required by the acceptance check.
+    evidence_of_pass: Bidirectional acceptance-to-verification coverage matrix.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-020
+    name: Engineering decisions are justified and product-safe
+    dimension: engineering_decisions
+    check_types: [semantic, authority]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every material engineering decision must state question, choice, rationale, alternatives, evidence,
+      authority domain, owner, status, and applicable Spec constraints.
+    pass_condition: >-
+      The decision is supported by technical evidence, respects every referenced Spec constraint, and does not
+      decide unconfirmed product behavior.
+    evidence_of_pass: Decision review with Spec semantic diff and authority validation.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-021
+    name: Review obligations are governed
+    dimension: readiness
+    check_types: [structural, authority]
+    gate: block_handoff
+    primary_evaluator: foundation
+    requirement: >-
+      Every unresolved engineering validation, architecture review, security/privacy/compliance approval,
+      operational review, or dependency provision must state blocking effect, owner, due date, completion evidence, and downstream effect.
+    pass_condition: >-
+      An approved contract has no open blocking obligation; a conditional contract has only Foundation-accepted obligations
+      whose downstream restrictions are explicitly enforced.
+    evidence_of_pass: Foundation obligation and approval validation.
+    failure_effect: CONDITIONAL
+
+  - id: TECH-Q-022
+    name: Contract traceability is complete
+    dimension: traceability
+    check_types: [referential, semantic]
+    gate: block_handoff
+    primary_evaluator: foundation
+    requirement: >-
+      Components, interfaces, data contracts, workflows, failures, controls, quality budgets, dependencies,
+      build units, decisions, and verification must have required upstream and internal relationships.
+    pass_condition: >-
+      All IDs are unique, all references resolve, no required Spec item is orphaned, and no externally relevant contract item lacks derivation.
+    evidence_of_pass: Foundation graph-validation report plus Analyzer derivation assessment.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-023
+    name: Contract is internally consistent
+    dimension: consistency
+    check_types: [semantic]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Repeated interface, field, state, timeout, retry, threshold, permission, retention, and dependency semantics
+      must be identical or explicitly contextualized throughout the contract.
+    pass_condition: >-
+      No two active contract items prescribe incompatible technical outcomes for the same conditions.
+    evidence_of_pass: Cross-section contradiction and repeated-value report.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-024
+    name: Downstream handoff is explicitly authorized
+    dimension: handoff
+    check_types: [referential, authority, human]
+    gate: block_handoff
+    primary_evaluator: foundation
+    requirement: >-
+      Foundation must derive contract readiness from this quality contract and control whether downstream handoff is allowed.
+    pass_condition: >-
+      Handoff is allowed only when all block-handoff rules pass, no blocking obligation is open,
+      required approvals are valid and bind stored review projections for the exact current artifact version,
+      record revision, payload hash, view ID, and view hash; and the contract is based on the current confirmed Spec hash.
+    evidence_of_pass: Foundation contract-readiness record, approval-to-view binding records, and handoff authorization.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-025
+    name: Human review projection is faithful
+    dimension: presentation_integrity
+    check_types: [structural, referential]
+    gate: block_handoff
+    primary_evaluator: foundation
+    requirement: >-
+      Any draft, review, diff, or final Technical Contract read model must be generated from the
+      exact canonical payload and governance record without adding, changing, or hiding material semantics.
+    pass_condition: >-
+      The read model has a unique immutable view ID; binds to the current contract and confirmed Spec Package
+      hashes; has matching top-level and projection-integrity view IDs; and every displayed
+      section is sourced from the canonical contract payload; all blocking obligations, restrictions,
+      approvals, and evidence references are included; and no displayed claim lacks a canonical source.
+    evidence_of_pass: Foundation projection-validation record, view ID, payload hash, view hash, and complete section coverage report.
+    failure_effect: BLOCKED
+
+  - id: TECH-Q-026
+    name: Technical evidence semantically supports the claim
+    dimension: evidence
+    check_types: [semantic, referential]
+    gate: block_handoff
+    primary_evaluator: analyzer
+    requirement: >-
+      Every implementation claim that relies on repository, platform, policy, or decision evidence
+      must have a current Analyzer finding bound to the exact claim hash, evidence record, source hash, and excerpt hash.
+    pass_condition: >-
+      The admitted finding assesses the cited evidence as SUPPORTS for the exact current claim;
+      SUGGESTS, CONTRADICTS, INSUFFICIENT, or AMBIGUOUS does not satisfy this rule.
+    evidence_of_pass: Version-bound Analyzer semantic-evidence finding admitted by Foundation under the current Analyzer contract.
+    failure_effect: BLOCKED

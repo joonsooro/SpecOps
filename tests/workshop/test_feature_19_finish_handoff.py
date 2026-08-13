@@ -17,7 +17,7 @@ from specops_workshop.analyzer import (
     SemanticTurnDraft,
     SupportingExcerpt,
 )
-from specops_workshop.api import DEMO_SESSION_ID, create_app
+from specops_workshop.legacy_test_app import DEMO_SESSION_ID, create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
 from specops_workshop.contracts import CallState, ConversationPhase, WorkshopState
 from specops_workshop.delegation import DEV_LEAD_ACTOR_ID, PM_ACTOR_ID

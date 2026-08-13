@@ -14,7 +14,7 @@ from specops_workshop.analyzer import (
     SemanticTurnDraft,
     SupportingExcerpt,
 )
-from specops_workshop.api import create_app
+from specops_workshop.legacy_test_app import create_app
 from specops_workshop.config import GEMINI_MODEL, TERRA_MODEL, Settings
 from specops_workshop.sources import SourceCatalog
 

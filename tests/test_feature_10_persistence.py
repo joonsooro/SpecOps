@@ -17,11 +17,16 @@ def test_fresh_migration_fk_schema_and_committed_reload(tmp_path):
     engine = engine_for(url)
     names = set(inspect(engine).get_table_names())
     assert set(metadata.tables) == names - {"alembic_version"}
-    assert len(metadata.tables) == 39
+    assert len(metadata.tables) == 42
     with engine.connect() as connection:
         assert connection.execute(text("PRAGMA foreign_keys")).scalar_one() == 1
         triggers = {row[0] for row in connection.execute(text("SELECT name FROM sqlite_master WHERE type='trigger'"))}
-    assert triggers == {"audit_events_no_update", "audit_events_no_delete"}
+    assert triggers == {
+        "audit_events_no_update",
+        "audit_events_no_delete",
+        "artifact_quality_admitted_no_update",
+        "artifact_quality_admitted_no_delete",
+    }
     clock = FrozenClock(datetime(2026, 8, 7, 12, tzinfo=timezone.utc))
     service = WorkflowService(clock=clock, database_url=url)
     case_id, pm, dev = uuid4(), uuid4(), uuid4()

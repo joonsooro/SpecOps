@@ -73,8 +73,10 @@ audit_events = owned("audit_events", Column("event_id", UUIDText, primary_key=Tr
 # its tables on this same metadata graph so Alembic, fresh-database creation,
 # and the canonical Foundation repository cannot silently diverge.
 from .workshop_protocol_storage import define_workshop_protocol_tables
+from .artifact_quality_storage import define_artifact_quality_tables
 
 WORKSHOP_PROTOCOL_TABLES = define_workshop_protocol_tables(metadata)
+ARTIFACT_QUALITY_TABLES = define_artifact_quality_tables(metadata)
 
 # Relationally expressible references are composite and case-scoped.  Cyclic
 # root/current-version constraints are deferred so a root and version can be

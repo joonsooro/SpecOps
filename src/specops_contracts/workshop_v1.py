@@ -214,7 +214,7 @@ class AnalyzerContractBinding(ContractModel):
     instruction_set_version: PositiveInt
     instruction_set_hash: Sha256
     semantic_quality_contract_id: Literal["SEMANTIC-QUALITY-CONTRACT"]
-    semantic_quality_contract_version: Literal["2.0.0"]
+    semantic_quality_contract_version: Literal["2.1.0"]
     semantic_quality_contract_hash: Sha256
     provider_schema_version: Literal["1.0.0"]
     model: Literal["gpt-5.6-terra"]

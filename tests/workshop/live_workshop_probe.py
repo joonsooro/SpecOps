@@ -10,7 +10,7 @@ from pathlib import Path
 
 from specops_workflow.models import QueryOne
 from specops_workshop.analyzer import AnalyzerTurnResult, ControlIntent, ControlTarget
-from specops_workshop.api import DEMO_SESSION_ID, create_app
+from specops_workshop.legacy_test_app import DEMO_SESSION_ID, create_app
 from specops_workshop.config import Settings
 from specops_workshop.contracts import ProviderResumeContext
 from specops_workshop.demo import LIVE_PM_TURN

@@ -1,6 +1,97 @@
 {
   "components": {
     "schemas": {
+      "AdmittedQualityFinding": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_pointers": {
+            "items": {
+              "maxLength": 2048,
+              "pattern": "^(?:|/(?:[^~/]|~0|~1)*)$",
+              "type": "string"
+            },
+            "title": "Artifact Pointers",
+            "type": "array"
+          },
+          "audit_id": {
+            "format": "uuid",
+            "title": "Audit Id",
+            "type": "string"
+          },
+          "candidate_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "title": "Candidate Key",
+            "type": "string"
+          },
+          "category": {
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+            "title": "Category",
+            "type": "string"
+          },
+          "evidence_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "finding_id": {
+            "format": "uuid",
+            "title": "Finding Id",
+            "type": "string"
+          },
+          "finding_version": {
+            "const": 1,
+            "title": "Finding Version",
+            "type": "integer"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "rule_id": {
+            "pattern": "^(?:SPEC|TECH)-Q-[0-9]{3}$",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH",
+              "CRITICAL"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "transcript_event_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Transcript Event Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "finding_id",
+          "finding_version",
+          "audit_id",
+          "rule_id",
+          "candidate_key",
+          "severity",
+          "category",
+          "message",
+          "artifact_pointers",
+          "evidence_ids",
+          "transcript_event_ids"
+        ],
+        "title": "AdmittedQualityFinding",
+        "type": "object"
+      },
       "AnalyzerContextCommandReceipt": {
         "additionalProperties": false,
         "properties": {
@@ -119,6 +210,107 @@
           "binding"
         ],
         "title": "ArtifactConfirmationReceipt",
+        "type": "object"
+      },
+      "ArtifactQualityAuditReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "format": "uuid",
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_version": {
+            "minimum": 1.0,
+            "title": "Artifact Version",
+            "type": "integer"
+          },
+          "audit_id": {
+            "format": "uuid",
+            "title": "Audit Id",
+            "type": "string"
+          },
+          "audited_record_revision": {
+            "minimum": 1.0,
+            "title": "Audited Record Revision",
+            "type": "integer"
+          },
+          "combined_rule_results": {
+            "items": {
+              "$ref": "#/components/schemas/CombinedQualityRuleResult"
+            },
+            "title": "Combined Rule Results",
+            "type": "array"
+          },
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/AdmittedQualityFinding"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/AuditOutcome"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_hash": {
+            "pattern": "^sha256:[a-f0-9]{64}$",
+            "title": "Request Hash",
+            "type": "string"
+          },
+          "resulting_case_revision": {
+            "minimum": 0.0,
+            "title": "Resulting Case Revision",
+            "type": "integer"
+          },
+          "resulting_record_revision": {
+            "minimum": 1.0,
+            "title": "Resulting Record Revision",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AuditState"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "audit_id",
+          "request_hash",
+          "state",
+          "artifact_id",
+          "artifact_version",
+          "audited_record_revision",
+          "resulting_record_revision",
+          "outcome",
+          "findings",
+          "combined_rule_results",
+          "resulting_case_revision",
+          "replayed"
+        ],
+        "title": "ArtifactQualityAuditReceipt",
+        "type": "object"
+      },
+      "ArtifactReviewIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+            "title": "Operation Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_key"
+        ],
+        "title": "ArtifactReviewIntent",
         "type": "object"
       },
       "ArtifactReviewProjection": {
@@ -262,6 +454,59 @@
         "title": "ArtifactSynthesisAdmissionReceipt",
         "type": "object"
       },
+      "ArtifactSynthesisIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+            "title": "Operation Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_key"
+        ],
+        "title": "ArtifactSynthesisIntent",
+        "type": "object"
+      },
+      "ArtifactSynthesisResult": {
+        "additionalProperties": false,
+        "properties": {
+          "quality_audit": {
+            "$ref": "#/components/schemas/ArtifactQualityAuditReceipt"
+          },
+          "synthesis": {
+            "$ref": "#/components/schemas/ArtifactSynthesisAdmissionReceipt"
+          }
+        },
+        "required": [
+          "synthesis",
+          "quality_audit"
+        ],
+        "title": "ArtifactSynthesisResult",
+        "type": "object"
+      },
+      "AuditOutcome": {
+        "enum": [
+          "PENDING_AUDIT",
+          "PASS",
+          "NEEDS_CLARIFICATION",
+          "CONDITIONAL",
+          "BLOCKED",
+          "REJECTED"
+        ],
+        "title": "AuditOutcome",
+        "type": "string"
+      },
+      "AuditState": {
+        "enum": [
+          "PENDING_PROVIDER",
+          "CONTEXT_READY",
+          "ADMITTED"
+        ],
+        "title": "AuditState",
+        "type": "string"
+      },
       "CandidateIdentityMapping": {
         "additionalProperties": false,
         "properties": {
@@ -311,6 +556,64 @@
         "title": "CandidateIdentityMapping",
         "type": "object"
       },
+      "CombinedQualityRuleResult": {
+        "additionalProperties": false,
+        "properties": {
+          "explanation": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "failure_effect": {
+            "$ref": "#/components/schemas/FailureEffect"
+          },
+          "finding_refs": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Finding Refs",
+            "type": "array"
+          },
+          "foundation_subchecks": {
+            "items": {
+              "$ref": "#/components/schemas/FoundationSubcheck"
+            },
+            "title": "Foundation Subchecks",
+            "type": "array"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ComponentResult"
+          },
+          "rule_id": {
+            "pattern": "^(?:SPEC|TECH)-Q-[0-9]{3}$",
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "semantic_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SemanticAssessmentResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "rule_id",
+          "semantic_result",
+          "foundation_subchecks",
+          "result",
+          "failure_effect",
+          "finding_refs",
+          "explanation"
+        ],
+        "title": "CombinedQualityRuleResult",
+        "type": "object"
+      },
       "CommandOutcome": {
         "enum": [
           "APPLIED",
@@ -318,6 +621,15 @@
           "REJECTED"
         ],
         "title": "CommandOutcome",
+        "type": "string"
+      },
+      "ComponentResult": {
+        "enum": [
+          "PASS",
+          "FAIL",
+          "PENDING"
+        ],
+        "title": "ComponentResult",
         "type": "string"
       },
       "ConfirmedArtifactProjection": {
@@ -689,6 +1001,16 @@
         "title": "Domain",
         "type": "string"
       },
+      "FailureEffect": {
+        "enum": [
+          "NEEDS_CLARIFICATION",
+          "BLOCKED",
+          "CONDITIONAL",
+          "REJECT_MUTATION"
+        ],
+        "title": "FailureEffect",
+        "type": "string"
+      },
       "FoundationCommandReceipt": {
         "additionalProperties": false,
         "properties": {
@@ -797,6 +1119,46 @@
         ],
         "title": "FoundationRejectionCode",
         "type": "string"
+      },
+      "FoundationSubcheck": {
+        "additionalProperties": false,
+        "properties": {
+          "check_type": {
+            "enum": [
+              "structural",
+              "referential",
+              "authority",
+              "human"
+            ],
+            "title": "Check Type",
+            "type": "string"
+          },
+          "evidence_codes": {
+            "items": {
+              "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+              "type": "string"
+            },
+            "title": "Evidence Codes",
+            "type": "array"
+          },
+          "explanation": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Explanation",
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ComponentResult"
+          }
+        },
+        "required": [
+          "check_type",
+          "result",
+          "evidence_codes",
+          "explanation"
+        ],
+        "title": "FoundationSubcheck",
+        "type": "object"
       },
       "HTTPValidationError": {
         "properties": {
@@ -1045,6 +1407,16 @@
         ],
         "title": "SafeValidationDiagnostic",
         "type": "object"
+      },
+      "SemanticAssessmentResult": {
+        "enum": [
+          "PASS",
+          "FAIL",
+          "NOT_APPLICABLE",
+          "ABSTAIN"
+        ],
+        "title": "SemanticAssessmentResult",
+        "type": "string"
       },
       "TranscriptRecordedReceipt": {
         "additionalProperties": false,
@@ -1954,7 +2326,7 @@
             "type": "string"
           },
           "semantic_quality_contract_version": {
-            "const": "2.0.0",
+            "const": "2.1.0",
             "title": "Semantic Quality Contract Version",
             "type": "string"
           }
@@ -5771,6 +6143,184 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v4/artifacts/current/confirm": {
+      "post": {
+        "operationId": "confirm_current_artifact_api_v4_artifacts_current_confirm_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "actor_authentication": {
+                    "discriminator": {
+                      "mapping": {
+                        "ENTERPRISE_SSO": "#/components/schemas/V4_EnterpriseSsoAuthentication",
+                        "VERBAL_SELF_ASSERTION": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      "propertyName": "authentication_method"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      {
+                        "$ref": "#/components/schemas/V4_EnterpriseSsoAuthentication"
+                      }
+                    ],
+                    "title": "Actor Authentication"
+                  },
+                  "confirmation_transcript_event_id": {
+                    "format": "uuid",
+                    "title": "Confirmation Transcript Event Id",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "actor_authentication",
+                  "confirmation_transcript_event_id"
+                ],
+                "title": "ArtifactConfirmationIntent",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactConfirmationReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractValidationEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Confirm Current Artifact",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/artifacts/{artifact_type}/review": {
+      "post": {
+        "operationId": "materialize_artifact_review_api_v4_artifacts__artifact_type__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_type",
+            "required": true,
+            "schema": {
+              "pattern": "^(SPEC_PACKAGE|TECHNICAL_CONTRACT)$",
+              "title": "Artifact Type",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactReviewIntent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactReviewReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Materialize Artifact Review",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/artifacts/{artifact_type}/synthesize": {
+      "post": {
+        "operationId": "synthesize_artifact_api_v4_artifacts__artifact_type__synthesize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_type",
+            "required": true,
+            "schema": {
+              "pattern": "^(SPEC_PACKAGE|TECHNICAL_CONTRACT)$",
+              "title": "Artifact Type",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArtifactSynthesisIntent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactSynthesisResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Synthesize Artifact",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
     "/api/v4/cases/{case_id}/artifact-review": {
       "get": {
         "operationId": "current_artifact_review_api_v4_cases__case_id__artifact_review_get",
@@ -5929,6 +6479,94 @@
           }
         },
         "summary": "Current Decision Review",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/decisions/current/respond": {
+      "post": {
+        "operationId": "apply_browser_decision_selection_api_v4_decisions_current_respond_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "actor_authentication": {
+                    "discriminator": {
+                      "mapping": {
+                        "ENTERPRISE_SSO": "#/components/schemas/V4_EnterpriseSsoAuthentication",
+                        "VERBAL_SELF_ASSERTION": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      "propertyName": "authentication_method"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      {
+                        "$ref": "#/components/schemas/V4_EnterpriseSsoAuthentication"
+                      }
+                    ],
+                    "title": "Actor Authentication"
+                  },
+                  "operation_key": {
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+                    "title": "Operation Key",
+                    "type": "string"
+                  },
+                  "response_transcript_event_id": {
+                    "format": "uuid",
+                    "title": "Response Transcript Event Id",
+                    "type": "string"
+                  },
+                  "selections": {
+                    "items": {
+                      "$ref": "#/components/schemas/V4_VoiceConfirmationSelectionItemCandidate"
+                    },
+                    "maxItems": 26,
+                    "minItems": 1,
+                    "title": "Selections",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "operation_key",
+                  "response_transcript_event_id",
+                  "actor_authentication",
+                  "selections"
+                ],
+                "title": "DecisionResponseIntent",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionBatchResponseReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractValidationEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Apply Browser Decision Selection",
         "tags": [
           "Workshop Protocol 1.0.0"
         ]
@@ -6285,6 +6923,76 @@
           }
         },
         "summary": "Apply Voice Decision Response",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/voice/decision-selections": {
+      "post": {
+        "operationId": "apply_voice_decision_selection_api_v4_voice_decision_selections_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "actor_authentication": {
+                    "discriminator": {
+                      "mapping": {
+                        "ENTERPRISE_SSO": "#/components/schemas/V4_EnterpriseSsoAuthentication",
+                        "VERBAL_SELF_ASSERTION": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      "propertyName": "authentication_method"
+                    },
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/V4_VerbalSelfAssertion"
+                      },
+                      {
+                        "$ref": "#/components/schemas/V4_EnterpriseSsoAuthentication"
+                      }
+                    ],
+                    "title": "Actor Authentication"
+                  },
+                  "selection": {
+                    "$ref": "#/components/schemas/V4_VoiceConfirmationSelectionCandidate"
+                  }
+                },
+                "required": [
+                  "selection",
+                  "actor_authentication"
+                ],
+                "title": "VoiceSelectionInput",
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionBatchResponseReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractValidationEnvelope"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "summary": "Apply Voice Decision Selection",
         "tags": [
           "Workshop Protocol 1.0.0"
         ]

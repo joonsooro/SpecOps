@@ -1,0 +1,217 @@
+{
+  "$defs": {
+    "QualityFindingCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_pointers": {
+          "items": {
+            "maxLength": 2048,
+            "pattern": "^(?:|/(?:[^~/]|~0|~1)*)$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "candidate_key": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "type": "string"
+        },
+        "category": {
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "CRITICAL"
+          ],
+          "type": "string"
+        },
+        "transcript_event_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate_key",
+        "severity",
+        "category",
+        "message",
+        "artifact_pointers",
+        "evidence_ids",
+        "transcript_event_ids"
+      ],
+      "type": "object"
+    },
+    "SemanticAssessmentResult": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_APPLICABLE",
+        "ABSTAIN"
+      ],
+      "type": "string"
+    },
+    "SemanticRuleAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "applicability_reason": {
+          "anyOf": [
+            {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifact_pointers": {
+          "items": {
+            "maxLength": 2048,
+            "pattern": "^(?:|/(?:[^~/]|~0|~1)*)$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "evidence_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "explanation": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/QualityFindingCandidate"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "result": {
+          "$ref": "#/$defs/SemanticAssessmentResult"
+        },
+        "rule_id": {
+          "pattern": "^(?:SPEC|TECH)-Q-[0-9]{3}$",
+          "type": "string"
+        },
+        "transcript_event_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "rule_id",
+        "result",
+        "explanation",
+        "applicability_reason",
+        "artifact_pointers",
+        "evidence_ids",
+        "transcript_event_ids",
+        "findings"
+      ],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "artifact_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "artifact_version": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "assessments": {
+      "items": {
+        "$ref": "#/$defs/SemanticRuleAssessment"
+      },
+      "maxItems": 21,
+      "minItems": 21,
+      "type": "array"
+    },
+    "audit_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "audit_scope_manifest_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "evaluator_run_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "output_type": {
+      "const": "ARTIFACT_SEMANTIC_ATTESTATION_CANDIDATE",
+      "type": "string"
+    },
+    "payload_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": "1.0.0",
+      "type": "string"
+    },
+    "record_revision": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "request_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "semantic_quality_contract_hash": {
+      "pattern": "^sha256:[a-f0-9]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "output_type",
+    "audit_id",
+    "evaluator_run_id",
+    "request_hash",
+    "artifact_id",
+    "artifact_version",
+    "record_revision",
+    "payload_hash",
+    "audit_scope_manifest_hash",
+    "semantic_quality_contract_hash",
+    "assessments"
+  ],
+  "type": "object"
+}

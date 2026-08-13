@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
+from specops_contracts import artifact_quality_v1 as quality
 
 from . import contracts
 
@@ -201,3 +202,13 @@ def all_native_schemas() -> dict[str, dict[str, Any]]:
         spec.operation.value: compile_openai_strict_schema(spec.candidate_type)
         for spec in NATIVE_SCHEMA_SPECS
     }
+
+
+def artifact_quality_native_schema() -> dict[str, Any]:
+    """Compile the separate provider-neutral quality attestation output.
+
+    This schema is intentionally not included in ``all_native_schemas``: that
+    mapping is the closed six-operation Workshop Protocol surface.
+    """
+
+    return compile_openai_strict_schema(quality.ArtifactSemanticAttestationCandidate)

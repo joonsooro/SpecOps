@@ -4490,8 +4490,8 @@
               "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
               "type": "string"
             },
-            "maxItems": 5,
-            "minItems": 0,
+            "maxItems": 3,
+            "minItems": 3,
             "title": "Safe Alternate Question Keys",
             "type": "array"
           }

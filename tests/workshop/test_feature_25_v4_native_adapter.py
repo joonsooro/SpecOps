@@ -141,10 +141,12 @@ def _brief(request: c.BootstrapAnalyzerRequest) -> c.InterviewBriefCandidate:
             ),
         ),
         problem_clusters=(),
-        questions=(
+        questions=tuple(
             c.QuestionCandidate(
-                candidate_key="question-format",
-                text="Which CSV encoding should the export use?",
+                candidate_key=(
+                    "question-format" if index == 1 else f"question-format-{index}"
+                ),
+                text=f"Which CSV encoding should export area {index} use?",
                 rationale="The implementation needs one encoding.",
                 question_shape=c.QuestionShape.OPEN_TEXT,
                 capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
@@ -152,11 +154,15 @@ def _brief(request: c.BootstrapAnalyzerRequest) -> c.InterviewBriefCandidate:
                 addresses_problem_keys=("problem-format",),
                 prerequisite_problem_keys=(),
                 safe_without_current_turn_interpretation=True,
-            ),
+            )
+            for index in range(1, c.INITIAL_RUNWAY_DEPTH + 1)
         ),
         initial_runway=c.QuestionRunwayCandidate(
             recommended_question_key="question-format",
-            safe_alternate_question_keys=(),
+            safe_alternate_question_keys=tuple(
+                f"question-format-{index}"
+                for index in range(2, c.INITIAL_RUNWAY_DEPTH + 1)
+            ),
             do_not_ask_question_keys=(),
         ),
         confirmation_checkpoints=(),
@@ -344,6 +350,49 @@ def test_bootstrap_provider_schema_enforces_local_question_shape_invariants():
     valid_boolean = deepcopy(payload)
     valid_boolean["questions"][0]["question_shape"] = "CLOSED_BOOLEAN"
     validator.validate(valid_boolean)
+
+
+def test_quote_search_grounding_requires_one_exact_terra_quote():
+    exact_quote = "Export filtered orders."
+    locator = c.QuoteSearchLocator(
+        locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
+        exact_quote=exact_quote,
+        occurrence=1,
+    )
+    valid = c.EvidenceCandidate(
+        candidate_key="evidence-export",
+        source_role=c.SourceRole.PM_SPEC,
+        locator=locator,
+        relevance_claim="The source defines the export promise.",
+        quoted_text_candidate=exact_quote,
+    )
+    assert valid.quoted_text_candidate == valid.locator.exact_quote
+
+    with pytest.raises(ValueError, match="must exactly equal"):
+        c.EvidenceCandidate(
+            candidate_key="evidence-export",
+            source_role=c.SourceRole.PM_SPEC,
+            locator=locator,
+            relevance_claim="The source defines the export promise.",
+            quoted_text_candidate="A paraphrase is not an exact quote.",
+        )
+    with pytest.raises(ValueError, match="must exactly equal"):
+        c.EvidenceCandidate(
+            candidate_key="evidence-export",
+            source_role=c.SourceRole.PM_SPEC,
+            locator=locator,
+            relevance_claim="The source defines the export promise.",
+            quoted_text_candidate=None,
+        )
+
+
+def test_provider_instructions_bind_quote_search_fields_without_claiming_authority():
+    instructions = StoredConversationOpenAIAdapter._instructions(
+        c.AnalyzerOperation.BOOTSTRAP
+    )
+    assert "locator.exact_quote and quoted_text_candidate" in instructions
+    assert "character-for-character identical" in instructions
+    assert "never claim authority" in instructions
 
 
 def test_stored_conversation_bootstrap_uploads_exactly_two_files_and_reuses_conversation():

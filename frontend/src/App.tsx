@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { LiveAudioClient } from "./audio/liveClient";
-import { workshopStartEnabled } from "./uiModel";
+import { INITIAL_RUNWAY_DEPTH, workshopStartEnabled } from "./uiModel";
 import type { components as WorkshopProtocolComponents } from "./generated/workshopProtocol";
 
 type DecisionBatchReviewView = WorkshopProtocolComponents["schemas"]["DecisionBatchReviewView"];
@@ -397,8 +397,8 @@ export function App() {
               <i key={index} style={{ height: `${height}%` }} />
             ))}
           </div>
-          <ol className="runway-rail" aria-label={`${workshop?.runway.depth ?? 0} of 6 admitted questions ready`}>
-            {Array.from({ length: 6 }, (_, index) => (
+          <ol className="runway-rail" aria-label={`${workshop?.runway.depth ?? 0} of ${INITIAL_RUNWAY_DEPTH} admitted questions ready`}>
+            {Array.from({ length: INITIAL_RUNWAY_DEPTH }, (_, index) => (
               <li key={index} data-admitted={index < (workshop?.runway.depth ?? 0)}>
                 <span className="sr-only">Question {index + 1} {index < (workshop?.runway.depth ?? 0) ? "admitted" : "not ready"}</span>
               </li>

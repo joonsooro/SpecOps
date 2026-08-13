@@ -164,7 +164,7 @@ class V4ProductionOrchestrator:
                 return projection
             active = self.foundation.active_analyzer_context(self.case_id)
             runway = self.foundation.runway_projection(self.case_id)
-            if active is not None and runway["depth"] == 6:
+            if active is not None and runway["depth"] == c.INITIAL_RUNWAY_DEPTH:
                 self.foundation.set_preparation_phase(self.case_id, "READY")
                 return self.foundation.preparation_projection(self.case_id)
             if active is not None and self.foundation.current_admitted_guidance(self.case_id) is None:
@@ -335,7 +335,10 @@ class V4ProductionOrchestrator:
             self.foundation.set_preparation_phase(
                 self.case_id, "VALIDATING_INITIAL_RUNWAY"
             )
-            if self.foundation.runway_projection(self.case_id)["depth"] != 6:
+            if (
+                self.foundation.runway_projection(self.case_id)["depth"]
+                != c.INITIAL_RUNWAY_DEPTH
+            ):
                 self.foundation.set_preparation_phase(
                     self.case_id, "FAILED", failure_code="INSUFFICIENT_SAFE_RUNWAY"
                 )

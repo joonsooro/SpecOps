@@ -85,7 +85,7 @@ class DeterministicAdapter:
                 prerequisite_problem_keys=(),
                 safe_without_current_turn_interpretation=True,
             )
-            for index in range(1, 7)
+            for index in range(1, c.INITIAL_RUNWAY_DEPTH + 1)
         )
         candidate = c.InterviewBriefCandidate(
             protocol_version="1.0.0",
@@ -103,7 +103,8 @@ class DeterministicAdapter:
             initial_runway=c.QuestionRunwayCandidate(
                 recommended_question_key="question-export-1",
                 safe_alternate_question_keys=tuple(
-                    f"question-export-{index}" for index in range(2, 7)
+                    f"question-export-{index}"
+                    for index in range(2, c.INITIAL_RUNWAY_DEPTH + 1)
                 ),
                 do_not_ask_question_keys=(),
             ),

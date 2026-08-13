@@ -1397,7 +1397,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
 
         A short or unsafe candidate is still valid provisional semantic input,
         but it never becomes guidance. Preparation therefore fails closed
-        without weakening the six-question Voice gate.
+        without weakening the exact initial-runway Voice gate.
         """
 
         candidate = command.candidate
@@ -1406,7 +1406,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             runway.recommended_question_key,
             *runway.safe_alternate_question_keys,
         )
-        if len(keys) != 6 or len(set(keys)) != 6:
+        if len(keys) != c.INITIAL_RUNWAY_DEPTH or len(set(keys)) != c.INITIAL_RUNWAY_DEPTH:
             return None
         questions = {item.candidate_key: item for item in candidate.questions}
         if any(key not in questions for key in keys):

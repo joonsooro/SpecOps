@@ -45,7 +45,7 @@ from test_feature_26_v4_production_seam import (
 )
 
 
-def _brief(question_count: int = 6) -> c.InterviewBriefCandidate:
+def _brief(*, unsafe_question_index: int | None = None) -> c.InterviewBriefCandidate:
     questions = tuple(
         c.QuestionCandidate(
             candidate_key=f"question-{index}",
@@ -56,9 +56,9 @@ def _brief(question_count: int = 6) -> c.InterviewBriefCandidate:
             answer_options=(),
             addresses_problem_keys=("problem-export",),
             prerequisite_problem_keys=(),
-            safe_without_current_turn_interpretation=True,
+            safe_without_current_turn_interpretation=index != unsafe_question_index,
         )
-        for index in range(1, question_count + 1)
+        for index in range(1, c.INITIAL_RUNWAY_DEPTH + 1)
     )
     return c.InterviewBriefCandidate(
         protocol_version="1.0.0",
@@ -98,7 +98,7 @@ def _brief(question_count: int = 6) -> c.InterviewBriefCandidate:
         initial_runway=c.QuestionRunwayCandidate(
             recommended_question_key="question-1",
             safe_alternate_question_keys=tuple(
-                f"question-{index}" for index in range(2, question_count + 1)
+                f"question-{index}" for index in range(2, c.INITIAL_RUNWAY_DEPTH + 1)
             ),
             do_not_ask_question_keys=(),
         ),
@@ -106,14 +106,14 @@ def _brief(question_count: int = 6) -> c.InterviewBriefCandidate:
     )
 
 
-def _admit_brief(foundation, question_count: int = 6):
+def _admit_brief(foundation, *, unsafe_question_index: int | None = None):
     values = _base(4)
     values.update(
         command_type="ADMIT_INTERVIEW_BRIEF",
         analyzer_run_id=RUN_ID,
         context_id=CONTEXT_ID,
         provider_request_hash=REQUEST_HASH,
-        candidate=_brief(question_count),
+        candidate=_brief(unsafe_question_index=unsafe_question_index),
     )
     return foundation.execute(c.AdmitInterviewBriefCommand(**values))
 
@@ -149,21 +149,21 @@ def test_real_0004_database_upgrades_additively_to_0005(tmp_path):
     assert restarted.preparation_resources(CASE_ID)["source_set_hash"] == SOURCE_SET_HASH
 
 
-def test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_five(tmp_path):
+def test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_three(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     receipt = _admit_brief(foundation)
     assert receipt.admitted_guidance_id is not None
     runway = foundation.runway_projection(CASE_ID)
-    assert runway["depth"] == 6
-    assert len({item["question_id"] for item in runway["questions"]}) == 6
+    assert runway["depth"] == c.INITIAL_RUNWAY_DEPTH
+    assert len({item["question_id"] for item in runway["questions"]}) == c.INITIAL_RUNWAY_DEPTH
     assert foundation.current_admitted_guidance(CASE_ID).guidance_id == receipt.admitted_guidance_id
 
 
-def test_insufficient_bootstrap_runway_fails_closed_without_guidance(tmp_path):
+def test_unsafe_bootstrap_runway_fails_closed_without_guidance(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
-    receipt = _admit_brief(foundation, 5)
+    receipt = _admit_brief(foundation, unsafe_question_index=c.INITIAL_RUNWAY_DEPTH)
     assert receipt.admitted_guidance_id is None
     assert foundation.runway_projection(CASE_ID)["depth"] == 0
 
@@ -365,7 +365,7 @@ def test_depth_two_enqueues_one_guidance_and_turn_jobs_remain_first(tmp_path):
     _activate(foundation)
     _admit_brief(foundation)
     foundation.set_preparation_phase(CASE_ID, "READY")
-    for sequence in range(1, 5):
+    for sequence in range(1, 3):
         foundation.execute(
             _transcript_command(
                 foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."
@@ -382,7 +382,7 @@ def test_zero_runway_instruction_is_fixed_and_never_invents_a_question(tmp_path)
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     _admit_brief(foundation)
-    for sequence in range(1, 7):
+    for sequence in range(1, c.INITIAL_RUNWAY_DEPTH + 1):
         foundation.execute(
             _transcript_command(
                 foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."
@@ -401,7 +401,7 @@ def test_endangered_runway_blocks_spec_synthesis(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     _admit_brief(foundation)
-    for sequence in range(1, 5):
+    for sequence in range(1, 3):
         foundation.execute(
             _transcript_command(
                 foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formulationEnabled, proposalControlPayload, reduceLiveProjection, workshopStartEnabled } from "./uiModel";
+import { INITIAL_RUNWAY_DEPTH, formulationEnabled, proposalControlPayload, reduceLiveProjection, workshopStartEnabled } from "./uiModel";
 
 describe("Workshop server-projection UI rules", () => {
-  it("fails closed until the server admits the exact six-question runway", () => {
-    expect(workshopStartEnabled("VALIDATING_INITIAL_RUNWAY", 6)).toBe(false);
-    expect(workshopStartEnabled("READY", 5)).toBe(true);
-    expect(workshopStartEnabled("READY", 6)).toBe(true);
+  it("fails closed until the server admits the exact four-question runway", () => {
+    expect(workshopStartEnabled("VALIDATING_INITIAL_RUNWAY", INITIAL_RUNWAY_DEPTH)).toBe(false);
+    expect(workshopStartEnabled("READY", INITIAL_RUNWAY_DEPTH - 1)).toBe(true);
+    expect(workshopStartEnabled("READY", INITIAL_RUNWAY_DEPTH)).toBe(true);
   });
 
   it("freezes formulation outside an unlocked Workshop", () => {

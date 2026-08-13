@@ -754,7 +754,10 @@ class StoredConversationOpenAIAdapter:
             "You are the SpecOps Workshop Analyzer. Use the two source documents already "
             "attached to this Conversation and the new Foundation-bound request. Return only "
             f"the strict {operation.value} candidate. Propose semantics; never claim authority, "
-            "confirmation, readiness, Foundation commands, or new canonical identities."
+            "confirmation, readiness, Foundation commands, or new canonical identities. "
+            "For every QUOTE_SEARCH evidence candidate, copy one exact source substring into "
+            "both locator.exact_quote and quoted_text_candidate; those two strings must be "
+            "character-for-character identical."
         )
 
     @staticmethod

@@ -25,6 +25,8 @@ from pydantic import (
 
 
 PROTOCOL_VERSION = "1.0.0"
+INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT = 3
+INITIAL_RUNWAY_DEPTH = 1 + INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT
 MAX_INT = 9_223_372_036_854_775_807
 
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0, le=MAX_INT)]
@@ -400,6 +402,15 @@ class EvidenceCandidate(ContractModel):
     relevance_claim: Statement
     quoted_text_candidate: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)] | None
 
+    @model_validator(mode="after")
+    def quote_matches_quote_search_locator(self) -> EvidenceCandidate:
+        if isinstance(self.locator, QuoteSearchLocator):
+            if self.quoted_text_candidate != self.locator.exact_quote:
+                raise ValueError(
+                    "QUOTE_SEARCH quoted_text_candidate must exactly equal locator exact_quote"
+                )
+        return self
+
 
 class ProblemKind(StrEnum):
     AMBIGUITY = "AMBIGUITY"
@@ -508,7 +519,13 @@ class QuestionCandidate(ContractModel):
 
 class QuestionRunwayCandidate(ContractModel):
     recommended_question_key: CandidateKey
-    safe_alternate_question_keys: Annotated[tuple[CandidateKey, ...], Field(min_length=0, max_length=5)]
+    safe_alternate_question_keys: Annotated[
+        tuple[CandidateKey, ...],
+        Field(
+            min_length=INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT,
+            max_length=INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT,
+        ),
+    ]
     do_not_ask_question_keys: Annotated[tuple[CandidateKey, ...], Field(min_length=0, max_length=50)]
 
     @model_validator(mode="after")
@@ -2271,6 +2288,8 @@ AnalyzerProviderCandidate = Annotated[
 
 __all__ = [
     "PROTOCOL_VERSION",
+    "INITIAL_RUNWAY_DEPTH",
+    "INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT",
     "ActivateAnalyzerContextCommand",
     "AdmitSpecPackageSynthesisCommand",
     "AdmitTechnicalContractSynthesisCommand",

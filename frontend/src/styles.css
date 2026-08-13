@@ -41,7 +41,7 @@ h3, h4 { font-weight: 650; }
 .state-dot { width: .5rem; height: .5rem; border-radius: 50%; background: var(--governed-teal); box-shadow: 0 0 0 .25rem color-mix(in srgb, var(--governed-teal) 15%, transparent); }
 .call-stage[data-state="DISCONNECTED"] .state-dot, .call-stage[data-state="ENDED"] .state-dot { background: var(--decision-ochre); box-shadow: none; }
 .call-stage[data-state="PREPARING"] .state-dot { background: var(--binding-blue); }
-.runway-rail { position: absolute; top: 2rem; left: 0; right: 0; display: grid; grid-template-columns: repeat(6, 1fr); gap: .28rem; margin: 0; padding: 0; list-style: none; }
+.runway-rail { position: absolute; top: 2rem; left: 0; right: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: .28rem; margin: 0; padding: 0; list-style: none; }
 .runway-rail li { height: .3rem; border: 1px solid #94a29e; background: transparent; }
 .runway-rail li[data-admitted="true"] { border-color: var(--governed-teal); background: var(--governed-teal); }
 .waveform { position: absolute; inset: 4.2rem 8% 5.1rem; display: flex; justify-content: center; align-items: center; gap: min(1.5%, .38rem); opacity: .66; }

@@ -85,14 +85,14 @@ test("keeps Voice and microphone disabled until the exact admitted runway is REA
         delayed: true,
         delayed_message: "SpecOps Analyzer is taking a little longer to formulate your Workshop plan. Your documents are safe, and preparation is continuing.",
       },
-      runway: { ...workshop.runway, depth: 5, questions: workshop.runway.questions.slice(0, 5) },
+      runway: { ...workshop.runway, depth: 3, questions: workshop.runway.questions.slice(0, 3) },
     },
   }));
   await page.goto("/");
   await expect(page.getByRole("button", { name: "Start Spec Workshop" })).toBeDisabled();
   await expect(page.getByText("Validating the initial clarification runway…")).toBeVisible();
   await expect(page.getByText("SpecOps Analyzer is taking a little longer to formulate your Workshop plan. Your documents are safe, and preparation is continuing.")).toBeVisible();
-  await expect(page.getByLabel("5 of 6 admitted questions ready")).toBeVisible();
+  await expect(page.getByLabel("3 of 4 admitted questions ready")).toBeVisible();
   await expect(page.getByLabel("Text fallback")).toBeDisabled();
   await expect(page.getByText(/%/)).toHaveCount(0);
 });

@@ -814,10 +814,16 @@ def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependenci
             ),
         ),
         problem_clusters=(),
-        questions=(
+        questions=tuple(
             c.QuestionCandidate(
-                candidate_key="question-brief",
-                text="Should every export use UTF-8?",
+                candidate_key=(
+                    "question-brief" if index == 1 else f"question-brief-{index}"
+                ),
+                text=(
+                    "Should every export use UTF-8?"
+                    if index == 1
+                    else f"Should export policy area {index} use UTF-8?"
+                ),
                 rationale="This closes the encoding decision.",
                 question_shape=c.QuestionShape.CLOSED_BOOLEAN,
                 capture_policy=c.CapturePolicy.BINDING_DECISION,
@@ -825,11 +831,15 @@ def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependenci
                 addresses_problem_keys=("problem-brief",),
                 prerequisite_problem_keys=(),
                 safe_without_current_turn_interpretation=True,
-            ),
+            )
+            for index in range(1, c.INITIAL_RUNWAY_DEPTH + 1)
         ),
         initial_runway=c.QuestionRunwayCandidate(
             recommended_question_key="question-brief",
-            safe_alternate_question_keys=(),
+            safe_alternate_question_keys=tuple(
+                f"question-brief-{index}"
+                for index in range(2, c.INITIAL_RUNWAY_DEPTH + 1)
+            ),
             do_not_ask_question_keys=(),
         ),
         confirmation_checkpoints=(),

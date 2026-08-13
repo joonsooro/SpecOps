@@ -14,7 +14,7 @@ test("real FastAPI and built frontend complete both deterministic V4 artifact se
   expect(body.session.conversation_phase).toBe("WORKSHOP");
   expect(body.pending_proposal).toBeNull();
   expect(body.preparation.phase).toBe("READY");
-  expect(body.runway.depth).toBe(6);
+  expect(body.runway.depth).toBe(4);
 
   await page.getByRole("button", { name: "Synthesize + audit" }).click();
   await expect(page.getByText("Spec Package synthesized and quality-audited")).toBeVisible();

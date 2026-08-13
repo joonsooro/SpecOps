@@ -228,6 +228,110 @@ def test_analyzer_worker_checkpoints_stored_response_before_admission(tmp_path):
     assert pending[0]["provider_response_id"] == "resp_turn_worker"
 
 
+def test_rejected_turn_is_not_retried_and_dependent_guidance_fails_closed(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    context = foundation.active_analyzer_context(CASE_ID)
+    actor = foundation.case_actor(CASE_ID, "PM")
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=SimpleNamespace(source_set_hash=lambda sources: SOURCE_SET_HASH),
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    for sequence in range(1, 3):
+        asyncio.run(
+            orchestrator.record_final_transcript(
+                FinalTranscriptInput(
+                    turn_sequence=sequence,
+                    text=f"Final answer {sequence}.",
+                    provider_request_id=f"rejected-turn-{sequence}",
+                    speaker_actor_id=actor,
+                    actor="PM",
+                )
+            )
+        )
+
+    class OneRejectedTurnAdapter:
+        calls = []
+
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def execute(self, request, *, context):
+            self.calls.append(request.request_type)
+            assert isinstance(request, c.AnalyzeFinalTurnRequest)
+            common = dict(
+                protocol_version="1.0.0",
+                output_type="TURN_ANALYSIS_CANDIDATE",
+                analyzer_run_id=request.analyzer_run_id,
+                context_id=request.context_id,
+                request_hash=request.request_hash,
+                source_set_hash=request.source_set_hash,
+                transcript_event_id=request.transcript.transcript_event_id,
+                based_on_case_revision=request.based_on_case_revision,
+                new_problems=(),
+                new_problem_clusters=(),
+                revised_problem_clusters=(),
+                new_questions=(),
+                revised_questions=(),
+                low_risk_facts=(),
+                decisions=(),
+                problem_assessments=(),
+                evidence_findings=(),
+            )
+            if request.transcript.sequence_number == 1:
+                return c.TurnAnalysisCandidate(
+                    **common,
+                    disposition=c.TurnDisposition.SUBSTANTIVE,
+                    no_change_reason_code=None,
+                    evidence_candidates=(
+                        c.EvidenceCandidate(
+                            candidate_key="evidence-absent-quote",
+                            source_role=c.SourceRole.PM_SPEC,
+                            locator=c.QuoteSearchLocator(
+                                locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
+                                exact_quote="This alleged exact quote is absent.",
+                                occurrence=1,
+                            ),
+                            relevance_claim="The proposed quote would ground this turn.",
+                            quoted_text_candidate="This alleged exact quote is absent.",
+                        ),
+                    ),
+                )
+            return c.TurnAnalysisCandidate(
+                **common,
+                disposition=c.TurnDisposition.NO_SEMANTIC_CHANGE,
+                no_change_reason_code="SOCIAL_ONLY",
+                evidence_candidates=(),
+            )
+
+    adapter = OneRejectedTurnAdapter()
+    orchestrator.adapter = adapter
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="rejection-worker")
+    assert asyncio.run(worker.run_once()) is True
+    assert asyncio.run(worker.run_once()) is True
+    assert asyncio.run(worker.run_once()) is False
+
+    jobs = foundation.analyzer_jobs(CASE_ID)
+    assert [item["state"] for item in jobs].count("COMPLETED") == 1
+    failed = {item["last_error_code"] for item in jobs if item["state"] == "FAILED"}
+    assert failed == {
+        "FOUNDATION_REJECTED_EVIDENCE_BINDING_FAILED",
+        "TURN_ANALYSIS_DEPENDENCY_FAILED",
+    }
+    assert adapter.calls == [
+        c.AnalyzerOperation.TURN_ANALYSIS,
+        c.AnalyzerOperation.TURN_ANALYSIS,
+    ]
+
+
 def test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_three(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)

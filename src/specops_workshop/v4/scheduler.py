@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from pydantic import TypeAdapter
 from specops_contracts import workshop_v1 as c
+from specops_workflow.workshop_protocol import FoundationProtocolError
 
 from .openai_adapter import ProviderAdapterError
 from .orchestrator import V4ProductionOrchestrator, _request
@@ -102,6 +103,12 @@ class DurableAnalyzerWorker:
                     error_code="PROVIDER_OUTCOME_UNCERTAIN_CANCELLED",
                 )
             raise
+        except FoundationProtocolError as exc:
+            self.foundation.fail_analyzer_job(
+                job["job_id"],
+                worker_id=self.worker_id,
+                error_code=f"FOUNDATION_REJECTED_{exc.code.value}",
+            )
         except ProviderAdapterError as exc:
             uncertain = exc.receipt.code in {
                 c.ProviderFailureCode.TIMEOUT,

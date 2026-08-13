@@ -961,7 +961,10 @@ class StoredConversationOpenAIAdapter:
             "confirmation, readiness, Foundation commands, or new canonical identities. "
             "For every QUOTE_SEARCH evidence candidate, copy one exact source substring into "
             "both locator.exact_quote and quoted_text_candidate; those two strings must be "
-            "character-for-character identical."
+            "character-for-character identical. Silently verify that exact_quote occurs "
+            "verbatim at the requested occurrence in the named attached source. If it does "
+            "not, omit that evidence candidate and every proposal that depends on it; never "
+            "reconstruct, normalize, or approximately quote source text."
         )
 
     @staticmethod

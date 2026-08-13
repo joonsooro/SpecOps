@@ -399,6 +399,8 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
     )
     assert "locator.exact_quote and quoted_text_candidate" in instructions
     assert "character-for-character identical" in instructions
+    assert "occurs verbatim at the requested occurrence" in instructions
+    assert "omit that evidence candidate" in instructions
     assert "never claim authority" in instructions
 
 

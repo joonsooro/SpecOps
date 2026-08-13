@@ -624,15 +624,31 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ).mappings().all()
             for row in rows:
                 if row["operation"] == c.AnalyzerOperation.GUIDANCE.value:
-                    older_turn = connection.execute(
-                        select(table.c.job_id).where(
+                    older_turn_states = connection.execute(
+                        select(table.c.state).where(
                             table.c.case_id == str(case_id),
                             table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
-                            table.c.state != "COMPLETED",
                             table.c.created_at <= row["created_at"],
-                        ).limit(1)
-                    ).scalar_one_or_none()
-                    if older_turn is not None:
+                        )
+                    ).scalars().all()
+                    if any(
+                        state not in {"COMPLETED", "FAILED"}
+                        for state in older_turn_states
+                    ):
+                        continue
+                    if any(state == "FAILED" for state in older_turn_states):
+                        connection.execute(
+                            update(table)
+                            .where(
+                                table.c.job_id == row["job_id"],
+                                table.c.state.not_in(("COMPLETED", "FAILED")),
+                            )
+                            .values(
+                                state="FAILED",
+                                last_error_code="TURN_ANALYSIS_DEPENDENCY_FAILED",
+                                updated_at=now_text,
+                            )
+                        )
                         continue
                 lease_until = _instant(now + timedelta(seconds=lease_seconds))
                 result = connection.execute(

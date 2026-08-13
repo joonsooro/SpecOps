@@ -255,12 +255,23 @@ class _BackgroundResponses:
 
     async def retrieve(self, response_id):
         self.retrieve_ids.append(response_id)
-        completed = len(self.retrieve_ids) >= 4 or self.cancel_wait_once
+        completed = len(self.retrieve_ids) >= 7 or self.cancel_wait_once
         return SimpleNamespace(
             id=response_id,
             status="completed" if completed else "in_progress",
             output_text=self.output_text if completed else "",
             _request_id=f"req_background_retrieve_{len(self.retrieve_ids)}",
+            usage=(
+                SimpleNamespace(
+                    input_tokens=100,
+                    input_tokens_details=SimpleNamespace(cached_tokens=20),
+                    output_tokens=40,
+                    output_tokens_details=SimpleNamespace(reasoning_tokens=10),
+                    total_tokens=140,
+                )
+                if completed
+                else None
+            ),
         )
 
 
@@ -462,7 +473,7 @@ async def _stored_conversation_bootstrap_case():
     assert [item["type"] for item in turn_call["input"][0]["content"]] == ["input_text"]
 
 
-def test_background_bootstrap_polls_one_stored_response_past_slow_observation():
+def test_background_bootstrap_polls_one_stored_response_past_60_second_slow_observation():
     async def scenario():
         clock = _ManualMonotonic()
         responses = _BackgroundResponses()
@@ -499,14 +510,19 @@ def test_background_bootstrap_polls_one_stored_response_past_slow_observation():
         assert result.context.bootstrap_response_id == response_id
         assert len(responses.create_calls) == 1
         assert responses.create_calls[0]["background"] is True
-        assert responses.retrieve_ids == [response_id] * 4
+        assert responses.retrieve_ids == [response_id] * 7
         assert [event.event for event in adapter.lifecycle_events] == [
             "provider_request.started",
             "provider_request.accepted",
             "provider_request.timeout",
             "provider_request.completed",
         ]
-        assert adapter.lifecycle_events[-1].duration_ms == 40_000
+        assert adapter.lifecycle_events[-1].duration_ms == 70_000
+        assert adapter.lifecycle_events[-1].input_tokens == 100
+        assert adapter.lifecycle_events[-1].cached_input_tokens == 20
+        assert adapter.lifecycle_events[-1].output_tokens == 40
+        assert adapter.lifecycle_events[-1].reasoning_output_tokens == 10
+        assert adapter.lifecycle_events[-1].total_tokens == 140
         encoded = json.dumps([event.__dict__ for event in adapter.lifecycle_events])
         assert "private PM source" not in encoded
         assert "private technical source" not in encoded

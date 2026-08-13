@@ -26,7 +26,8 @@ from . import contracts
 from .schema_compiler import native_schema_for
 
 
-REQUEST_TIMEOUT_SECONDS = 30.0
+PROVIDER_IO_TIMEOUT_SECONDS = 60.0
+SLOW_RESPONSE_OBSERVATION_SECONDS = 60.0
 BACKGROUND_POLL_SECONDS = 1.0
 MAX_OUTPUT_TOKENS = {
     contracts.AnalyzerOperation.BOOTSTRAP: 24_000,
@@ -67,6 +68,11 @@ class ProviderLifecycleEvent:
     provider_request_id: str | None
     status: str | None
     duration_ms: int
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    reasoning_output_tokens: int | None
+    total_tokens: int | None
 
 
 class ProviderAdapterError(RuntimeError):
@@ -87,6 +93,12 @@ def _safe_provider_identifier(value: Any) -> str | None:
     if not all(character.isalnum() or character in "._:-" for character in value):
         return None
     return value
+
+
+def _safe_token_count(value: Any) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
 
 
 _KNOWN_SCHEMA_PATHS = frozenset(
@@ -194,7 +206,7 @@ class StoredConversationOpenAIAdapter:
         self._client = client or AsyncOpenAI(
             api_key=api_key,
             max_retries=0,
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=PROVIDER_IO_TIMEOUT_SECONDS,
         )
         self._now = now
         self._monotonic = monotonic
@@ -249,7 +261,7 @@ class StoredConversationOpenAIAdapter:
                     purpose="user_data",
                     extra_headers={"X-Client-Request-Id": client_request_id},
                 ),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=PROVIDER_IO_TIMEOUT_SECONDS,
             )
             file_id = _safe_provider_identifier(getattr(provider_file, "id", None))
             if file_id is None:
@@ -276,7 +288,7 @@ class StoredConversationOpenAIAdapter:
                     metadata={"protocol": contracts.PROTOCOL_VERSION},
                     extra_headers={"X-Client-Request-Id": conversation_request_id},
                 ),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=PROVIDER_IO_TIMEOUT_SECONDS,
             )
             conversation_id = _safe_provider_identifier(getattr(conversation, "id", None))
             if conversation_id is None:
@@ -353,7 +365,7 @@ class StoredConversationOpenAIAdapter:
         try:
             response = await asyncio.wait_for(
                 self._client.responses.create(**arguments),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=PROVIDER_IO_TIMEOUT_SECONDS,
             )
         except asyncio.CancelledError:
             self._emit_lifecycle(
@@ -422,14 +434,18 @@ class StoredConversationOpenAIAdapter:
                 if response is None:
                     response = await asyncio.wait_for(
                         self._client.responses.retrieve(response_id),
-                        timeout=REQUEST_TIMEOUT_SECONDS,
+                        timeout=PROVIDER_IO_TIMEOUT_SECONDS,
                     )
                 returned_id = _safe_provider_identifier(getattr(response, "id", None))
                 if returned_id != response_id:
                     raise ValueError("retrieved Response identity changed")
                 self._background_responses[response_id] = response
                 status = getattr(response, "status", None) or "completed"
-                if not slow_observed and self._monotonic() - started_at >= REQUEST_TIMEOUT_SECONDS:
+                if (
+                    not slow_observed
+                    and self._monotonic() - started_at
+                    >= SLOW_RESPONSE_OBSERVATION_SECONDS
+                ):
                     slow_observed = True
                     self._emit_lifecycle(
                         event="provider_request.timeout",
@@ -529,7 +545,7 @@ class StoredConversationOpenAIAdapter:
                     context.provider_conversation_id,
                     extra_headers={"X-Client-Request-Id": client_request_id},
                 ),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=PROVIDER_IO_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             self._provider_error(
@@ -572,7 +588,7 @@ class StoredConversationOpenAIAdapter:
                         identifier,
                         extra_headers={"X-Client-Request-Id": request_id},
                     ),
-                    timeout=REQUEST_TIMEOUT_SECONDS,
+                    timeout=PROVIDER_IO_TIMEOUT_SECONDS,
                 )
             except Exception:
                 return
@@ -604,7 +620,7 @@ class StoredConversationOpenAIAdapter:
         try:
             response = await asyncio.wait_for(
                 self._client.responses.create(**arguments),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=PROVIDER_IO_TIMEOUT_SECONDS,
             )
         except asyncio.CancelledError:
             self._emit_lifecycle(
@@ -704,6 +720,9 @@ class StoredConversationOpenAIAdapter:
         response: Any | None = None,
         status: str | None = None,
     ) -> None:
+        usage = getattr(response, "usage", None)
+        input_details = getattr(usage, "input_tokens_details", None)
+        output_details = getattr(usage, "output_tokens_details", None)
         value = ProviderLifecycleEvent(
             event=event,
             operation=operation.value,
@@ -714,6 +733,15 @@ class StoredConversationOpenAIAdapter:
             ),
             status=status or _safe_provider_identifier(getattr(response, "status", None)),
             duration_ms=max(0, int((self._monotonic() - started_at) * 1000)),
+            input_tokens=_safe_token_count(getattr(usage, "input_tokens", None)),
+            cached_input_tokens=_safe_token_count(
+                getattr(input_details, "cached_tokens", None)
+            ),
+            output_tokens=_safe_token_count(getattr(usage, "output_tokens", None)),
+            reasoning_output_tokens=_safe_token_count(
+                getattr(output_details, "reasoning_tokens", None)
+            ),
+            total_tokens=_safe_token_count(getattr(usage, "total_tokens", None)),
         )
         self._lifecycle_events.append(value)
         self._logger.info(

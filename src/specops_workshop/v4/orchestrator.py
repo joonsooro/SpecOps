@@ -28,6 +28,8 @@ from specops_workflow.workshop_completion import (
 )
 
 from .openai_adapter import (
+    BootstrapResult,
+    PreparedProviderContext,
     ProviderCleanupReceipt,
     ProviderSourceUpload,
     StoredConversationOpenAIAdapter,
@@ -43,6 +45,7 @@ PRODUCTION_NAMESPACE = UUID("e52d201a-e1d0-4df7-90e5-39ac4091998d")
 ZERO_HASH = "sha256:" + "0" * 64
 RESTART_GRACE_SECONDS = 15 * 60
 CLEANUP_RETRY_SECONDS = 30
+BOOTSTRAP_GROUNDING_CORRECTION_OPERATION = "BOOTSTRAP_GROUNDING_CORRECTION"
 
 
 def _stable_id(*parts: object) -> UUID:
@@ -173,6 +176,122 @@ class V4ProductionOrchestrator:
             "based_on_case_revision": based_on_revision,
         }
 
+    def _bootstrap_has_unbound_exact_quote(
+        self, candidate: c.InterviewBriefCandidate
+    ) -> bool:
+        """Content-free preflight for the one correctable grounding failure."""
+
+        source_text_by_role: dict[c.SourceRole, str] = {}
+        for item in self.sources:
+            source_text_by_role[item.source.role] = item.content.decode("utf-8")
+        for evidence in candidate.evidence_candidates:
+            locator = evidence.locator
+            if not isinstance(locator, c.QuoteSearchLocator):
+                continue
+            source_text = source_text_by_role.get(evidence.source_role)
+            if source_text is None or evidence.quoted_text_candidate != locator.exact_quote:
+                return True
+            occurrence_count = 0
+            start = 0
+            while True:
+                found = source_text.find(locator.exact_quote, start)
+                if found < 0:
+                    break
+                occurrence_count += 1
+                if occurrence_count >= locator.occurrence:
+                    break
+                start = found + 1
+            if occurrence_count < locator.occurrence:
+                return True
+        return False
+
+    async def _correct_bootstrap_grounding(
+        self,
+        *,
+        prepared: PreparedProviderContext,
+        placeholder: c.AnalyzerContextBinding,
+        revision: int,
+    ) -> tuple[c.BootstrapAnalyzerRequest, BootstrapResult] | None:
+        """Run at most one durable child request after a known completed bad quote."""
+
+        if not all(
+            hasattr(self.adapter, name)
+            for name in ("start_bootstrap_grounding_correction", "finish_bootstrap")
+        ):
+            return None
+        request = self._bootstrap_grounding_correction_request(
+            prepared=prepared,
+            placeholder=placeholder,
+            revision=revision,
+        )
+        tracked = next(
+            (
+                item
+                for item in self.foundation.pending_provider_responses(self.case_id)
+                if item["client_request_id"] == request.client_request_id
+                and item["operation"] == BOOTSTRAP_GROUNDING_CORRECTION_OPERATION
+            ),
+            None,
+        )
+        response_id = None if tracked is None else tracked["provider_response_id"]
+        if response_id is None:
+            try:
+                response_id = await self.adapter.start_bootstrap_grounding_correction(
+                    request, prepared=prepared
+                )
+            except asyncio.CancelledError:
+                # No Response ID came back. X-Client-Request-Id is correlation,
+                # not an exactly-once key, so never create another correction.
+                self.foundation.set_preparation_phase(
+                    self.case_id,
+                    "FAILED",
+                    failure_code="BOOTSTRAP_CORRECTION_RESPONSE_ID_UNCERTAIN",
+                    cleanup_state="RETAIN_UNCERTAIN",
+                )
+                raise
+            except Exception:
+                self.foundation.set_preparation_phase(
+                    self.case_id,
+                    "FAILED",
+                    failure_code="BOOTSTRAP_CORRECTION_RESPONSE_ID_UNCERTAIN",
+                    cleanup_state="RETAIN_UNCERTAIN",
+                )
+                raise
+            self.foundation.checkpoint_provider_response(
+                self.case_id,
+                client_request_id=request.client_request_id,
+                operation=BOOTSTRAP_GROUNDING_CORRECTION_OPERATION,
+                provider_response_id=response_id,
+            )
+        result = await self.adapter.finish_bootstrap(
+            request,
+            prepared=prepared,
+            session_id=self.session_id,
+            response_id=response_id,
+        )
+        return request, result
+
+    def _bootstrap_grounding_correction_request(
+        self,
+        *,
+        prepared: PreparedProviderContext,
+        placeholder: c.AnalyzerContextBinding,
+        revision: int,
+    ) -> c.BootstrapAnalyzerRequest:
+        return _request(
+            c.BootstrapAnalyzerRequest,
+            dict(
+                self._provider_base(
+                    operation=c.AnalyzerOperation.BOOTSTRAP,
+                    operation_key=f"{placeholder.context_id}:grounding-correction:1",
+                    context=placeholder,
+                    based_on_revision=revision + 1,
+                ),
+                source_set=prepared.source_set,
+                requested_output="INTERVIEW_BRIEF_CANDIDATE",
+            ),
+        )
+
     async def ensure_context(self) -> c.AnalyzerContextBinding:
         # Narrow unit-test/application ports that predate Task 27 may provide a
         # fully admitted active context without the operational projection.
@@ -291,6 +410,7 @@ class V4ProductionOrchestrator:
                     requested_output="INTERVIEW_BRIEF_CANDIDATE",
                 ),
             )
+            admission_request = request
             if resources["bootstrap_candidate_json"] and resources["context_json"]:
                 candidate = c.InterviewBriefCandidate.model_validate_json(
                     resources["bootstrap_candidate_json"]
@@ -339,6 +459,33 @@ class V4ProductionOrchestrator:
                     bootstrap_candidate_json=candidate.model_dump_json(),
                     context_json=context.model_dump_json(),
                 )
+            if self._bootstrap_has_unbound_exact_quote(candidate):
+                corrected = await self._correct_bootstrap_grounding(
+                    prepared=prepared,
+                    placeholder=placeholder,
+                    revision=revision,
+                )
+                if corrected is not None:
+                    admission_request, corrected_result = corrected
+                    candidate = corrected_result.candidate
+                    context = corrected_result.context
+                    # Keep the original BOOTSTRAP Response in its dedicated
+                    # checkpoint; the correction Response is tracked separately.
+                    self.foundation.checkpoint_preparation_resource(
+                        self.case_id,
+                        bootstrap_candidate_json=candidate.model_dump_json(),
+                        context_json=context.model_dump_json(),
+                    )
+            elif any(
+                item["operation"] == BOOTSTRAP_GROUNDING_CORRECTION_OPERATION
+                and item["provider_response_id"] == context.bootstrap_response_id
+                for item in self.foundation.pending_provider_responses(self.case_id)
+            ):
+                admission_request = self._bootstrap_grounding_correction_request(
+                    prepared=prepared,
+                    placeholder=placeholder,
+                    revision=revision,
+                )
             self.foundation.set_preparation_phase(
                 self.case_id, "FORMULATING_WORKSHOP_PLAN"
             )
@@ -352,14 +499,14 @@ class V4ProductionOrchestrator:
                 self.foundation.execute(c.ActivateAnalyzerContextCommand(**activate_values))
             admit_values = self._command_base(
                 "ADMIT_INTERVIEW_BRIEF",
-                str(request.analyzer_run_id),
+                str(admission_request.analyzer_run_id),
                 expected_revision=self.foundation.case_revision(self.case_id),
             )
             admit_values.update(
                 command_type="ADMIT_INTERVIEW_BRIEF",
-                analyzer_run_id=request.analyzer_run_id,
+                analyzer_run_id=admission_request.analyzer_run_id,
                 context_id=context_id,
-                provider_request_hash=request.request_hash,
+                provider_request_hash=admission_request.request_hash,
                 candidate=candidate,
             )
             if self.foundation.current_admitted_guidance(self.case_id) is None:

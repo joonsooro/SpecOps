@@ -1019,6 +1019,245 @@ def test_rejected_bootstrap_terminalizes_context_and_enters_cleanup_without_retr
     }
 
 
+def test_completed_unbound_bootstrap_gets_one_durable_grounding_correction(tmp_path):
+    class CorrectingBootstrapAdapter(CancellablePreparationAdapter):
+        def __init__(self):
+            super().__init__("never")
+            self.correction_start_calls = 0
+            self.correction_finish_calls = 0
+            self.cancel_known_response_once = True
+            self.initial_client_request_id = None
+            self.correction_client_request_id = None
+            self.correction_finish_client_request_ids = []
+
+        async def bootstrap(self, request, *, prepared, session_id):
+            self.initial_client_request_id = request.client_request_id
+            result = await super().bootstrap(
+                request, prepared=prepared, session_id=session_id
+            )
+            evidence = result.candidate.evidence_candidates[0].model_copy(
+                update={
+                    "locator": c.QuoteSearchLocator(
+                        locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
+                        exact_quote="This exact quote is absent from the PM source.",
+                        occurrence=1,
+                    ),
+                    "quoted_text_candidate": (
+                        "This exact quote is absent from the PM source."
+                    ),
+                }
+            )
+            return BootstrapResult(
+                context=result.context,
+                candidate=result.candidate.model_copy(
+                    update={"evidence_candidates": (evidence,)}
+                ),
+            )
+
+        async def start_bootstrap_grounding_correction(self, request, *, prepared):
+            self.correction_start_calls += 1
+            self.correction_client_request_id = request.client_request_id
+            return "resp_bootstrap_grounding_correction"
+
+        async def finish_bootstrap(
+            self, request, *, prepared, session_id, response_id
+        ):
+            self.correction_finish_calls += 1
+            self.correction_finish_client_request_ids.append(request.client_request_id)
+            assert response_id == "resp_bootstrap_grounding_correction"
+            if self.cancel_known_response_once:
+                self.cancel_known_response_once = False
+                raise asyncio.CancelledError
+            result = await DeterministicAdapter.bootstrap(
+                self, request, prepared=prepared, session_id=session_id
+            )
+            return BootstrapResult(
+                context=result.context.model_copy(
+                    update={"bootstrap_response_id": response_id}
+                ),
+                candidate=result.candidate,
+            )
+
+    adapter = CorrectingBootstrapAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    foundation = app.state.workshop_protocol_foundation
+    case_id = app.state.bootstrap.case_id
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(orchestrator.prepare_workshop())
+    pending = foundation.pending_provider_responses(case_id)
+    assert len(pending) == 1
+    assert pending[0]["operation"] == "BOOTSTRAP_GROUNDING_CORRECTION"
+    assert pending[0]["provider_response_id"] == "resp_bootstrap_grounding_correction"
+
+    ready = asyncio.run(orchestrator.prepare_workshop())
+    assert ready["phase"] == "READY"
+    assert adapter.bootstrap_creations == 1
+    assert adapter.correction_start_calls == 1
+    assert adapter.correction_finish_calls == 2
+    assert adapter.correction_client_request_id != adapter.initial_client_request_id
+    assert adapter.correction_finish_client_request_ids == [
+        adapter.correction_client_request_id,
+        adapter.correction_client_request_id,
+    ]
+    resources = foundation.preparation_resources(case_id)
+    assert resources["bootstrap_response_id"] == "resp_bootstrap"
+    assert (
+        foundation.active_analyzer_context(case_id).bootstrap_response_id
+        == "resp_bootstrap_grounding_correction"
+    )
+
+
+def test_uncertain_grounding_correction_create_is_never_repeated(tmp_path):
+    class UncertainCorrectionAdapter(CancellablePreparationAdapter):
+        def __init__(self):
+            super().__init__("never")
+            self.correction_start_calls = 0
+
+        async def bootstrap(self, request, *, prepared, session_id):
+            result = await super().bootstrap(
+                request, prepared=prepared, session_id=session_id
+            )
+            evidence = result.candidate.evidence_candidates[0].model_copy(
+                update={
+                    "locator": c.QuoteSearchLocator(
+                        locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
+                        exact_quote="This exact quote is absent from the PM source.",
+                        occurrence=1,
+                    ),
+                    "quoted_text_candidate": (
+                        "This exact quote is absent from the PM source."
+                    ),
+                }
+            )
+            return BootstrapResult(
+                context=result.context,
+                candidate=result.candidate.model_copy(
+                    update={"evidence_candidates": (evidence,)}
+                ),
+            )
+
+        async def start_bootstrap_grounding_correction(self, request, *, prepared):
+            self.correction_start_calls += 1
+            raise asyncio.CancelledError
+
+        async def finish_bootstrap(
+            self, request, *, prepared, session_id, response_id
+        ):
+            raise AssertionError("an unknown correction Response cannot be polled")
+
+    adapter = UncertainCorrectionAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    foundation = app.state.workshop_protocol_foundation
+    case_id = app.state.bootstrap.case_id
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(orchestrator.prepare_workshop())
+    failed = foundation.preparation_projection(case_id)
+    assert failed["phase"] == "FAILED"
+    assert failed["failure_code"] == "BOOTSTRAP_CORRECTION_RESPONSE_ID_UNCERTAIN"
+    assert failed["cleanup_state"] == "RETAIN_UNCERTAIN"
+    assert foundation.pending_provider_responses(case_id) == ()
+
+    assert asyncio.run(orchestrator.prepare_workshop()) == failed
+    assert adapter.bootstrap_creations == 1
+    assert adapter.correction_start_calls == 1
+
+
+def test_bad_grounding_correction_is_foundation_rejected_once_and_fully_cleaned(tmp_path):
+    class BadCorrectionAdapter(CancellablePreparationAdapter):
+        def __init__(self):
+            super().__init__("never")
+            self.correction_start_calls = 0
+            self.correction_finish_calls = 0
+
+        @staticmethod
+        def _unbound(result, response_id):
+            evidence = result.candidate.evidence_candidates[0].model_copy(
+                update={
+                    "locator": c.QuoteSearchLocator(
+                        locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
+                        exact_quote="This exact quote is absent from the PM source.",
+                        occurrence=1,
+                    ),
+                    "quoted_text_candidate": (
+                        "This exact quote is absent from the PM source."
+                    ),
+                }
+            )
+            return BootstrapResult(
+                context=result.context.model_copy(
+                    update={"bootstrap_response_id": response_id}
+                ),
+                candidate=result.candidate.model_copy(
+                    update={"evidence_candidates": (evidence,)}
+                ),
+            )
+
+        async def bootstrap(self, request, *, prepared, session_id):
+            result = await super().bootstrap(
+                request, prepared=prepared, session_id=session_id
+            )
+            return self._unbound(result, "resp_bootstrap")
+
+        async def start_bootstrap_grounding_correction(self, request, *, prepared):
+            self.correction_start_calls += 1
+            return "resp_bad_grounding_correction"
+
+        async def finish_bootstrap(
+            self, request, *, prepared, session_id, response_id
+        ):
+            self.correction_finish_calls += 1
+            result = await DeterministicAdapter.bootstrap(
+                self, request, prepared=prepared, session_id=session_id
+            )
+            return self._unbound(result, response_id)
+
+    adapter = BadCorrectionAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    foundation = app.state.workshop_protocol_foundation
+    case_id = app.state.bootstrap.case_id
+
+    failed = asyncio.run(orchestrator.prepare_workshop())
+    assert failed["phase"] == "FAILED"
+    assert failed["failure_code"] == "FOUNDATION_REJECTED_EVIDENCE_BINDING_FAILED"
+    assert failed["cleanup_state"] == "PENDING"
+    assert foundation.active_analyzer_context(case_id) is None
+    assert adapter.bootstrap_creations == 1
+    assert adapter.correction_start_calls == 1
+    assert adapter.correction_finish_calls == 1
+
+    assert asyncio.run(orchestrator.prepare_workshop()) == failed
+    assert adapter.correction_start_calls == 1
+    cleaned = asyncio.run(orchestrator.cleanup_preparation())
+    assert cleaned["cleanup_state"] == "COMPLETED"
+    assert adapter.cleaned_resources == {
+        "resp_bootstrap",
+        "resp_bad_grounding_correction",
+        "conv_task27_cancellable",
+        "file_task27_1",
+        "file_task27_2",
+    }
+
+
 @pytest.mark.parametrize(
     "stage",
     (

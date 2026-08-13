@@ -403,6 +403,31 @@ class StoredConversationOpenAIAdapter:
     ) -> str:
         """Create one stored background Response and return its durable identity."""
 
+        return await self._start_bootstrap(
+            request, prepared=prepared, grounding_correction=False
+        )
+
+    async def start_bootstrap_grounding_correction(
+        self,
+        request: contracts.BootstrapAnalyzerRequest,
+        *,
+        prepared: PreparedProviderContext,
+    ) -> str:
+        """Create the sole correction after a completed candidate failed source preflight."""
+
+        return await self._start_bootstrap(
+            request, prepared=prepared, grounding_correction=True
+        )
+
+    async def _start_bootstrap(
+        self,
+        request: contracts.BootstrapAnalyzerRequest,
+        *,
+        prepared: PreparedProviderContext,
+        grounding_correction: bool,
+    ) -> str:
+        """Create one background Response; callers durably checkpoint the returned ID."""
+
         if request.provider_conversation_id != prepared.provider_conversation_id:
             raise ValueError("bootstrap request does not bind the prepared Conversation")
         if request.source_set != prepared.source_set:
@@ -415,7 +440,11 @@ class StoredConversationOpenAIAdapter:
             client_request_id=request.client_request_id,
             started_at=started_at,
         )
-        arguments = self._response_arguments(request, bootstrap=True)
+        arguments = self._response_arguments(
+            request,
+            bootstrap=not grounding_correction,
+            grounding_correction=grounding_correction,
+        )
         arguments["background"] = True
         try:
             response = await asyncio.wait_for(
@@ -878,11 +907,30 @@ class StoredConversationOpenAIAdapter:
         return candidate, response_id
 
     def _response_arguments(
-        self, request: contracts.AnalyzerProviderRequest, *, bootstrap: bool
+        self,
+        request: contracts.AnalyzerProviderRequest,
+        *,
+        bootstrap: bool,
+        grounding_correction: bool = False,
     ) -> dict[str, Any]:
         operation = contracts.AnalyzerOperation(request.request_type)
         schema_name, schema, _ = native_schema_for(operation)
         content: list[dict[str, str]] = []
+        if grounding_correction:
+            if not isinstance(request, contracts.BootstrapAnalyzerRequest):
+                raise ValueError("grounding correction is BOOTSTRAP-only")
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "The prior completed BOOTSTRAP candidate was deterministically rejected "
+                        "because at least one QUOTE_SEARCH exact_quote did not occur verbatim in "
+                        "its named source. Re-read the two source files already stored in this "
+                        "Conversation and return one complete replacement candidate. Omit every "
+                        "unverifiable evidence candidate and every proposal that depends on it."
+                    ),
+                }
+            )
         if bootstrap:
             assert isinstance(request, contracts.BootstrapAnalyzerRequest)
             content.extend(

@@ -680,6 +680,50 @@ def test_background_bootstrap_polls_one_stored_response_past_60_second_slow_obse
     asyncio.run(scenario())
 
 
+def test_grounding_correction_reuses_conversation_without_reattaching_source_files():
+    async def scenario():
+        responses = _BackgroundResponses()
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=responses),
+            now=lambda: NOW,
+        )
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+            _source(
+                c.SourceRole.TECHNICAL_CONTRACT,
+                11,
+                "technical-contract.md",
+                b"private technical source",
+            ),
+        )
+        prepared = adapter.prepared_from_ids(
+            sources, ("file_pm", "file_technical"), "conv_background"
+        )
+        request = _bootstrap_request(prepared)
+
+        response_id = await adapter.start_bootstrap_grounding_correction(
+            request, prepared=prepared
+        )
+
+        assert response_id == "resp_background_bootstrap"
+        call = responses.create_calls[0]
+        assert call["background"] is True
+        assert call["conversation"] == "conv_background"
+        assert call["extra_headers"] == {
+            "X-Client-Request-Id": request.client_request_id
+        }
+        content = call["input"][0]["content"]
+        assert [item["type"] for item in content] == ["input_text", "input_text"]
+        assert all(item["type"] != "input_file" for item in content)
+        encoded = json.dumps(call)
+        assert "prior completed BOOTSTRAP candidate" in encoded
+        assert "private PM source" not in encoded
+        assert "private technical source" not in encoded
+
+    asyncio.run(scenario())
+
+
 def test_cancelled_background_wait_resumes_the_same_response_without_recreate():
     async def scenario():
         clock = _ManualMonotonic()

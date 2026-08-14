@@ -1654,12 +1654,13 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         self, connection, case_id: UUID, session_id: UUID, now: str
     ) -> None:
         runway = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        guidance = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
         jobs = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
         current_guidance = connection.execute(
-            select(runway.c.guidance_id)
-            .where(runway.c.case_id == str(case_id), runway.c.status == "AVAILABLE")
-            .order_by(runway.c.admitted_at.desc(), runway.c.position)
-            .limit(1)
+            select(guidance.c.guidance_id).where(
+                guidance.c.case_id == str(case_id),
+                guidance.c.valid == 1,
+            )
         ).scalar_one_or_none()
         if current_guidance is None:
             return
@@ -1672,19 +1673,18 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             )
             .order_by(runway.c.position)
         ).mappings().all()
-        if not current:
-            return
-        connection.execute(
-            update(runway)
-            .where(
-                runway.c.case_id == str(case_id),
-                runway.c.guidance_id == current_guidance,
-                runway.c.question_id == current[0]["question_id"],
+        if current:
+            connection.execute(
+                update(runway)
+                .where(
+                    runway.c.case_id == str(case_id),
+                    runway.c.guidance_id == current_guidance,
+                    runway.c.question_id == current[0]["question_id"],
+                )
+                .values(status="ASKED", consumed_at=now)
             )
-            .values(status="ASKED", consumed_at=now)
-        )
-        depth = len(current) - 1
-        if depth != 2:
+        depth = max(0, len(current) - 1)
+        if depth > 2:
             return
         subject_id = str(current_guidance)
         existing = connection.execute(

@@ -1460,6 +1460,94 @@ def test_depth_two_enqueues_one_guidance_and_turn_jobs_remain_first(tmp_path):
     assert claimed["operation"] == "TURN_ANALYSIS"
 
 
+def test_current_depth_one_guidance_enqueues_replenishment_not_superseded_runway(
+    tmp_path,
+):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    brief_receipt = _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    for sequence in range(1, 4):
+        foundation.execute(
+            _transcript_command(
+                foundation.case_revision(CASE_ID),
+                sequence,
+                f"Final answer {sequence}.",
+            )
+        )
+    initial_guidance = foundation.current_admitted_guidance(CASE_ID)
+    assert initial_guidance is not None
+    assert foundation.runway_projection(CASE_ID)["depth"] == 1
+
+    question = next(
+        item
+        for item in brief_receipt.identity_mappings
+        if item.entity_kind == "QUESTION" and item.candidate_key == "question-4"
+    )
+    run_id = uuid4()
+    request_hash = "sha256:" + "9" * 64
+    candidate = c.GuidanceCandidate(
+        protocol_version="1.0.0",
+        output_type="GUIDANCE_CANDIDATE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        request_hash=request_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        recommended_question=c.GuidanceQuestion(
+            question_ref=c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=question.foundation_id,
+                expected_version=question.record_version,
+            ),
+            exact_text="Which confirmed export choice applies to clarification area 4?",
+            reason="Clarification area 4 is selected for the live runway.",
+        ),
+        safe_alternates=(),
+        do_not_ask_question_refs=(),
+        dependencies=(
+            c.GuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_ref=None,
+            ),
+        ),
+        acknowledgement_suggestion="One verified question remains available.",
+    )
+    values = _base(foundation.case_revision(CASE_ID))
+    values.update(
+        command_type="ADMIT_GUIDANCE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=request_hash,
+        candidate=candidate,
+    )
+    foundation.execute(c.AdmitGuidanceCommand(**values))
+    current_guidance = foundation.current_admitted_guidance(CASE_ID)
+    assert current_guidance is not None
+    assert current_guidance.guidance_id != initial_guidance.guidance_id
+    assert foundation.runway_projection(CASE_ID)["depth"] == 1
+
+    foundation.execute(
+        _transcript_command(
+            foundation.case_revision(CASE_ID),
+            4,
+            "The only current admitted question has now been answered.",
+        )
+    )
+
+    assert foundation.runway_projection(CASE_ID)["depth"] == 0
+    guidance_jobs = [
+        item
+        for item in foundation.analyzer_jobs(CASE_ID)
+        if item["operation"] == c.AnalyzerOperation.GUIDANCE.value
+    ]
+    assert len(guidance_jobs) == 2
+    assert {item["subject_id"] for item in guidance_jobs} == {
+        str(initial_guidance.guidance_id),
+        str(current_guidance.guidance_id),
+    }
+
+
 def test_zero_runway_instruction_is_fixed_and_never_invents_a_question(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)

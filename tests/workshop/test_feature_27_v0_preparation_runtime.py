@@ -1223,6 +1223,114 @@ def test_voice_provider_reader_cancellation_timeout_does_not_block_teardown(capl
     assert all(event["duration_ms"] >= 0 for event in events)
 
 
+def test_voice_end_bounds_reader_then_close_and_releases_complete_handler(caplog):
+    async def scenario():
+        class SlowTeardownSession:
+            def __init__(self):
+                self.reader_cancelled = False
+                self.close_called = False
+                self.close_cancelled = False
+
+            async def send_audio(self, frame):
+                return None
+
+            async def send_text(self, value):
+                return None
+
+            async def interrupt(self):
+                return None
+
+            async def events(self):
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.reader_cancelled = True
+                    await asyncio.sleep(0.05)
+                if False:
+                    yield None
+
+            def close(self):
+                self.close_called = True
+
+                async def wait_until_cancelled():
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        self.close_cancelled = True
+
+                return wait_until_cancelled()
+
+        class Provider:
+            def __init__(self, session):
+                self.session = session
+
+            async def connect(self, context):
+                return self.session
+
+        class Socket:
+            def __init__(self):
+                self.messages = []
+
+            async def accept(self):
+                return None
+
+            async def send_json(self, value):
+                self.messages.append(value)
+
+            async def send_bytes(self, value):
+                raise AssertionError("fixture provider must not emit audio")
+
+            async def receive(self):
+                return {"text": json.dumps({"type": "END"})}
+
+        foundation = SimpleNamespace(
+            preparation_projection=lambda case_id: {
+                "phase": "READY",
+                "workshop_complete_at": None,
+            },
+            runway_projection=lambda case_id: {
+                "depth": 1,
+                "questions": [{"exact_text": "Which export scope should be canonical?"}],
+            },
+            voice_session_card=lambda case_id: SimpleNamespace(
+                runway_health=SimpleNamespace(value="HEALTHY")
+            ),
+            latest_final_transcript=lambda case_id: None,
+        )
+        orchestrator = SimpleNamespace(foundation=foundation, case_id=CASE_ID)
+        session = SlowTeardownSession()
+        socket = Socket()
+        transport = V4LiveTransport(
+            Provider(session),
+            orchestrator,
+            provider_task_cancel_timeout_seconds=0.01,
+            provider_close_timeout_seconds=0.01,
+        )
+        started = asyncio.get_running_loop().time()
+        await asyncio.wait_for(transport.handle(socket), timeout=0.2)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert elapsed < 0.08
+        assert socket.messages == [
+            {"type": "CALL_STATE", "state": "CONNECTING"},
+            {"type": "CALL_STATE", "state": "LISTENING"},
+            {"type": "CALL_STATE", "state": "ENDED"},
+        ]
+        assert session.reader_cancelled is True
+        assert session.close_called is True
+        await asyncio.sleep(0.05)
+
+    with caplog.at_level("INFO", logger="specops.workshop.voice"):
+        asyncio.run(scenario())
+    events = [json.loads(record.message) for record in caplog.records]
+    assert [event["event"] for event in events] == [
+        "voice_provider_reader_cancel.started",
+        "voice_provider_reader_cancel.timed_out",
+        "voice_provider_close.started",
+        "voice_provider_close.timed_out",
+    ]
+    assert all(event["correlation_id"] == str(CASE_ID) for event in events)
+
+
 def test_voice_guidance_refresh_is_applied_only_at_final_turn_boundary():
     async def scenario():
         events = []

@@ -3468,6 +3468,58 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ).scalar_one_or_none()
         return None if row is None else c.DecisionBatchReviewView.model_validate_json(row)
 
+    def decision_view_by_binding(
+        self,
+        case_id: UUID,
+        view_id: UUID,
+        view_hash: str,
+    ) -> c.DecisionBatchReviewView | None:
+        """Return an exact historical view so Foundation can decide replay vs stale."""
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.view_json).where(
+                    table.c.case_id == str(case_id),
+                    table.c.view_id == str(view_id),
+                    table.c.view_hash == view_hash,
+                )
+            ).scalar_one_or_none()
+        return None if row is None else c.DecisionBatchReviewView.model_validate_json(row)
+
+    def decision_response_replay_context(
+        self,
+        case_id: UUID,
+        idempotency_key: str,
+    ) -> tuple[c.DecisionBatchReviewView, int] | None:
+        """Recover the view and revision bound to a ledgered decision response."""
+
+        ledger = WORKSHOP_PROTOCOL_TABLES["workshop_command_ledger"]
+        views = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        with self.engine.connect() as connection:
+            recorded = connection.execute(
+                select(ledger.c.receipt_json).where(
+                    ledger.c.case_id == str(case_id),
+                    ledger.c.idempotency_key == idempotency_key,
+                    ledger.c.command_type == "APPLY_DECISION_BATCH_RESPONSE",
+                )
+            ).scalar_one_or_none()
+            if recorded is None:
+                return None
+            receipt = c.DecisionBatchResponseReceipt.model_validate_json(recorded)
+            row = connection.execute(
+                select(views.c.view_json).where(
+                    views.c.case_id == str(case_id),
+                    views.c.view_id == str(receipt.decision_batch_view_id),
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        return (
+            c.DecisionBatchReviewView.model_validate_json(row),
+            receipt.command.prior_case_revision,
+        )
+
     def current_artifact_review(self, case_id: UUID) -> dict[str, Any] | None:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"]
         with self.engine.connect() as connection:

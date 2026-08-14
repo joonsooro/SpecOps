@@ -1525,11 +1525,12 @@ class V4ProductionOrchestrator:
     ) -> c.DecisionBatchResponseReceipt:
         """Map Gemini's mechanical selection to exact Foundation review items."""
 
-        view = self.foundation.current_decision_view(self.case_id)
-        if view is None or (
-            selection.decision_batch_view_id != view.view_id
-            or selection.decision_batch_view_hash != view.view_hash
-        ):
+        view = self.foundation.decision_view_by_binding(
+            self.case_id,
+            selection.decision_batch_view_id,
+            selection.decision_batch_view_hash,
+        )
+        if view is None:
             raise ValueError("voice selection is not bound to the current review")
         by_handle = {item.handle: item for item in view.items}
         actions = []
@@ -1584,20 +1585,36 @@ class V4ProductionOrchestrator:
         the server binds the current revision and immutable view identifiers.
         """
 
-        view = self.foundation.current_decision_view(self.case_id)
+        selection_event_id = _stable_id(
+            self.case_id, "browser-review-selection", operation_key
+        )
+        response_idempotency_key = (
+            f"v4-apply_decision_batch_response-{selection_event_id}"
+        )
+        replay_context = self.foundation.decision_response_replay_context(
+            self.case_id, response_idempotency_key
+        )
+        view = (
+            replay_context[0]
+            if replay_context is not None
+            else self.foundation.current_decision_view(self.case_id)
+        )
         if view is None:
             raise ValueError("no current Foundation decision review exists")
+        observed_case_revision = (
+            replay_context[1]
+            if replay_context is not None
+            else self.foundation.case_revision(self.case_id)
+        )
         selection = c.VoiceConfirmationSelectionCandidate(
             protocol_version=c.PROTOCOL_VERSION,
             output_type="VOICE_CONFIRMATION_SELECTION_CANDIDATE",
             producer="VOICE",
-            selection_event_id=_stable_id(
-                self.case_id, "browser-review-selection", operation_key
-            ),
+            selection_event_id=selection_event_id,
             mapping_status=c.ConfirmationMappingStatus.MAPPED,
             decision_batch_view_id=view.view_id,
             decision_batch_view_hash=view.view_hash,
-            observed_case_revision=self.foundation.case_revision(self.case_id),
+            observed_case_revision=observed_case_revision,
             transcript_event_id=response_transcript_event_id,
             speaker_actor_id=authentication.actor_id,
             selections=selections,

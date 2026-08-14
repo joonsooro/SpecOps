@@ -38,6 +38,7 @@ from test_feature_25_v4_foundation import (
     CASE_ID,
     CONTEXT_ID,
     NOW,
+    PM_ID,
     REQUEST_HASH,
     RUN_ID,
     SOURCE_SET_HASH,
@@ -45,6 +46,7 @@ from test_feature_25_v4_foundation import (
     _base,
     _runtime,
     _transcript_command,
+    _turn_candidate,
 )
 from test_feature_26_v4_production_seam import (
     ROOT,
@@ -139,6 +141,152 @@ def _bootstrap_provider_error(
         ),
         bootstrap_correction_code=correction_code,
     )
+
+
+def _decision_replay_fixture(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    opening = _transcript_command(4, 1, "Confirm UTF-8 and one header row.")
+    foundation.execute(opening)
+    candidate = _turn_candidate(opening.transcript.event_id, 5)
+    admit_values = _base(5)
+    admit_values.update(
+        command_type="ADMIT_TURN_ANALYSIS",
+        analyzer_run_id=RUN_ID,
+        context_id=CONTEXT_ID,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+    admitted = foundation.execute(c.AdmitTurnAnalysisCommand(**admit_values))
+    decision_ids = tuple(
+        item.foundation_id
+        for item in admitted.identity_mappings
+        if item.entity_kind == "DECISION"
+    )
+    review_values = _base(6)
+    review_values.update(
+        command_type="MATERIALIZE_DECISION_BATCH_REVIEW",
+        pending_decision_ids=decision_ids,
+        derived_from_cluster_ids=(),
+    )
+    foundation.execute(c.MaterializeDecisionBatchReviewCommand(**review_values))
+    view = foundation.current_decision_view(CASE_ID)
+    assert view is not None
+    confirmation = _transcript_command(7, 2, "Confirm A and reject B.")
+    foundation.execute(confirmation)
+    authentication = c.VerbalSelfAssertion(
+        authentication_method=c.ActorAuthenticationMethod.VERBAL_SELF_ASSERTION,
+        assurance_level=c.AssuranceLevel.SELF_ASSERTED,
+        actor_id=PM_ID,
+        asserted_display_name="PM",
+        claimed_role="Product Manager",
+        assertion_transcript_event_id=confirmation.transcript.event_id,
+    )
+    selections = (
+        c.VoiceConfirmationSelectionItemCandidate(
+            handle=view.items[0].handle,
+            action=c.ConfirmationAction.CONFIRM,
+            revision_span=None,
+        ),
+        c.VoiceConfirmationSelectionItemCandidate(
+            handle=view.items[1].handle,
+            action=c.ConfirmationAction.REJECT,
+            revision_span=None,
+        ),
+    )
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=SimpleNamespace(source_set_hash=lambda sources: SOURCE_SET_HASH),
+        case_id=CASE_ID,
+        session_id=foundation.active_analyzer_context(CASE_ID).session_id,
+        sources=(),
+        analyzer_contract=foundation.active_analyzer_context(CASE_ID).analyzer_contract,
+        now=lambda: NOW,
+    )
+    return foundation, orchestrator, view, confirmation, authentication, selections
+
+
+def test_voice_decision_duplicate_reaches_foundation_replay_after_view_invalidation(
+    tmp_path,
+):
+    foundation, orchestrator, view, confirmation, authentication, selections = (
+        _decision_replay_fixture(tmp_path)
+    )
+    selection = c.VoiceConfirmationSelectionCandidate(
+        protocol_version=c.PROTOCOL_VERSION,
+        output_type="VOICE_CONFIRMATION_SELECTION_CANDIDATE",
+        producer="VOICE",
+        selection_event_id=uuid4(),
+        mapping_status=c.ConfirmationMappingStatus.MAPPED,
+        decision_batch_view_id=view.view_id,
+        decision_batch_view_hash=view.view_hash,
+        observed_case_revision=foundation.case_revision(CASE_ID),
+        transcript_event_id=confirmation.transcript.event_id,
+        speaker_actor_id=PM_ID,
+        selections=selections,
+        unmentioned_item_policy="REMAIN_PENDING",
+        clarification_question=None,
+    )
+
+    first = orchestrator.apply_voice_selection(selection, authentication)
+    revision_after_first = foundation.case_revision(CASE_ID)
+    replay = orchestrator.apply_voice_selection(selection, authentication)
+
+    assert replay == first
+    assert foundation.case_revision(CASE_ID) == revision_after_first
+    conflicting = selection.model_copy(
+        update={
+            "selections": (
+                selections[0].model_copy(update={"action": c.ConfirmationAction.REJECT}),
+                selections[1],
+            )
+        }
+    )
+    with pytest.raises(FoundationProtocolError) as conflict:
+        orchestrator.apply_voice_selection(conflicting, authentication)
+    assert conflict.value.code is c.FoundationRejectionCode.DUPLICATE_CONFLICT
+    with pytest.raises(FoundationProtocolError) as stale:
+        orchestrator.apply_voice_selection(
+            selection.model_copy(update={"selection_event_id": uuid4()}),
+            authentication,
+        )
+    assert stale.value.code is c.FoundationRejectionCode.STALE_VIEW
+
+
+def test_browser_decision_duplicate_recovers_only_its_ledgered_view(tmp_path):
+    runtime = tmp_path / "browser"
+    runtime.mkdir()
+    foundation, orchestrator, _, confirmation, authentication, selections = (
+        _decision_replay_fixture(runtime)
+    )
+
+    first = orchestrator.apply_review_selection(
+        operation_key="browser-decision-response",
+        response_transcript_event_id=confirmation.transcript.event_id,
+        selections=selections,
+        authentication=authentication,
+    )
+    revision_after_first = foundation.case_revision(CASE_ID)
+    replay = orchestrator.apply_review_selection(
+        operation_key="browser-decision-response",
+        response_transcript_event_id=confirmation.transcript.event_id,
+        selections=selections,
+        authentication=authentication,
+    )
+
+    assert replay == first
+    assert foundation.case_revision(CASE_ID) == revision_after_first
+    with pytest.raises(FoundationProtocolError) as conflict:
+        orchestrator.apply_review_selection(
+            operation_key="browser-decision-response",
+            response_transcript_event_id=confirmation.transcript.event_id,
+            selections=(
+                selections[0].model_copy(update={"action": c.ConfirmationAction.REJECT}),
+                selections[1],
+            ),
+            authentication=authentication,
+        )
+    assert conflict.value.code is c.FoundationRejectionCode.DUPLICATE_CONFLICT
 
 
 def _admit_brief(

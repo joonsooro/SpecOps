@@ -724,6 +724,99 @@ def test_grounding_correction_reuses_conversation_without_reattaching_source_fil
     asyncio.run(scenario())
 
 
+def test_graph_correction_reuses_conversation_without_reattaching_source_files():
+    async def scenario():
+        responses = _BackgroundResponses()
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=responses),
+            now=lambda: NOW,
+        )
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+            _source(
+                c.SourceRole.TECHNICAL_CONTRACT,
+                11,
+                "technical-contract.md",
+                b"private technical source",
+            ),
+        )
+        prepared = adapter.prepared_from_ids(
+            sources, ("file_pm", "file_technical"), "conv_background"
+        )
+        request = _bootstrap_request(prepared)
+
+        response_id = await adapter.start_bootstrap_graph_correction(
+            request, prepared=prepared
+        )
+
+        assert response_id == "resp_background_bootstrap"
+        call = responses.create_calls[0]
+        assert call["background"] is True
+        assert call["conversation"] == "conv_background"
+        assert call["extra_headers"] == {
+            "X-Client-Request-Id": request.client_request_id
+        }
+        content = call["input"][0]["content"]
+        assert [item["type"] for item in content] == ["input_text", "input_text"]
+        assert all(item["type"] != "input_file" for item in content)
+        encoded = json.dumps(call)
+        assert "question referenced a problem key" in encoded
+        assert "problems[].candidate_key" in encoded
+        assert "private PM source" not in encoded
+        assert "private technical source" not in encoded
+
+    asyncio.run(scenario())
+
+
+def test_bootstrap_unknown_question_problem_reference_exposes_only_safe_correction_code():
+    async def scenario():
+        responses = _BackgroundResponses(cancel_wait_once=True)
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=responses),
+            now=lambda: NOW,
+        )
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+            _source(
+                c.SourceRole.TECHNICAL_CONTRACT,
+                11,
+                "technical-contract.md",
+                b"private technical source",
+            ),
+        )
+        prepared = adapter.prepared_from_ids(
+            sources, ("file_pm", "file_technical"), "conv_background"
+        )
+        request = _bootstrap_request(prepared)
+        payload = _brief(request).model_dump(mode="json")
+        payload["questions"][0]["addresses_problem_keys"] = [
+            "private-missing-problem-key"
+        ]
+        responses.output_text = json.dumps(payload)
+
+        response_id = await adapter.start_bootstrap(request, prepared=prepared)
+        with pytest.raises(ProviderAdapterError) as captured:
+            await adapter.finish_bootstrap(
+                request,
+                prepared=prepared,
+                session_id=SESSION_ID,
+                response_id=response_id,
+            )
+
+        assert captured.value.receipt.code is c.ProviderFailureCode.OUTPUT_INVALID
+        assert (
+            captured.value.bootstrap_correction_code
+            == "UNKNOWN_QUESTION_PROBLEM_REFERENCE"
+        )
+        dumped = captured.value.receipt.model_dump_json()
+        assert "private-missing-problem-key" not in dumped
+        assert "private PM source" not in dumped
+
+    asyncio.run(scenario())
+
+
 def test_cancelled_background_wait_resumes_the_same_response_without_recreate():
     async def scenario():
         clock = _ManualMonotonic()

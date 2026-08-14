@@ -113,6 +113,31 @@ def _brief(*, unsafe_question_index: int | None = None) -> c.InterviewBriefCandi
     )
 
 
+def _bootstrap_provider_error(
+    code: c.ProviderFailureCode,
+    *,
+    correction_code: str | None = None,
+) -> ProviderAdapterError:
+    return ProviderAdapterError(
+        c.ProviderFailureReceipt(
+            provider=c.ProviderName.OPENAI,
+            stage=(
+                c.ProviderProcessingStage.LOCAL_VALIDATION
+                if code is c.ProviderFailureCode.OUTPUT_INVALID
+                else c.ProviderProcessingStage.BOOTSTRAP
+            ),
+            client_request_id="client-bootstrap-safe-failure",
+            provider_request_id="req-bootstrap-safe-failure",
+            status_code=None,
+            code=code,
+            retryable=code is not c.ProviderFailureCode.OUTPUT_INVALID,
+            validation_diagnostics=(),
+            occurred_at=NOW,
+        ),
+        bootstrap_correction_code=correction_code,
+    )
+
+
 def _admit_brief(foundation, *, unsafe_question_index: int | None = None):
     values = _base(4)
     values.update(
@@ -1149,6 +1174,191 @@ def test_completed_unbound_bootstrap_gets_one_durable_grounding_correction(tmp_p
         foundation.active_analyzer_context(case_id).bootstrap_response_id
         == "resp_bootstrap_grounding_correction"
     )
+
+
+def test_unknown_question_problem_reference_gets_one_durable_graph_correction(tmp_path):
+    class GraphCorrectingAdapter(CancellablePreparationAdapter):
+        def __init__(self):
+            super().__init__("never")
+            self.primary_start_calls = 0
+            self.primary_finish_calls = 0
+            self.graph_start_calls = 0
+            self.graph_finish_calls = 0
+            self.primary_client_request_id = None
+            self.correction_client_request_id = None
+
+        async def start_bootstrap(self, request, *, prepared):
+            self.primary_start_calls += 1
+            self.primary_client_request_id = request.client_request_id
+            return "resp_bootstrap_graph_invalid"
+
+        async def start_bootstrap_graph_correction(self, request, *, prepared):
+            self.graph_start_calls += 1
+            self.correction_client_request_id = request.client_request_id
+            return "resp_bootstrap_graph_correction"
+
+        async def start_bootstrap_grounding_correction(self, request, *, prepared):
+            raise AssertionError("the shared correction slot cannot run twice")
+
+        async def finish_bootstrap(
+            self, request, *, prepared, session_id, response_id
+        ):
+            if response_id == "resp_bootstrap_graph_invalid":
+                self.primary_finish_calls += 1
+                raise _bootstrap_provider_error(
+                    c.ProviderFailureCode.OUTPUT_INVALID,
+                    correction_code="UNKNOWN_QUESTION_PROBLEM_REFERENCE",
+                )
+            assert response_id == "resp_bootstrap_graph_correction"
+            self.graph_finish_calls += 1
+            result = await DeterministicAdapter.bootstrap(
+                self, request, prepared=prepared, session_id=session_id
+            )
+            return BootstrapResult(
+                context=result.context.model_copy(
+                    update={"bootstrap_response_id": response_id}
+                ),
+                candidate=result.candidate,
+            )
+
+    adapter = GraphCorrectingAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    foundation = app.state.workshop_protocol_foundation
+    case_id = app.state.bootstrap.case_id
+
+    ready = asyncio.run(orchestrator.prepare_workshop())
+
+    assert ready["phase"] == "READY"
+    assert adapter.primary_start_calls == 1
+    assert adapter.primary_finish_calls == 1
+    assert adapter.graph_start_calls == 1
+    assert adapter.graph_finish_calls == 1
+    assert adapter.correction_client_request_id != adapter.primary_client_request_id
+    resources = foundation.preparation_resources(case_id)
+    assert resources["bootstrap_response_id"] == "resp_bootstrap_graph_invalid"
+    pending = foundation.pending_provider_responses(case_id)
+    assert len(pending) == 1
+    assert pending[0]["operation"] == "BOOTSTRAP_GROUNDING_CORRECTION"
+    assert pending[0]["provider_response_id"] == "resp_bootstrap_graph_correction"
+    assert (
+        foundation.active_analyzer_context(case_id).bootstrap_response_id
+        == "resp_bootstrap_graph_correction"
+    )
+
+
+def test_bad_graph_correction_terminalizes_without_a_third_generation(tmp_path):
+    class BadGraphCorrectionAdapter(CancellablePreparationAdapter):
+        def __init__(self):
+            super().__init__("never")
+            self.primary_start_calls = 0
+            self.graph_start_calls = 0
+            self.finish_calls = 0
+
+        async def start_bootstrap(self, request, *, prepared):
+            self.primary_start_calls += 1
+            return "resp_bootstrap_graph_invalid"
+
+        async def start_bootstrap_graph_correction(self, request, *, prepared):
+            self.graph_start_calls += 1
+            return "resp_bootstrap_graph_still_invalid"
+
+        async def start_bootstrap_grounding_correction(self, request, *, prepared):
+            raise AssertionError("a second correction must never be created")
+
+        async def finish_bootstrap(
+            self, request, *, prepared, session_id, response_id
+        ):
+            self.finish_calls += 1
+            raise _bootstrap_provider_error(
+                c.ProviderFailureCode.OUTPUT_INVALID,
+                correction_code="UNKNOWN_QUESTION_PROBLEM_REFERENCE",
+            )
+
+    adapter = BadGraphCorrectionAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+    foundation = app.state.workshop_protocol_foundation
+    case_id = app.state.bootstrap.case_id
+
+    failed = asyncio.run(orchestrator.prepare_workshop())
+
+    assert failed["phase"] == "FAILED"
+    assert failed["failure_code"] == "BOOTSTRAP_CORRECTION_OUTPUT_INVALID"
+    assert failed["cleanup_state"] == "PENDING"
+    assert failed["cleanup_reason"] == "UNRECOVERABLE_PREPARATION_FAILURE"
+    assert adapter.primary_start_calls == 1
+    assert adapter.graph_start_calls == 1
+    assert adapter.finish_calls == 2
+    assert asyncio.run(orchestrator.prepare_workshop()) == failed
+    assert adapter.graph_start_calls == 1
+
+    cleaned = asyncio.run(orchestrator.cleanup_preparation())
+    assert cleaned["cleanup_state"] == "COMPLETED"
+    assert adapter.cleaned_resources == {
+        "resp_bootstrap_graph_invalid",
+        "resp_bootstrap_graph_still_invalid",
+        "conv_task27_cancellable",
+        "file_task27_1",
+        "file_task27_2",
+    }
+
+
+def test_known_bootstrap_response_transport_failure_resumes_without_recreate(tmp_path):
+    class ResumableBootstrapAdapter(CancellablePreparationAdapter):
+        def __init__(self):
+            super().__init__("never")
+            self.start_calls = 0
+            self.finish_calls = 0
+
+        async def start_bootstrap(self, request, *, prepared):
+            self.start_calls += 1
+            return "resp_bootstrap_known"
+
+        async def finish_bootstrap(
+            self, request, *, prepared, session_id, response_id
+        ):
+            self.finish_calls += 1
+            assert response_id == "resp_bootstrap_known"
+            if self.finish_calls == 1:
+                raise _bootstrap_provider_error(c.ProviderFailureCode.TIMEOUT)
+            result = await DeterministicAdapter.bootstrap(
+                self, request, prepared=prepared, session_id=session_id
+            )
+            return BootstrapResult(
+                context=result.context.model_copy(
+                    update={"bootstrap_response_id": response_id}
+                ),
+                candidate=result.candidate,
+            )
+
+    adapter = ResumableBootstrapAdapter()
+    app = create_app(
+        settings=configured(tmp_path),
+        source_catalog=SourceCatalog(ROOT),
+        live_provider=object(),
+        analyzer_adapter=adapter,
+    )
+    orchestrator = app.state.workshop_protocol_orchestrator
+
+    with pytest.raises(ProviderAdapterError) as captured:
+        asyncio.run(orchestrator.prepare_workshop())
+    assert captured.value.receipt.code is c.ProviderFailureCode.TIMEOUT
+
+    ready = asyncio.run(orchestrator.prepare_workshop())
+    assert ready["phase"] == "READY"
+    assert adapter.start_calls == 1
+    assert adapter.finish_calls == 2
 
 
 def test_uncertain_grounding_correction_create_is_never_repeated(tmp_path):

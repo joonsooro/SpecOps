@@ -30,6 +30,7 @@ from specops_workflow.workshop_completion import (
 from .openai_adapter import (
     BootstrapResult,
     PreparedProviderContext,
+    ProviderAdapterError,
     ProviderCleanupReceipt,
     ProviderSourceUpload,
     StoredConversationOpenAIAdapter,
@@ -45,7 +46,9 @@ PRODUCTION_NAMESPACE = UUID("e52d201a-e1d0-4df7-90e5-39ac4091998d")
 ZERO_HASH = "sha256:" + "0" * 64
 RESTART_GRACE_SECONDS = 15 * 60
 CLEANUP_RETRY_SECONDS = 30
-BOOTSTRAP_GROUNDING_CORRECTION_OPERATION = "BOOTSTRAP_GROUNDING_CORRECTION"
+# Keep the established persisted label for restart compatibility; the single
+# slot now covers either of the two allowlisted BOOTSTRAP correction causes.
+BOOTSTRAP_CORRECTION_OPERATION = "BOOTSTRAP_GROUNDING_CORRECTION"
 
 
 def _stable_id(*parts: object) -> UUID:
@@ -205,21 +208,46 @@ class V4ProductionOrchestrator:
                 return True
         return False
 
-    async def _correct_bootstrap_grounding(
+    def _terminalize_known_preparation_failure(self, failure_code: str) -> None:
+        self.foundation.set_preparation_phase(
+            self.case_id,
+            "FAILED",
+            failure_code=failure_code,
+            cleanup_state="PENDING",
+        )
+        self.foundation.set_provider_resource_lifecycle(
+            self.case_id,
+            cleanup_state="PENDING",
+            cleanup_reason="UNRECOVERABLE_PREPARATION_FAILURE",
+            cleanup_available_at=self.now()
+            .astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            cleanup_last_error_code=None,
+        )
+
+    async def _correct_bootstrap(
         self,
         *,
         prepared: PreparedProviderContext,
         placeholder: c.AnalyzerContextBinding,
         revision: int,
+        correction_code: Literal[
+            "UNBOUND_EXACT_QUOTE", "UNKNOWN_QUESTION_PROBLEM_REFERENCE"
+        ],
     ) -> tuple[c.BootstrapAnalyzerRequest, BootstrapResult] | None:
-        """Run at most one durable child request after a known completed bad quote."""
+        """Run the sole durable child request after one known completed failure."""
 
-        if not all(
-            hasattr(self.adapter, name)
-            for name in ("start_bootstrap_grounding_correction", "finish_bootstrap")
+        start_method_name = (
+            "start_bootstrap_grounding_correction"
+            if correction_code == "UNBOUND_EXACT_QUOTE"
+            else "start_bootstrap_graph_correction"
+        )
+        if not hasattr(self.adapter, start_method_name) or not hasattr(
+            self.adapter, "finish_bootstrap"
         ):
             return None
-        request = self._bootstrap_grounding_correction_request(
+        request = self._bootstrap_correction_request(
             prepared=prepared,
             placeholder=placeholder,
             revision=revision,
@@ -229,16 +257,15 @@ class V4ProductionOrchestrator:
                 item
                 for item in self.foundation.pending_provider_responses(self.case_id)
                 if item["client_request_id"] == request.client_request_id
-                and item["operation"] == BOOTSTRAP_GROUNDING_CORRECTION_OPERATION
+                and item["operation"] == BOOTSTRAP_CORRECTION_OPERATION
             ),
             None,
         )
         response_id = None if tracked is None else tracked["provider_response_id"]
         if response_id is None:
             try:
-                response_id = await self.adapter.start_bootstrap_grounding_correction(
-                    request, prepared=prepared
-                )
+                start_method = getattr(self.adapter, start_method_name)
+                response_id = await start_method(request, prepared=prepared)
             except asyncio.CancelledError:
                 # No Response ID came back. X-Client-Request-Id is correlation,
                 # not an exactly-once key, so never create another correction.
@@ -260,18 +287,28 @@ class V4ProductionOrchestrator:
             self.foundation.checkpoint_provider_response(
                 self.case_id,
                 client_request_id=request.client_request_id,
-                operation=BOOTSTRAP_GROUNDING_CORRECTION_OPERATION,
+                operation=BOOTSTRAP_CORRECTION_OPERATION,
                 provider_response_id=response_id,
             )
-        result = await self.adapter.finish_bootstrap(
-            request,
-            prepared=prepared,
-            session_id=self.session_id,
-            response_id=response_id,
-        )
+        try:
+            result = await self.adapter.finish_bootstrap(
+                request,
+                prepared=prepared,
+                session_id=self.session_id,
+                response_id=response_id,
+            )
+        except ProviderAdapterError as exc:
+            if exc.receipt.code is not c.ProviderFailureCode.OUTPUT_INVALID:
+                # The correction Response identity is durable. A later worker may
+                # safely inspect that same Response; it must not create another.
+                raise
+            self._terminalize_known_preparation_failure(
+                "BOOTSTRAP_CORRECTION_OUTPUT_INVALID"
+            )
+            return None
         return request, result
 
-    def _bootstrap_grounding_correction_request(
+    def _bootstrap_correction_request(
         self,
         *,
         prepared: PreparedProviderContext,
@@ -283,6 +320,8 @@ class V4ProductionOrchestrator:
             dict(
                 self._provider_base(
                     operation=c.AnalyzerOperation.BOOTSTRAP,
+                    # Preserve the deployed child identity across restarts and
+                    # upgrades; this legacy label now names the shared slot.
                     operation_key=f"{placeholder.context_id}:grounding-correction:1",
                     context=placeholder,
                     based_on_revision=revision + 1,
@@ -411,64 +450,130 @@ class V4ProductionOrchestrator:
                 ),
             )
             admission_request = request
+            correction_used = False
             if resources["bootstrap_candidate_json"] and resources["context_json"]:
                 candidate = c.InterviewBriefCandidate.model_validate_json(
                     resources["bootstrap_candidate_json"]
                 )
                 context = c.AnalyzerContextBinding.model_validate_json(resources["context_json"])
-            else:
-                if all(
-                    hasattr(self.adapter, name)
-                    for name in ("start_bootstrap", "finish_bootstrap")
-                ):
-                    response_id = resources["bootstrap_response_id"]
-                    if response_id is None:
-                        try:
-                            response_id = await self.adapter.start_bootstrap(
-                                request, prepared=prepared
-                            )
-                        except asyncio.CancelledError:
-                            # Without a returned Response ID, X-Client-Request-Id
-                            # is correlation rather than an exactly-once key. Fail
-                            # closed instead of blindly creating a second Response.
-                            self.foundation.set_preparation_phase(
-                                self.case_id,
-                                "FAILED",
-                                failure_code="BOOTSTRAP_RESPONSE_ID_UNCERTAIN",
-                                cleanup_state="RETAIN_UNCERTAIN",
-                            )
-                            raise
-                        self.foundation.checkpoint_preparation_resource(
-                            self.case_id, bootstrap_response_id=response_id
-                        )
-                    bootstrapped = await self.adapter.finish_bootstrap(
-                        request,
+                correction_used = any(
+                    item["operation"] == BOOTSTRAP_CORRECTION_OPERATION
+                    and item["provider_response_id"] == context.bootstrap_response_id
+                    for item in self.foundation.pending_provider_responses(self.case_id)
+                )
+                if correction_used:
+                    admission_request = self._bootstrap_correction_request(
                         prepared=prepared,
-                        session_id=self.session_id,
-                        response_id=response_id,
+                        placeholder=placeholder,
+                        revision=revision,
                     )
-                else:
-                    bootstrapped = await self.adapter.bootstrap(
-                        request, prepared=prepared, session_id=self.session_id
+            else:
+                try:
+                    if all(
+                        hasattr(self.adapter, name)
+                        for name in ("start_bootstrap", "finish_bootstrap")
+                    ):
+                        response_id = resources["bootstrap_response_id"]
+                        if response_id is None:
+                            try:
+                                response_id = await self.adapter.start_bootstrap(
+                                    request, prepared=prepared
+                                )
+                            except asyncio.CancelledError:
+                                # Without a returned Response ID, X-Client-Request-Id
+                                # is correlation rather than an exactly-once key. Fail
+                                # closed instead of blindly creating a second Response.
+                                self.foundation.set_preparation_phase(
+                                    self.case_id,
+                                    "FAILED",
+                                    failure_code="BOOTSTRAP_RESPONSE_ID_UNCERTAIN",
+                                    cleanup_state="RETAIN_UNCERTAIN",
+                                )
+                                raise
+                            except Exception:
+                                # No provider identity came back. Correlation is
+                                # insufficient proof that creating again is safe.
+                                self.foundation.set_preparation_phase(
+                                    self.case_id,
+                                    "FAILED",
+                                    failure_code="BOOTSTRAP_RESPONSE_ID_UNCERTAIN",
+                                    cleanup_state="RETAIN_UNCERTAIN",
+                                )
+                                raise
+                            self.foundation.checkpoint_preparation_resource(
+                                self.case_id, bootstrap_response_id=response_id
+                            )
+                        bootstrapped = await self.adapter.finish_bootstrap(
+                            request,
+                            prepared=prepared,
+                            session_id=self.session_id,
+                            response_id=response_id,
+                        )
+                    else:
+                        bootstrapped = await self.adapter.bootstrap(
+                            request, prepared=prepared, session_id=self.session_id
+                        )
+                except ProviderAdapterError as exc:
+                    if self.foundation.preparation_projection(self.case_id)[
+                        "cleanup_state"
+                    ] == "RETAIN_UNCERTAIN":
+                        raise
+                    if exc.receipt.code is not c.ProviderFailureCode.OUTPUT_INVALID:
+                        # A known Response ID remains resumable; an unknown ID was
+                        # already marked RETAIN_UNCERTAIN by the create path above.
+                        raise
+                    if (
+                        exc.bootstrap_correction_code
+                        != "UNKNOWN_QUESTION_PROBLEM_REFERENCE"
+                    ):
+                        self._terminalize_known_preparation_failure(
+                            "BOOTSTRAP_OUTPUT_INVALID"
+                        )
+                        return self.foundation.preparation_projection(self.case_id)
+                    corrected = await self._correct_bootstrap(
+                        prepared=prepared,
+                        placeholder=placeholder,
+                        revision=revision,
+                        correction_code="UNKNOWN_QUESTION_PROBLEM_REFERENCE",
                     )
+                    if corrected is None:
+                        if self.foundation.preparation_projection(self.case_id)[
+                            "phase"
+                        ] != "FAILED":
+                            self._terminalize_known_preparation_failure(
+                                "BOOTSTRAP_OUTPUT_INVALID"
+                            )
+                        return self.foundation.preparation_projection(self.case_id)
+                    admission_request, bootstrapped = corrected
+                    correction_used = True
                 candidate = bootstrapped.candidate
                 context = bootstrapped.context
+                checkpoint = {
+                    "bootstrap_candidate_json": candidate.model_dump_json(),
+                    "context_json": context.model_dump_json(),
+                }
+                if not correction_used:
+                    checkpoint[
+                        "bootstrap_response_id"
+                    ] = context.bootstrap_response_id
                 self.foundation.checkpoint_preparation_resource(
-                    self.case_id,
-                    bootstrap_response_id=context.bootstrap_response_id,
-                    bootstrap_candidate_json=candidate.model_dump_json(),
-                    context_json=context.model_dump_json(),
+                    self.case_id, **checkpoint
                 )
-            if self._bootstrap_has_unbound_exact_quote(candidate):
-                corrected = await self._correct_bootstrap_grounding(
+            if (
+                self._bootstrap_has_unbound_exact_quote(candidate)
+                and not correction_used
+            ):
+                corrected = await self._correct_bootstrap(
                     prepared=prepared,
                     placeholder=placeholder,
                     revision=revision,
+                    correction_code="UNBOUND_EXACT_QUOTE",
                 )
                 if corrected is not None:
                     admission_request, corrected_result = corrected
                     candidate = corrected_result.candidate
                     context = corrected_result.context
+                    correction_used = True
                     # Keep the original BOOTSTRAP Response in its dedicated
                     # checkpoint; the correction Response is tracked separately.
                     self.foundation.checkpoint_preparation_resource(
@@ -476,16 +581,10 @@ class V4ProductionOrchestrator:
                         bootstrap_candidate_json=candidate.model_dump_json(),
                         context_json=context.model_dump_json(),
                     )
-            elif any(
-                item["operation"] == BOOTSTRAP_GROUNDING_CORRECTION_OPERATION
-                and item["provider_response_id"] == context.bootstrap_response_id
-                for item in self.foundation.pending_provider_responses(self.case_id)
-            ):
-                admission_request = self._bootstrap_grounding_correction_request(
-                    prepared=prepared,
-                    placeholder=placeholder,
-                    revision=revision,
-                )
+                elif self.foundation.preparation_projection(self.case_id)[
+                    "phase"
+                ] == "FAILED":
+                    return self.foundation.preparation_projection(self.case_id)
             self.foundation.set_preparation_phase(
                 self.case_id, "FORMULATING_WORKSHOP_PLAN"
             )

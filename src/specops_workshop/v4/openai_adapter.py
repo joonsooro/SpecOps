@@ -111,9 +111,15 @@ class ProviderCleanupReceipt:
 class ProviderAdapterError(RuntimeError):
     """A provider failure whose only public detail is a safe receipt."""
 
-    def __init__(self, receipt: contracts.ProviderFailureReceipt) -> None:
+    def __init__(
+        self,
+        receipt: contracts.ProviderFailureReceipt,
+        *,
+        bootstrap_correction_code: str | None = None,
+    ) -> None:
         super().__init__(receipt.code.value)
         self.receipt = receipt
+        self.bootstrap_correction_code = bootstrap_correction_code
 
 
 def _utc_now() -> datetime:
@@ -419,12 +425,25 @@ class StoredConversationOpenAIAdapter:
             request, prepared=prepared, grounding_correction=True
         )
 
+    async def start_bootstrap_graph_correction(
+        self,
+        request: contracts.BootstrapAnalyzerRequest,
+        *,
+        prepared: PreparedProviderContext,
+    ) -> str:
+        """Create the sole correction after a known question-reference failure."""
+
+        return await self._start_bootstrap(
+            request, prepared=prepared, graph_correction=True
+        )
+
     async def _start_bootstrap(
         self,
         request: contracts.BootstrapAnalyzerRequest,
         *,
         prepared: PreparedProviderContext,
-        grounding_correction: bool,
+        grounding_correction: bool = False,
+        graph_correction: bool = False,
     ) -> str:
         """Create one background Response; callers durably checkpoint the returned ID."""
 
@@ -440,10 +459,13 @@ class StoredConversationOpenAIAdapter:
             client_request_id=request.client_request_id,
             started_at=started_at,
         )
+        if grounding_correction and graph_correction:
+            raise ValueError("bootstrap correction reason must be singular")
         arguments = self._response_arguments(
             request,
-            bootstrap=not grounding_correction,
+            bootstrap=not grounding_correction and not graph_correction,
             grounding_correction=grounding_correction,
+            graph_correction=graph_correction,
         )
         arguments["background"] = True
         try:
@@ -912,6 +934,7 @@ class StoredConversationOpenAIAdapter:
         *,
         bootstrap: bool,
         grounding_correction: bool = False,
+        graph_correction: bool = False,
     ) -> dict[str, Any]:
         operation = contracts.AnalyzerOperation(request.request_type)
         schema_name, schema, _ = native_schema_for(operation)
@@ -928,6 +951,21 @@ class StoredConversationOpenAIAdapter:
                         "its named source. Re-read the two source files already stored in this "
                         "Conversation and return one complete replacement candidate. Omit every "
                         "unverifiable evidence candidate and every proposal that depends on it."
+                    ),
+                }
+            )
+        if graph_correction:
+            if not isinstance(request, contracts.BootstrapAnalyzerRequest):
+                raise ValueError("graph correction is BOOTSTRAP-only")
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "The prior completed BOOTSTRAP candidate was deterministically rejected "
+                        "by local graph validation because at least one question referenced a "
+                        "problem key that was not present in problems[].candidate_key. Return one "
+                        "complete replacement candidate. Every addresses_problem_keys and "
+                        "prerequisite_problem_keys entry must exactly match a problem candidate_key."
                     ),
                 }
             )
@@ -1081,7 +1119,28 @@ class StoredConversationOpenAIAdapter:
             occurred_at=self._now(),
         )
         self._failures.append(receipt)
-        return ProviderAdapterError(receipt)
+        correction_code = None
+        if isinstance(error, ValidationError):
+            known = {
+                "question references unknown problem": (
+                    "UNKNOWN_QUESTION_PROBLEM_REFERENCE"
+                ),
+            }
+            messages = {
+                str(item.get("ctx", {}).get("error", ""))
+                for item in error.errors(
+                    include_url=False,
+                    include_context=True,
+                    include_input=False,
+                )
+            }
+            correction_code = next(
+                (known[message] for message in messages if message in known),
+                None,
+            )
+        return ProviderAdapterError(
+            receipt, bootstrap_correction_code=correction_code
+        )
 
     def _provider_error(
         self,

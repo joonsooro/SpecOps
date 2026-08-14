@@ -1187,6 +1187,42 @@ def test_voice_provider_close_timeout_cancels_teardown_without_blocking_transpor
     assert all(event["duration_ms"] >= 0 for event in events)
 
 
+def test_voice_provider_reader_cancellation_timeout_does_not_block_teardown(caplog):
+    async def scenario():
+        cancellation_observed = asyncio.Event()
+
+        async def slow_to_cancel():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_observed.set()
+                await asyncio.sleep(0.05)
+
+        task = asyncio.create_task(slow_to_cancel())
+        await asyncio.sleep(0)
+        transport = V4LiveTransport(
+            SimpleNamespace(),
+            SimpleNamespace(case_id=CASE_ID),
+            provider_task_cancel_timeout_seconds=0.01,
+        )
+        started = asyncio.get_running_loop().time()
+        await transport._cancel_pending_provider_tasks({task})
+        elapsed = asyncio.get_running_loop().time() - started
+        assert cancellation_observed.is_set()
+        assert elapsed < 0.04
+        await task
+
+    with caplog.at_level("INFO", logger="specops.workshop.voice"):
+        asyncio.run(scenario())
+    events = [json.loads(record.message) for record in caplog.records]
+    assert [event["event"] for event in events] == [
+        "voice_provider_reader_cancel.started",
+        "voice_provider_reader_cancel.timed_out",
+    ]
+    assert all(event["correlation_id"] == str(CASE_ID) for event in events)
+    assert all(event["duration_ms"] >= 0 for event in events)
+
+
 def test_voice_guidance_refresh_is_applied_only_at_final_turn_boundary():
     async def scenario():
         events = []

@@ -18,7 +18,14 @@ from .orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
 
 
 VOICE_PROVIDER_CLOSE_TIMEOUT_SECONDS = 5.0
+VOICE_PROVIDER_TASK_CANCEL_TIMEOUT_SECONDS = 5.0
 _LOGGER = logging.getLogger("specops.workshop.voice")
+
+
+def _consume_task_result(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    task.exception()
 
 
 class V4LiveTransport:
@@ -28,12 +35,14 @@ class V4LiveTransport:
         orchestrator: V4ProductionOrchestrator,
         *,
         provider_close_timeout_seconds: float = VOICE_PROVIDER_CLOSE_TIMEOUT_SECONDS,
+        provider_task_cancel_timeout_seconds: float = VOICE_PROVIDER_TASK_CANCEL_TIMEOUT_SECONDS,
     ) -> None:
-        if provider_close_timeout_seconds <= 0:
-            raise ValueError("provider close timeout must be positive")
+        if provider_close_timeout_seconds <= 0 or provider_task_cancel_timeout_seconds <= 0:
+            raise ValueError("provider teardown timeouts must be positive")
         self.provider = provider
         self.orchestrator = orchestrator
         self.provider_close_timeout_seconds = provider_close_timeout_seconds
+        self.provider_task_cancel_timeout_seconds = provider_task_cancel_timeout_seconds
 
     async def handle(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -82,15 +91,58 @@ class V4LiveTransport:
             done, pending = await asyncio.wait(
                 (client, provider), return_when=asyncio.FIRST_COMPLETED
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            await self._cancel_pending_provider_tasks(pending)
             for task in done:
                 task.result()
         except WebSocketDisconnect:
             pass
         finally:
             await self._close_provider_session(session)
+
+    async def _cancel_pending_provider_tasks(
+        self, tasks: set[asyncio.Task]
+    ) -> None:
+        """Stop reading provider events without retaining the request handler."""
+
+        if not tasks:
+            return
+        started = time.monotonic()
+        correlation = str(self.orchestrator.case_id)
+
+        def emit(event: str) -> None:
+            _LOGGER.info(
+                json.dumps(
+                    {
+                        "correlation_id": correlation,
+                        "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                        "event": event,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+
+        emit("voice_provider_reader_cancel.started")
+        for task in tasks:
+            task.cancel()
+        try:
+            done, pending = await asyncio.wait(
+                tasks, timeout=self.provider_task_cancel_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+                task.add_done_callback(_consume_task_result)
+            emit("voice_provider_reader_cancel.cancelled")
+            raise
+        for task in done:
+            _consume_task_result(task)
+        if pending:
+            for task in pending:
+                task.add_done_callback(_consume_task_result)
+            emit("voice_provider_reader_cancel.timed_out")
+        else:
+            emit("voice_provider_reader_cancel.completed")
 
     async def _close_provider_session(self, session) -> None:
         """Bound teardown only after the client/provider turn has ended.
@@ -120,23 +172,18 @@ class V4LiveTransport:
         emit("voice_provider_close.started")
         close_task = asyncio.create_task(session.close())
 
-        def consume(task: asyncio.Task) -> None:
-            if task.cancelled():
-                return
-            task.exception()
-
         try:
             done, _ = await asyncio.wait(
                 (close_task,), timeout=self.provider_close_timeout_seconds
             )
         except asyncio.CancelledError:
             close_task.cancel()
-            close_task.add_done_callback(consume)
+            close_task.add_done_callback(_consume_task_result)
             emit("voice_provider_close.cancelled")
             raise
         if not done:
             close_task.cancel()
-            close_task.add_done_callback(consume)
+            close_task.add_done_callback(_consume_task_result)
             emit("voice_provider_close.timed_out")
             return
         try:

@@ -660,6 +660,124 @@ class StoredConversationOpenAIAdapter:
         )
         return candidate
 
+    async def execute_turn_analysis_correction_with_response_checkpoint(
+        self,
+        request: contracts.AnalyzeFinalTurnRequest,
+        *,
+        context: contracts.AnalyzerContextBinding,
+        quarantined_candidate_keys: tuple[str, ...],
+        checkpoint: Callable[[str], None],
+    ) -> contracts.TurnAnalysisCandidate:
+        """Create exactly one corrective TURN_ANALYSIS for a quarantined branch."""
+
+        self._validate_context(request, context)
+        if not quarantined_candidate_keys:
+            raise ValueError("turn correction requires a quarantined dependency closure")
+        candidate, _ = await self._execute(
+            request,
+            bootstrap=False,
+            response_checkpoint=checkpoint,
+            turn_correction_keys=quarantined_candidate_keys,
+        )
+        assert isinstance(candidate, contracts.TurnAnalysisCandidate)
+        return candidate
+
+    async def resume_stored_response(
+        self,
+        request: contracts.AnalyzerProviderRequest,
+        *,
+        context: contracts.AnalyzerContextBinding,
+        response_id: str,
+    ) -> contracts.AnalyzerProviderCandidate:
+        """Resume one known stored Response; never create a replacement."""
+
+        self._validate_context(request, context)
+        if _safe_provider_identifier(response_id) != response_id:
+            raise ValueError("unsafe stored Response identifier")
+        operation = contracts.AnalyzerOperation(request.request_type)
+        _, _, candidate_type = native_schema_for(operation)
+        started_at = self._monotonic()
+        self._emit_lifecycle(
+            event="provider_request.started",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+            status="RESUME_KNOWN_RESPONSE",
+        )
+        response = None
+        status = "queued"
+        slow_observed = False
+        try:
+            while status in {"queued", "in_progress"}:
+                response = await asyncio.wait_for(
+                    self._client.responses.retrieve(
+                        response_id,
+                        extra_headers={
+                            "X-Client-Request-Id": request.client_request_id
+                        },
+                    ),
+                    timeout=PROVIDER_IO_TIMEOUT_SECONDS,
+                )
+                if _safe_provider_identifier(getattr(response, "id", None)) != response_id:
+                    raise ValueError("retrieved Response identity changed")
+                status = getattr(response, "status", None) or "completed"
+                if (
+                    not slow_observed
+                    and self._monotonic() - started_at
+                    >= SLOW_RESPONSE_OBSERVATION_SECONDS
+                ):
+                    slow_observed = True
+                    self._emit_lifecycle(
+                        event="provider_request.timeout",
+                        operation=operation,
+                        client_request_id=request.client_request_id,
+                        started_at=started_at,
+                        response=response,
+                    )
+                if status in {"queued", "in_progress"}:
+                    await self._sleep(BACKGROUND_POLL_SECONDS)
+        except asyncio.CancelledError:
+            self._emit_lifecycle(
+                event="provider_request.cancelled",
+                operation=operation,
+                client_request_id=request.client_request_id,
+                started_at=started_at,
+                response=response,
+            )
+            raise
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage(operation.value),
+                client_request_id=request.client_request_id,
+            ) from exc
+        assert response is not None
+        self._emit_lifecycle(
+            event="provider_request.completed",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+            response=response,
+        )
+        if status != "completed":
+            raise self._provider_error(
+                RuntimeError(f"safe terminal response status: {status}"),
+                stage=contracts.ProviderProcessingStage(operation.value),
+                client_request_id=request.client_request_id,
+            )
+        try:
+            candidate = candidate_type.model_validate_json(response.output_text)
+            self._validate_candidate_echo(request, candidate)
+        except Exception as exc:
+            raise self._output_error(
+                request.client_request_id,
+                exc,
+                provider_request_id=_safe_provider_identifier(
+                    getattr(response, "_request_id", None)
+                ),
+            ) from exc
+        return candidate
+
     async def context_is_available(self, context: contracts.AnalyzerContextBinding) -> bool:
         if context.status is not contracts.ContextStatus.ACTIVE:
             return False
@@ -859,10 +977,15 @@ class StoredConversationOpenAIAdapter:
         *,
         bootstrap: bool,
         response_checkpoint: Callable[[str], None] | None = None,
+        turn_correction_keys: tuple[str, ...] = (),
     ):
         operation = contracts.AnalyzerOperation(request.request_type)
         _, _, candidate_type = native_schema_for(operation)
-        arguments = self._response_arguments(request, bootstrap=bootstrap)
+        arguments = self._response_arguments(
+            request,
+            bootstrap=bootstrap,
+            turn_correction_keys=turn_correction_keys,
+        )
         started_at = self._monotonic()
         self._emit_lifecycle(
             event="provider_request.started",
@@ -935,10 +1058,32 @@ class StoredConversationOpenAIAdapter:
         bootstrap: bool,
         grounding_correction: bool = False,
         graph_correction: bool = False,
+        turn_correction_keys: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         operation = contracts.AnalyzerOperation(request.request_type)
         schema_name, schema, _ = native_schema_for(operation)
         content: list[dict[str, str]] = []
+        if turn_correction_keys:
+            if not isinstance(request, contracts.AnalyzeFinalTurnRequest):
+                raise ValueError("turn grounding correction is TURN_ANALYSIS-only")
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "The prior completed TURN_ANALYSIS contained source evidence that local "
+                        "Foundation validation proved invalid. The independent verified branch is "
+                        "already admitted. Return only a corrected dependency-closed branch for "
+                        "the quarantined candidate keys in this JSON array: "
+                        f"{json.dumps(turn_correction_keys, separators=(',', ':'))}. "
+                        "Reuse only those candidate_key values for new keyed items; do not repeat "
+                        "or revise the already admitted branch. Re-read the two source files in "
+                        "this Conversation. Every returned evidence locator must bind exactly. "
+                        "Use current Foundation refs from the request snapshot for any dependency "
+                        "that is already admitted. If no quarantined proposal can be grounded, "
+                        "return NO_SEMANTIC_CHANGE with OUT_OF_SCOPE rather than inventing evidence."
+                    ),
+                }
+            )
         if grounding_correction:
             if not isinstance(request, contracts.BootstrapAnalyzerRequest):
                 raise ValueError("grounding correction is BOOTSTRAP-only")

@@ -9,7 +9,12 @@ from uuid import UUID
 
 from pydantic import TypeAdapter
 from specops_contracts import workshop_v1 as c
-from specops_workflow.workshop_protocol import FoundationProtocolError
+from specops_workflow.workshop_protocol import (
+    FoundationProtocolError,
+    TurnAnalysisPartition,
+    is_turn_correction_subject,
+    turn_correction_parent_job_id,
+)
 
 from .openai_adapter import ProviderAdapterError
 from .orchestrator import V4ProductionOrchestrator, _request
@@ -111,6 +116,13 @@ class DurableAnalyzerWorker:
                 error_code=f"FOUNDATION_REJECTED_{exc.code.value}",
             )
         except ProviderAdapterError as exc:
+            if is_turn_correction_subject(job["subject_id"]):
+                self.foundation.fail_analyzer_job(
+                    job["job_id"],
+                    worker_id=self.worker_id,
+                    error_code=f"TURN_CORRECTION_PROVIDER_{exc.receipt.code.value}",
+                )
+                return True
             uncertain = exc.receipt.code in {
                 c.ProviderFailureCode.TIMEOUT,
                 c.ProviderFailureCode.CONNECTION,
@@ -133,6 +145,13 @@ class DurableAnalyzerWorker:
                     error_code=f"PROVIDER_RETRYABLE_{exc.receipt.code.value}",
                 )
         except Exception as exc:
+            if is_turn_correction_subject(job["subject_id"]):
+                self.foundation.fail_analyzer_job(
+                    job["job_id"],
+                    worker_id=self.worker_id,
+                    error_code=f"TURN_CORRECTION_{type(exc).__name__}",
+                )
+                return True
             current = self._job(job["job_id"])
             uncertain = (
                 current["state"] == "PROVIDER_REQUESTED"
@@ -184,6 +203,7 @@ class DurableAnalyzerWorker:
 
     async def _run_job(self, job: dict[str, Any]) -> None:
         context = await self.orchestrator.ensure_context()
+        correction_partition = self._correction_partition(job)
         request = (
             TypeAdapter(c.AnalyzerProviderRequest).validate_json(job["request_json"])
             if job["request_json"]
@@ -196,11 +216,43 @@ class DurableAnalyzerWorker:
                 state="PROVIDER_REQUESTED",
                 request_json=request.model_dump_json(),
             )
-        candidate = (
-            TypeAdapter(c.AnalyzerProviderCandidate).validate_json(job["candidate_json"])
-            if job["candidate_json"]
-            else await self.orchestrator._execute_provider(request, context=context)
-        )
+        if job["candidate_json"]:
+            candidate = TypeAdapter(c.AnalyzerProviderCandidate).validate_json(
+                job["candidate_json"]
+            )
+        elif (
+            job["state"] == "PROVIDER_REQUESTED"
+            and job["attempt_count"] > 1
+            and not (job["last_error_code"] or "").startswith("PROVIDER_RETRYABLE_")
+        ):
+            tracked = next(
+                (
+                    item
+                    for item in self.foundation.pending_provider_responses(
+                        self.orchestrator.case_id
+                    )
+                    if item["client_request_id"] == request.client_request_id
+                ),
+                None,
+            )
+            if tracked is None:
+                raise RuntimeError("provider outcome is uncertain and has no known Response")
+            candidate = await self.orchestrator._resume_provider_response(
+                request,
+                context=context,
+                response_id=tracked["provider_response_id"],
+            )
+            if correction_partition is not None:
+                self._validate_correction_candidate(candidate, correction_partition)
+        elif correction_partition is None:
+            candidate = await self.orchestrator._execute_provider(request, context=context)
+        else:
+            candidate = await self.orchestrator._execute_turn_analysis_correction(
+                request,
+                context=context,
+                quarantined_candidate_keys=correction_partition.quarantined_candidate_keys,
+            )
+            self._validate_correction_candidate(candidate, correction_partition)
         if not job["candidate_json"]:
             self.foundation.checkpoint_analyzer_job(
                 job["job_id"],
@@ -208,21 +260,94 @@ class DurableAnalyzerWorker:
                 state="PROVIDER_COMPLETED",
                 candidate_json=candidate.model_dump_json(),
             )
+        partition = (
+            self.foundation.partition_turn_analysis_candidate(
+                self.orchestrator.case_id,
+                request.context_id,
+                candidate,
+            )
+            if isinstance(candidate, c.TurnAnalysisCandidate)
+            else None
+        )
+        candidate_to_admit = (
+            partition.verified_candidate if partition is not None else candidate
+        )
         receipt = (
             c.ProposalAdmissionReceipt.model_validate_json(job["admission_receipt_json"])
             if job["admission_receipt_json"]
-            else self._admit(request, candidate)
+            else (
+                None
+                if candidate_to_admit is None
+                else self._admit(request, candidate_to_admit)
+            )
         )
-        if not job["admission_receipt_json"]:
+        if not job["admission_receipt_json"] and receipt is not None:
             self.foundation.checkpoint_analyzer_job(
                 job["job_id"],
                 worker_id=self.worker_id,
                 state="FOUNDATION_ADMITTED",
                 admission_receipt_json=receipt.model_dump_json(),
             )
+        if partition is not None and partition.rejected_evidence_keys:
+            if correction_partition is not None:
+                self.foundation.fail_analyzer_job(
+                    job["job_id"],
+                    worker_id=self.worker_id,
+                    error_code="TURN_CORRECTION_EXHAUSTED_EVIDENCE_BINDING_FAILED",
+                )
+                return
+            self.foundation.enqueue_turn_analysis_correction(
+                job["job_id"], worker_id=self.worker_id
+            )
         self.foundation.checkpoint_analyzer_job(
             job["job_id"], worker_id=self.worker_id, state="COMPLETED"
         )
+
+    def _correction_partition(
+        self, job: dict[str, Any]
+    ) -> TurnAnalysisPartition | None:
+        if not is_turn_correction_subject(job["subject_id"]):
+            return None
+        parent = self._job(turn_correction_parent_job_id(job["subject_id"]))
+        if parent["candidate_json"] is None:
+            raise RuntimeError("correction parent has no completed candidate")
+        candidate = c.TurnAnalysisCandidate.model_validate_json(parent["candidate_json"])
+        partition = self.foundation.partition_turn_analysis_candidate(
+            self.orchestrator.case_id,
+            candidate.context_id,
+            candidate,
+        )
+        if not partition.rejected_evidence_keys:
+            raise RuntimeError("correction parent no longer has a verified defect")
+        return partition
+
+    @staticmethod
+    def _validate_correction_candidate(
+        candidate: c.AnalyzerProviderCandidate,
+        partition: TurnAnalysisPartition,
+    ) -> None:
+        if not isinstance(candidate, c.TurnAnalysisCandidate):
+            raise TypeError("TURN_ANALYSIS correction returned the wrong candidate type")
+        if candidate.disposition is c.TurnDisposition.NO_SEMANTIC_CHANGE:
+            return
+        keyed_fields = (
+            "evidence_candidates",
+            "new_problems",
+            "new_problem_clusters",
+            "new_questions",
+            "low_risk_facts",
+            "decisions",
+            "evidence_findings",
+        )
+        returned_keys = {
+            item.candidate_key
+            for field_name in keyed_fields
+            for item in getattr(candidate, field_name)
+        }
+        if not returned_keys or not returned_keys.issubset(
+            set(partition.quarantined_candidate_keys)
+        ):
+            raise ValueError("correction escaped its quarantined candidate-key boundary")
 
     def _build_request(self, job: dict[str, Any], context: c.AnalyzerContextBinding):
         snapshot = self.foundation.semantic_snapshot(self.orchestrator.case_id)
@@ -234,8 +359,15 @@ class DurableAnalyzerWorker:
         )
         if job["operation"] == c.AnalyzerOperation.TURN_ANALYSIS.value:
             transcripts = self.foundation.final_transcripts(self.orchestrator.case_id)
+            subject_id = job["subject_id"]
+            if is_turn_correction_subject(subject_id):
+                subject_id = self._job(
+                    turn_correction_parent_job_id(subject_id)
+                )["subject_id"]
             index = next(
-                index for index, item in enumerate(transcripts) if str(item.event_id) == job["subject_id"]
+                index
+                for index, item in enumerate(transcripts)
+                if str(item.event_id) == subject_id
             )
             event = transcripts[index]
             prior = transcripts[index - 1] if index else None

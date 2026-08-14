@@ -47,10 +47,22 @@ WORKSHOP_PROTOCOL_TABLES = {**V4_WORKSHOP_PROTOCOL_TABLES, **V0_RUNTIME_TABLES}
 
 
 RUNTIME_NAMESPACE = UUID("31bfc764-d069-4f27-b614-444d1f47da7a")
+TURN_CORRECTION_SUBJECT_PREFIX = "turn-correction:"
+POST_BOOTSTRAP_RUNWAY_TARGET = 5
 
 
 def _runtime_id(*parts: object) -> UUID:
     return uuid5(RUNTIME_NAMESPACE, ":".join(str(part) for part in parts))
+
+
+def is_turn_correction_subject(subject_id: str) -> bool:
+    return subject_id.startswith(TURN_CORRECTION_SUBJECT_PREFIX)
+
+
+def turn_correction_parent_job_id(subject_id: str) -> str:
+    if not is_turn_correction_subject(subject_id):
+        raise ValueError("Analyzer job is not a TURN_ANALYSIS correction")
+    return subject_id.removeprefix(TURN_CORRECTION_SUBJECT_PREFIX)
 from .artifact_projection import (
     artifact_envelope,
     build_review_view,
@@ -94,6 +106,105 @@ class ProtocolCase:
     active_context_id: UUID | None
     readiness: c.Readiness
     review_obligation: c.ReviewObligation
+
+
+@dataclass(frozen=True)
+class TurnAnalysisPartition:
+    """A source-verified subset plus the dependency closure held for correction."""
+
+    verified_candidate: c.TurnAnalysisCandidate | None
+    rejected_evidence_keys: tuple[str, ...]
+    quarantined_candidate_keys: tuple[str, ...]
+
+
+def _candidate_ref_keys(value: Any) -> set[str]:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="python", exclude_none=False)
+    if isinstance(value, dict):
+        found = (
+            {value["candidate_key"]}
+            if value.get("ref_kind") == "CANDIDATE_KEY"
+            else set()
+        )
+        for item in value.values():
+            found.update(_candidate_ref_keys(item))
+        return found
+    if isinstance(value, (list, tuple)):
+        found: set[str] = set()
+        for item in value:
+            found.update(_candidate_ref_keys(item))
+        return found
+    return set()
+
+
+def _partition_turn_candidate(
+    candidate: c.TurnAnalysisCandidate,
+    rejected_evidence_keys: tuple[str, ...],
+) -> TurnAnalysisPartition:
+    if not rejected_evidence_keys:
+        return TurnAnalysisPartition(candidate, (), ())
+
+    keyed_fields = (
+        "evidence_candidates",
+        "new_problems",
+        "new_problem_clusters",
+        "new_questions",
+        "low_risk_facts",
+        "decisions",
+        "evidence_findings",
+    )
+    quarantined = set(rejected_evidence_keys)
+    changed = True
+    while changed:
+        changed = False
+        for field_name in keyed_fields:
+            for item in getattr(candidate, field_name):
+                if item.candidate_key in quarantined:
+                    continue
+                if _candidate_ref_keys(item).intersection(quarantined):
+                    quarantined.add(item.candidate_key)
+                    changed = True
+
+    updates: dict[str, Any] = {
+        field_name: tuple(
+            item
+            for item in getattr(candidate, field_name)
+            if item.candidate_key not in quarantined
+        )
+        for field_name in keyed_fields
+    }
+    for field_name in (
+        "revised_problem_clusters",
+        "revised_questions",
+        "problem_assessments",
+    ):
+        updates[field_name] = tuple(
+            item
+            for item in getattr(candidate, field_name)
+            if not _candidate_ref_keys(item).intersection(quarantined)
+        )
+
+    semantic_fields = (
+        *keyed_fields,
+        "revised_problem_clusters",
+        "revised_questions",
+        "problem_assessments",
+    )
+    if not any(updates[field_name] for field_name in semantic_fields):
+        verified = None
+    else:
+        updates.update(
+            disposition=c.TurnDisposition.SUBSTANTIVE,
+            no_change_reason_code=None,
+        )
+        material = candidate.model_dump(mode="python", exclude_none=False)
+        material.update(updates)
+        verified = c.TurnAnalysisCandidate.model_validate(material)
+    return TurnAnalysisPartition(
+        verified_candidate=verified,
+        rejected_evidence_keys=tuple(sorted(rejected_evidence_keys)),
+        quarantined_candidate_keys=tuple(sorted(quarantined)),
+    )
 
 
 def _instant(value: datetime) -> str:
@@ -604,6 +715,96 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ).mappings().all()
         return tuple(dict(row) for row in rows)
 
+    def partition_turn_analysis_candidate(
+        self,
+        case_id: UUID,
+        context_id: UUID,
+        candidate: c.TurnAnalysisCandidate,
+    ) -> TurnAnalysisPartition:
+        """Verify every source locator before releasing independent branches."""
+
+        rejected: list[str] = []
+        with self.engine.connect() as connection:
+            active_context = self._active_context(connection, case_id, context_id)
+            if active_context is None:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED
+                )
+            for evidence in candidate.evidence_candidates:
+                try:
+                    self._admit_evidence_candidate(
+                        connection, case_id, evidence, active_context
+                    )
+                except FoundationProtocolError as exc:
+                    if exc.code is not c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED:
+                        raise
+                    rejected.append(evidence.candidate_key)
+        return _partition_turn_candidate(candidate, tuple(rejected))
+
+    def enqueue_turn_analysis_correction(
+        self,
+        parent_job_id: str,
+        *,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        """Create the sole durable correction child for one completed primary turn."""
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        subject_id = f"{TURN_CORRECTION_SUBJECT_PREFIX}{parent_job_id}"
+        now = _instant(self.now())
+        with self.engine.begin() as connection:
+            parent = connection.execute(
+                select(table).where(
+                    table.c.job_id == parent_job_id,
+                    table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
+                    table.c.lease_owner == worker_id,
+                )
+            ).mappings().one_or_none()
+            if parent is None or is_turn_correction_subject(parent["subject_id"]):
+                raise RuntimeError("primary TURN_ANALYSIS lease was lost")
+            existing = connection.execute(
+                select(table).where(
+                    table.c.case_id == parent["case_id"],
+                    table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
+                    table.c.subject_id == subject_id,
+                )
+            ).mappings().one_or_none()
+            if existing is not None:
+                return dict(existing)
+            job_id = _runtime_id(
+                parent["case_id"], "TURN_ANALYSIS_CORRECTION", parent_job_id
+            )
+            connection.execute(
+                insert(table).values(
+                    job_id=str(job_id),
+                    case_id=parent["case_id"],
+                    session_id=parent["session_id"],
+                    operation=c.AnalyzerOperation.TURN_ANALYSIS.value,
+                    subject_id=subject_id,
+                    dedupe_key=f"turn-correction:{parent['case_id']}:{parent_job_id}",
+                    # Primary turns remain first; selection-only Guidance may use
+                    # the verified subset before this quarantined branch finishes.
+                    priority=30,
+                    state="ANALYSIS_PENDING",
+                    provider_request_id=f"specops-turn_analysis-{job_id}",
+                    request_json=None,
+                    candidate_json=None,
+                    admission_receipt_json=None,
+                    attempt_count=0,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    available_at=now,
+                    last_error_code=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return dict(
+                connection.execute(select(table).where(table.c.job_id == str(job_id)))
+                .mappings()
+                .one()
+            )
+
     def claim_analyzer_job(
         self, case_id: UUID, *, worker_id: str, lease_seconds: int = 30
     ) -> dict[str, Any] | None:
@@ -625,18 +826,23 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             for row in rows:
                 if row["operation"] == c.AnalyzerOperation.GUIDANCE.value:
                     older_turn_states = connection.execute(
-                        select(table.c.state).where(
+                        select(table.c.state, table.c.subject_id).where(
                             table.c.case_id == str(case_id),
                             table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
                             table.c.created_at <= row["created_at"],
                         )
-                    ).scalars().all()
+                    ).all()
+                    older_primary_states = [
+                        state
+                        for state, subject_id in older_turn_states
+                        if not is_turn_correction_subject(subject_id)
+                    ]
                     if any(
                         state not in {"COMPLETED", "FAILED"}
-                        for state in older_turn_states
+                        for state in older_primary_states
                     ):
                         continue
-                    if any(state == "FAILED" for state in older_turn_states):
+                    if any(state == "FAILED" for state in older_primary_states):
                         connection.execute(
                             update(table)
                             .where(
@@ -2056,6 +2262,39 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if command.candidate.source_set_hash != case["source_set_hash"]:
             raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
 
+        guidance_table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        runway_table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        current_guidance_row = connection.execute(
+            select(guidance_table).where(
+                guidance_table.c.case_id == str(command.case_id),
+                guidance_table.c.valid == 1,
+            )
+        ).mappings().one_or_none()
+        prior_available_rows = (
+            []
+            if current_guidance_row is None
+            else connection.execute(
+                select(runway_table)
+                .where(
+                    runway_table.c.case_id == str(command.case_id),
+                    runway_table.c.guidance_id == current_guidance_row["guidance_id"],
+                    runway_table.c.status == "AVAILABLE",
+                )
+                .order_by(runway_table.c.position)
+            ).mappings().all()
+        )
+        asked_rows = connection.execute(
+            select(runway_table)
+            .where(
+                runway_table.c.case_id == str(command.case_id),
+                runway_table.c.status == "ASKED",
+            )
+            .order_by(runway_table.c.consumed_at, runway_table.c.position)
+        ).mappings().all()
+        asked_by_question = {
+            (row["question_id"], row["question_version"]): row for row in asked_rows
+        }
+
         derived_dependency_refs: set[
             tuple[c.GuidanceDependencyKind, UUID, int]
         ] = set()
@@ -2069,13 +2308,13 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
             if not payload.get("safe_without_current_turn_interpretation", False):
                 raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
-            derived_dependency_refs.add(
+            question_dependency_refs = {
                 (
                     c.GuidanceDependencyKind.QUESTION,
                     question.question_ref.foundation_id,
                     question.question_ref.expected_version,
                 )
-            )
+            }
             for prerequisite in (
                 *payload.get("addresses_problem_refs", ()),
                 *payload.get("prerequisite_problem_refs", ()),
@@ -2088,13 +2327,14 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     or problem["status"] != c.SemanticRecordStatus.OPEN.value
                 ):
                     raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
-                derived_dependency_refs.add(
+                question_dependency_refs.add(
                     (
                         c.GuidanceDependencyKind.PROBLEM,
                         UUID(prerequisite["foundation_id"]),
                         prerequisite["expected_version"],
                     )
                 )
+            derived_dependency_refs.update(question_dependency_refs)
             return c.AdmittedGuidanceQuestion(
                 question_id=question.question_ref.foundation_id,
                 question_version=question.question_ref.expected_version,
@@ -2102,11 +2342,72 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 reason=question.reason,
             )
 
-        recommended = admitted_question(command.candidate.recommended_question)
-        alternates = tuple(admitted_question(item) for item in command.candidate.safe_alternates)
+        proposed = (
+            command.candidate.recommended_question,
+            *command.candidate.safe_alternates,
+        )
+        for question in proposed:
+            identity = (
+                str(question.question_ref.foundation_id),
+                question.question_ref.expected_version,
+            )
+            if identity in asked_by_question:
+                raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+        admitted_proposed = tuple(admitted_question(item) for item in proposed)
+
+        # Replenishment is additive: keep still-current live questions first,
+        # then append newly selected, source-verified questions without duplicates.
+        prior_available: list[c.AdmittedGuidanceQuestion] = []
+        for row in prior_available_rows:
+            if (row["question_id"], row["question_version"]) in asked_by_question:
+                continue
+            try:
+                prior_available.append(
+                    admitted_question(
+                        c.GuidanceQuestion(
+                            question_ref=c.FoundationEntityRef(
+                                ref_kind="FOUNDATION_ID",
+                                foundation_id=UUID(row["question_id"]),
+                                expected_version=row["question_version"],
+                            ),
+                            exact_text=row["exact_text"],
+                            reason=row["reason"],
+                        )
+                    )
+                )
+            except FoundationProtocolError as exc:
+                if exc.code not in {
+                    c.FoundationRejectionCode.STALE_ENTITY,
+                    c.FoundationRejectionCode.INVALID_TRANSITION,
+                }:
+                    raise
+
+        merged: list[c.AdmittedGuidanceQuestion] = []
+        merged_ids: set[tuple[UUID, int]] = set()
+        for question in (*prior_available, *admitted_proposed):
+            identity = (question.question_id, question.question_version)
+            if identity in merged_ids:
+                continue
+            merged.append(question)
+            merged_ids.add(identity)
+            if len(merged) == POST_BOOTSTRAP_RUNWAY_TARGET:
+                break
         for ref in command.candidate.do_not_ask_question_refs:
             if self._semantic_record_for_ref(connection, command.case_id, ref)["entity_kind"] != "QUESTION":
                 raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+        do_not_ask = command.candidate.do_not_ask_question_refs
+        do_not_ask_identities = {
+            (item.foundation_id, item.expected_version) for item in do_not_ask
+        }
+        merged = [
+            item
+            for item in merged
+            if (item.question_id, item.question_version) not in do_not_ask_identities
+        ]
+        if not merged:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+        recommended, *alternate_values = merged
+        alternates = tuple(alternate_values)
 
         dependencies = []
         admitted_dependency_refs: set[
@@ -2190,16 +2491,19 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             source_set_hash=command.candidate.source_set_hash,
             recommended_question=recommended,
             safe_alternates=alternates,
-            do_not_ask_questions=command.candidate.do_not_ask_question_refs,
+            do_not_ask_questions=do_not_ask,
             dependencies=tuple(dependencies),
             acknowledgement_suggestion=command.candidate.acknowledgement_suggestion,
             invalidation_triggers=tuple(sorted(triggers, key=lambda item: item.value)),
             admitted_at=self.now(),
         )
-        table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
-        connection.execute(update(table).where(table.c.case_id == str(command.case_id)).values(valid=0))
         connection.execute(
-            insert(table).values(
+            update(guidance_table)
+            .where(guidance_table.c.case_id == str(command.case_id))
+            .values(valid=0)
+        )
+        connection.execute(
+            insert(guidance_table).values(
                 guidance_id=str(guidance_id),
                 guidance_version=1,
                 case_id=str(command.case_id),
@@ -2208,7 +2512,6 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 admitted_at=_instant(admitted.admitted_at),
             )
         )
-        runway_table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
         for position, question in enumerate((recommended, *alternates), start=1):
             connection.execute(
                 insert(runway_table).values(
@@ -2222,6 +2525,23 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     status="AVAILABLE",
                     admitted_at=_instant(admitted.admitted_at),
                     consumed_at=None,
+                )
+            )
+        for position, row in enumerate(
+            asked_by_question.values(), start=len(merged) + 1
+        ):
+            connection.execute(
+                insert(runway_table).values(
+                    case_id=str(command.case_id),
+                    guidance_id=str(guidance_id),
+                    question_id=row["question_id"],
+                    question_version=row["question_version"],
+                    position=position,
+                    exact_text=row["exact_text"],
+                    reason=row["reason"],
+                    status="ASKED",
+                    admitted_at=row["admitted_at"],
+                    consumed_at=row["consumed_at"],
                 )
             )
         self._advance_revision(connection, command.case_id, prior_revision)

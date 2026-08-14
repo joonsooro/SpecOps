@@ -209,11 +209,17 @@ class _FakeResponses:
 
     async def create(self, **kwargs):
         self.owner.response_calls.append(kwargs)
-        return SimpleNamespace(
+        response = SimpleNamespace(
             id=f"resp_{len(self.owner.response_calls)}",
             output_text=self.owner.outputs.pop(0),
             _request_id=f"req_{len(self.owner.response_calls)}",
         )
+        self.owner.stored_responses[response.id] = response
+        return response
+
+    async def retrieve(self, response_id, **kwargs):
+        self.owner.response_retrieve_calls.append((response_id, kwargs))
+        return self.owner.stored_responses[response_id]
 
     async def delete(self, response_id, **kwargs):
         self.owner.deleted_responses.append((response_id, kwargs))
@@ -228,6 +234,8 @@ class FakeOpenAI:
         self.conversation_calls = []
         self.retrieve_calls = []
         self.response_calls = []
+        self.response_retrieve_calls = []
+        self.stored_responses = {}
         self.outputs = []
         self.deleted_files = []
         self.deleted_conversations = []
@@ -612,6 +620,47 @@ async def _stored_conversation_bootstrap_case():
     assert "previous_response_id" not in turn_call
     assert [item["type"] for item in turn_call["input"][0]["content"]] == ["input_text"]
 
+    fake.outputs.append(turn_candidate.model_dump_json())
+    correction_checkpoints: list[str] = []
+    corrected = await adapter.execute_turn_analysis_correction_with_response_checkpoint(
+        turn_request,
+        context=result.context,
+        quarantined_candidate_keys=(
+            "evidence-invalid",
+            "problem-invalid",
+            "question-invalid",
+        ),
+        checkpoint=correction_checkpoints.append,
+    )
+    assert corrected == turn_candidate
+    assert correction_checkpoints == ["resp_3"]
+    correction_call = fake.response_calls[2]
+    correction_content = correction_call["input"][0]["content"]
+    assert [item["type"] for item in correction_content] == [
+        "input_text",
+        "input_text",
+    ]
+    assert all(item["type"] != "input_file" for item in correction_content)
+    correction_json = json.dumps(correction_call)
+    assert "independent verified branch is already admitted" in correction_json
+    assert "question-invalid" in correction_json
+    assert correction_call["extra_headers"] == {
+        "X-Client-Request-Id": turn_request.client_request_id
+    }
+    resumed = await adapter.resume_stored_response(
+        turn_request,
+        context=result.context,
+        response_id="resp_3",
+    )
+    assert resumed == turn_candidate
+    assert len(fake.response_calls) == 3
+    assert fake.response_retrieve_calls == [
+        (
+            "resp_3",
+            {"extra_headers": {"X-Client-Request-Id": turn_request.client_request_id}},
+        )
+    ]
+
     fake.outputs.append("not-json")
     invalid_checkpoints: list[str] = []
     with pytest.raises(ProviderAdapterError):
@@ -620,7 +669,7 @@ async def _stored_conversation_bootstrap_case():
             context=result.context,
             checkpoint=invalid_checkpoints.append,
         )
-    assert invalid_checkpoints == ["resp_3"]
+    assert invalid_checkpoints == ["resp_4"]
 
 
 def test_background_bootstrap_polls_one_stored_response_past_60_second_slow_observation():

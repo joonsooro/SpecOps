@@ -1188,6 +1188,56 @@ class V4ProductionOrchestrator:
             checkpoint=checkpoint,
         )
 
+    async def _execute_turn_analysis_correction(
+        self,
+        request: c.AnalyzerProviderRequest,
+        *,
+        context: c.AnalyzerContextBinding,
+        quarantined_candidate_keys: tuple[str, ...],
+    ) -> c.AnalyzerProviderCandidate:
+        """Run one isolated correction without opening another Analyzer operation."""
+
+        if not isinstance(request, c.AnalyzeFinalTurnRequest):
+            raise TypeError("grounding correction requires TURN_ANALYSIS")
+        execute = getattr(
+            self.adapter,
+            "execute_turn_analysis_correction_with_response_checkpoint",
+            None,
+        )
+        if execute is None:
+            raise RuntimeError("Analyzer adapter does not support bounded turn correction")
+
+        def checkpoint(response_id: str) -> None:
+            self.foundation.checkpoint_provider_response(
+                self.case_id,
+                client_request_id=request.client_request_id,
+                operation=c.AnalyzerOperation.TURN_ANALYSIS.value,
+                provider_response_id=response_id,
+            )
+
+        return await execute(
+            request,
+            context=context,
+            quarantined_candidate_keys=quarantined_candidate_keys,
+            checkpoint=checkpoint,
+        )
+
+    async def _resume_provider_response(
+        self,
+        request: c.AnalyzerProviderRequest,
+        *,
+        context: c.AnalyzerContextBinding,
+        response_id: str,
+    ) -> c.AnalyzerProviderCandidate:
+        resume = getattr(self.adapter, "resume_stored_response", None)
+        if resume is None:
+            raise RuntimeError("Analyzer adapter cannot resume a known Response")
+        return await resume(
+            request,
+            context=context,
+            response_id=response_id,
+        )
+
     async def replenish_guidance(
         self, runway_state: c.RunwayStateSnapshot, *, operation_key: str
     ) -> ProviderOperationAdmission:

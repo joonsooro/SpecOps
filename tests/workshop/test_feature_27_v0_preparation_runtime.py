@@ -150,6 +150,70 @@ def _admit_brief(foundation, *, unsafe_question_index: int | None = None):
     return foundation.execute(c.AdmitInterviewBriefCommand(**values))
 
 
+def _seed_invalid_turn_correction(foundation):
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    foundation.execute(
+        _transcript_command(
+            foundation.case_revision(CASE_ID),
+            1,
+            "This finalized answer produces one quarantined branch.",
+        )
+    )
+    parent = foundation.claim_analyzer_job(CASE_ID, worker_id="crashed-primary-worker")
+    context = foundation.active_analyzer_context(CASE_ID)
+    candidate = c.TurnAnalysisCandidate(
+        protocol_version="1.0.0",
+        output_type="TURN_ANALYSIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=context.context_id,
+        request_hash="sha256:" + "6" * 64,
+        source_set_hash=SOURCE_SET_HASH,
+        transcript_event_id=UUID(parent["subject_id"]),
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        disposition=c.TurnDisposition.SUBSTANTIVE,
+        no_change_reason_code=None,
+        evidence_candidates=(
+            c.EvidenceCandidate(
+                candidate_key="evidence-invalid-only",
+                source_role=c.SourceRole.PM_SPEC,
+                locator=c.QuoteSearchLocator(
+                    locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
+                    exact_quote="A nonexistent exact quote.",
+                    occurrence=1,
+                ),
+                relevance_claim="This branch is deterministically invalid.",
+                quoted_text_candidate="A nonexistent exact quote.",
+            ),
+        ),
+        new_problems=(),
+        new_problem_clusters=(),
+        revised_problem_clusters=(),
+        new_questions=(),
+        revised_questions=(),
+        low_risk_facts=(),
+        decisions=(),
+        problem_assessments=(),
+        evidence_findings=(),
+    )
+    foundation.checkpoint_analyzer_job(
+        parent["job_id"],
+        worker_id="crashed-primary-worker",
+        state="PROVIDER_COMPLETED",
+        candidate_json=candidate.model_dump_json(),
+    )
+    correction = foundation.enqueue_turn_analysis_correction(
+        parent["job_id"], worker_id="crashed-primary-worker"
+    )
+    foundation.checkpoint_analyzer_job(
+        parent["job_id"],
+        worker_id="crashed-primary-worker",
+        state="COMPLETED",
+    )
+    return context, correction
+
+
 def test_real_0004_database_upgrades_additively_to_0007(tmp_path):
     url, original = _runtime(tmp_path)
     original_case = original.get_case(CASE_ID)
@@ -253,8 +317,8 @@ def test_analyzer_worker_checkpoints_stored_response_before_admission(tmp_path):
     assert pending[0]["provider_response_id"] == "resp_turn_worker"
 
 
-def test_rejected_turn_is_not_retried_and_dependent_guidance_fails_closed(tmp_path):
-    _, foundation = _runtime(tmp_path)
+def test_verified_turn_branch_replenishes_before_one_bounded_correction(tmp_path):
+    url, foundation = _runtime(tmp_path)
     _activate(foundation)
     _admit_brief(foundation)
     foundation.set_preparation_phase(CASE_ID, "READY")
@@ -275,15 +339,16 @@ def test_rejected_turn_is_not_retried_and_dependent_guidance_fails_closed(tmp_pa
                 FinalTranscriptInput(
                     turn_sequence=sequence,
                     text=f"Final answer {sequence}.",
-                    provider_request_id=f"rejected-turn-{sequence}",
+                    provider_request_id=f"partitioned-turn-{sequence}",
                     speaker_actor_id=actor,
                     actor="PM",
                 )
             )
         )
 
-    class OneRejectedTurnAdapter:
+    class PartitionedTurnAdapter:
         calls = []
+        correction_calls = 0
 
         @staticmethod
         def source_set_hash(sources):
@@ -291,6 +356,39 @@ def test_rejected_turn_is_not_retried_and_dependent_guidance_fails_closed(tmp_pa
 
         async def execute(self, request, *, context):
             self.calls.append(request.request_type)
+            if isinstance(request, c.ReplenishGuidanceRequest):
+                question = next(
+                    item
+                    for item in request.foundation_snapshot.questions
+                    if item.text == "Which verified delivery option should be confirmed?"
+                )
+                return c.GuidanceCandidate(
+                    protocol_version="1.0.0",
+                    output_type="GUIDANCE_CANDIDATE",
+                    analyzer_run_id=request.analyzer_run_id,
+                    context_id=request.context_id,
+                    request_hash=request.request_hash,
+                    source_set_hash=request.source_set_hash,
+                    based_on_case_revision=request.based_on_case_revision,
+                    recommended_question=c.GuidanceQuestion(
+                        question_ref=c.FoundationEntityRef(
+                            ref_kind="FOUNDATION_ID",
+                            foundation_id=question.question_id,
+                            expected_version=question.question_version,
+                        ),
+                        exact_text=question.text,
+                        reason=question.rationale,
+                    ),
+                    safe_alternates=(),
+                    do_not_ask_question_refs=(),
+                    dependencies=(
+                        c.GuidanceDependency(
+                            dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                            entity_ref=None,
+                        ),
+                    ),
+                    acknowledgement_suggestion="A verified clarification is ready.",
+                )
             assert isinstance(request, c.AnalyzeFinalTurnRequest)
             common = dict(
                 protocol_version="1.0.0",
@@ -312,13 +410,82 @@ def test_rejected_turn_is_not_retried_and_dependent_guidance_fails_closed(tmp_pa
                 evidence_findings=(),
             )
             if request.transcript.sequence_number == 1:
+                valid_evidence = c.CandidateEntityRef(
+                    ref_kind="CANDIDATE_KEY", candidate_key="evidence-valid"
+                )
+                invalid_evidence = c.CandidateEntityRef(
+                    ref_kind="CANDIDATE_KEY", candidate_key="evidence-invalid"
+                )
+                valid_problem = c.CandidateEntityRef(
+                    ref_kind="CANDIDATE_KEY", candidate_key="problem-valid"
+                )
+                invalid_problem = c.CandidateEntityRef(
+                    ref_kind="CANDIDATE_KEY", candidate_key="problem-invalid"
+                )
                 return c.TurnAnalysisCandidate(
-                    **common,
+                    **{
+                        **common,
+                        "new_problems": (
+                            c.TurnProblemCandidate(
+                                candidate_key="problem-valid",
+                                problem_kind=c.ProblemKind.MISSING_DECISION,
+                                domain=c.Domain.PRODUCT,
+                                severity=c.Severity.HIGH,
+                                statement="A verified delivery choice remains open.",
+                                consequence="The delivery contract remains incomplete.",
+                                evidence_refs=(valid_evidence,),
+                            ),
+                            c.TurnProblemCandidate(
+                                candidate_key="problem-invalid",
+                                problem_kind=c.ProblemKind.MISSING_DECISION,
+                                domain=c.Domain.PRODUCT,
+                                severity=c.Severity.HIGH,
+                                statement="An ungrounded delivery choice was proposed.",
+                                consequence="It must not enter the live runway.",
+                                evidence_refs=(invalid_evidence,),
+                            ),
+                        ),
+                        "new_questions": (
+                            c.TurnQuestionCandidate(
+                                candidate_key="question-valid",
+                                text="Which verified delivery option should be confirmed?",
+                                rationale="The verified problem needs a participant decision.",
+                                question_shape=c.QuestionShape.OPEN_TEXT,
+                                capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
+                                answer_options=(),
+                                addresses_problem_refs=(valid_problem,),
+                                prerequisite_problem_refs=(),
+                                safe_without_current_turn_interpretation=True,
+                            ),
+                            c.TurnQuestionCandidate(
+                                candidate_key="question-invalid",
+                                text="Which ungrounded delivery option should be confirmed?",
+                                rationale="This branch must remain quarantined.",
+                                question_shape=c.QuestionShape.OPEN_TEXT,
+                                capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
+                                answer_options=(),
+                                addresses_problem_refs=(invalid_problem,),
+                                prerequisite_problem_refs=(),
+                                safe_without_current_turn_interpretation=True,
+                            ),
+                        ),
+                    },
                     disposition=c.TurnDisposition.SUBSTANTIVE,
                     no_change_reason_code=None,
                     evidence_candidates=(
                         c.EvidenceCandidate(
-                            candidate_key="evidence-absent-quote",
+                            candidate_key="evidence-valid",
+                            source_role=c.SourceRole.PM_SPEC,
+                            locator=c.SourceLineLocator(
+                                locator_kind=c.SourceLocatorKind.SOURCE_LINES,
+                                start_line=1,
+                                end_line=1,
+                            ),
+                            relevance_claim="The source grounds the verified branch.",
+                            quoted_text_candidate="Export filtered orders.",
+                        ),
+                        c.EvidenceCandidate(
+                            candidate_key="evidence-invalid",
                             source_role=c.SourceRole.PM_SPEC,
                             locator=c.QuoteSearchLocator(
                                 locator_kind=c.SourceLocatorKind.QUOTE_SEARCH,
@@ -337,24 +504,305 @@ def test_rejected_turn_is_not_retried_and_dependent_guidance_fails_closed(tmp_pa
                 evidence_candidates=(),
             )
 
-    adapter = OneRejectedTurnAdapter()
+        async def execute_turn_analysis_correction_with_response_checkpoint(
+            self,
+            request,
+            *,
+            context,
+            quarantined_candidate_keys,
+            checkpoint,
+        ):
+            self.correction_calls += 1
+            assert set(quarantined_candidate_keys) == {
+                "evidence-invalid",
+                "problem-invalid",
+                "question-invalid",
+            }
+            checkpoint("resp_turn_correction")
+            evidence = c.CandidateEntityRef(
+                ref_kind="CANDIDATE_KEY", candidate_key="evidence-invalid"
+            )
+            problem = c.CandidateEntityRef(
+                ref_kind="CANDIDATE_KEY", candidate_key="problem-invalid"
+            )
+            return c.TurnAnalysisCandidate(
+                protocol_version="1.0.0",
+                output_type="TURN_ANALYSIS_CANDIDATE",
+                analyzer_run_id=request.analyzer_run_id,
+                context_id=request.context_id,
+                request_hash=request.request_hash,
+                source_set_hash=request.source_set_hash,
+                transcript_event_id=request.transcript.transcript_event_id,
+                based_on_case_revision=request.based_on_case_revision,
+                disposition=c.TurnDisposition.SUBSTANTIVE,
+                no_change_reason_code=None,
+                evidence_candidates=(
+                    c.EvidenceCandidate(
+                        candidate_key="evidence-invalid",
+                        source_role=c.SourceRole.PM_SPEC,
+                        locator=c.SourceLineLocator(
+                            locator_kind=c.SourceLocatorKind.SOURCE_LINES,
+                            start_line=1,
+                            end_line=1,
+                        ),
+                        relevance_claim="The corrected branch now has exact source evidence.",
+                        quoted_text_candidate="Export filtered orders.",
+                    ),
+                ),
+                new_problems=(
+                    c.TurnProblemCandidate(
+                        candidate_key="problem-invalid",
+                        problem_kind=c.ProblemKind.MISSING_DECISION,
+                        domain=c.Domain.PRODUCT,
+                        severity=c.Severity.HIGH,
+                        statement="A corrected evidence-bound choice remains open.",
+                        consequence="The participant must confirm the grounded choice.",
+                        evidence_refs=(evidence,),
+                    ),
+                ),
+                new_problem_clusters=(),
+                revised_problem_clusters=(),
+                new_questions=(
+                    c.TurnQuestionCandidate(
+                        candidate_key="question-invalid",
+                        text="Which corrected evidence-bound option should be confirmed?",
+                        rationale="The corrected branch is now safe for later selection.",
+                        question_shape=c.QuestionShape.OPEN_TEXT,
+                        capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
+                        answer_options=(),
+                        addresses_problem_refs=(problem,),
+                        prerequisite_problem_refs=(),
+                        safe_without_current_turn_interpretation=True,
+                    ),
+                ),
+                revised_questions=(),
+                low_risk_facts=(),
+                decisions=(),
+                problem_assessments=(),
+                evidence_findings=(),
+            )
+
+    adapter = PartitionedTurnAdapter()
     orchestrator.adapter = adapter
-    worker = DurableAnalyzerWorker(orchestrator, worker_id="rejection-worker")
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="partition-worker")
     assert asyncio.run(worker.run_once()) is True
+    assert asyncio.run(worker.run_once()) is True
+    jobs_before_guidance = foundation.analyzer_jobs(CASE_ID)
+    correction = next(
+        item for item in jobs_before_guidance if item["subject_id"].startswith("turn-correction:")
+    )
+    assert correction["state"] == "ANALYSIS_PENDING"
+    assert foundation.runway_projection(CASE_ID)["depth"] == 2
+
+    # A process restart reconstructs both the verified Foundation subset and
+    # the still-pending correction without another primary provider call.
+    foundation = type(foundation)(url, now=lambda: NOW)
+    context = foundation.active_analyzer_context(CASE_ID)
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=adapter,
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="restarted-partition-worker")
+
+    # GUIDANCE (priority 20) consumes the verified subset before correction
+    # (priority 30), preserving the two live questions and appending the new one.
+    assert asyncio.run(worker.run_once()) is True
+    assert adapter.correction_calls == 0
+    runway = foundation.runway_projection(CASE_ID)
+    assert runway["depth"] == 3
+    assert [item["exact_text"] for item in runway["questions"]][-1] == (
+        "Which verified delivery option should be confirmed?"
+    )
+
+    snapshot = foundation.semantic_snapshot(CASE_ID)
+    assert any(
+        item.text == "Which verified delivery option should be confirmed?"
+        for item in snapshot.questions
+    )
+    assert all(
+        item.text != "Which ungrounded delivery option should be confirmed?"
+        for item in snapshot.questions
+    )
+
     assert asyncio.run(worker.run_once()) is True
     assert asyncio.run(worker.run_once()) is False
 
     jobs = foundation.analyzer_jobs(CASE_ID)
-    assert [item["state"] for item in jobs].count("COMPLETED") == 1
-    failed = {item["last_error_code"] for item in jobs if item["state"] == "FAILED"}
-    assert failed == {
-        "FOUNDATION_REJECTED_EVIDENCE_BINDING_FAILED",
-        "TURN_ANALYSIS_DEPENDENCY_FAILED",
-    }
+    assert all(item["state"] == "COMPLETED" for item in jobs)
+    assert adapter.correction_calls == 1
+    corrected_snapshot = foundation.semantic_snapshot(CASE_ID)
+    assert any(
+        item.text == "Which corrected evidence-bound option should be confirmed?"
+        for item in corrected_snapshot.questions
+    )
+    assert foundation.runway_projection(CASE_ID)["depth"] == 3
     assert adapter.calls == [
         c.AnalyzerOperation.TURN_ANALYSIS,
         c.AnalyzerOperation.TURN_ANALYSIS,
+        c.AnalyzerOperation.GUIDANCE,
     ]
+
+
+def test_turn_correction_failure_is_terminal_without_retry_or_runway_loss(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    context, _ = _seed_invalid_turn_correction(foundation)
+    depth_before = foundation.runway_projection(CASE_ID)["depth"]
+
+    class FailingCorrectionAdapter:
+        calls = 0
+
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def execute_turn_analysis_correction_with_response_checkpoint(
+            self, request, **kwargs
+        ):
+            self.calls += 1
+            raise ProviderAdapterError(
+                c.ProviderFailureReceipt(
+                    provider=c.ProviderName.OPENAI,
+                    stage=c.ProviderProcessingStage.TURN_ANALYSIS,
+                    client_request_id=request.client_request_id,
+                    provider_request_id=None,
+                    status_code=429,
+                    code=c.ProviderFailureCode.HTTP_429,
+                    retryable=True,
+                    validation_diagnostics=(),
+                    occurred_at=NOW,
+                )
+            )
+
+    adapter = FailingCorrectionAdapter()
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=adapter,
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="bounded-correction-worker")
+    assert asyncio.run(worker.run_once()) is True
+    assert asyncio.run(worker.run_once()) is False
+
+    correction = next(
+        item
+        for item in foundation.analyzer_jobs(CASE_ID)
+        if item["subject_id"].startswith("turn-correction:")
+    )
+    assert correction["state"] == "FAILED"
+    assert correction["attempt_count"] == 1
+    assert correction["last_error_code"] == "TURN_CORRECTION_PROVIDER_HTTP_429"
+    assert adapter.calls == 1
+    assert foundation.runway_projection(CASE_ID)["depth"] == depth_before
+
+
+def test_known_turn_correction_response_resumes_exact_id_without_recreate(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    context, correction = _seed_invalid_turn_correction(foundation)
+
+    class ResumeOnlyAdapter:
+        create_calls = 0
+        resume_calls = 0
+
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+        async def execute_turn_analysis_correction_with_response_checkpoint(
+            self, request, **kwargs
+        ):
+            self.create_calls += 1
+            raise AssertionError("known correction Response must not be recreated")
+
+        async def resume_stored_response(
+            self, request, *, context, response_id
+        ):
+            self.resume_calls += 1
+            assert response_id == "resp_known_turn_correction"
+            return c.TurnAnalysisCandidate(
+                protocol_version="1.0.0",
+                output_type="TURN_ANALYSIS_CANDIDATE",
+                analyzer_run_id=request.analyzer_run_id,
+                context_id=request.context_id,
+                request_hash=request.request_hash,
+                source_set_hash=request.source_set_hash,
+                transcript_event_id=request.transcript.transcript_event_id,
+                based_on_case_revision=request.based_on_case_revision,
+                disposition=c.TurnDisposition.NO_SEMANTIC_CHANGE,
+                no_change_reason_code="OUT_OF_SCOPE",
+                evidence_candidates=(),
+                new_problems=(),
+                new_problem_clusters=(),
+                revised_problem_clusters=(),
+                new_questions=(),
+                revised_questions=(),
+                low_risk_facts=(),
+                decisions=(),
+                problem_assessments=(),
+                evidence_findings=(),
+            )
+
+    adapter = ResumeOnlyAdapter()
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=adapter,
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    crashed_worker = DurableAnalyzerWorker(
+        orchestrator, worker_id="crashed-correction-worker"
+    )
+    claimed = foundation.claim_analyzer_job(
+        CASE_ID, worker_id="crashed-correction-worker"
+    )
+    assert claimed["job_id"] == correction["job_id"]
+    request = crashed_worker._build_request(claimed, context)
+    foundation.checkpoint_analyzer_job(
+        correction["job_id"],
+        worker_id="crashed-correction-worker",
+        state="PROVIDER_REQUESTED",
+        request_json=request.model_dump_json(),
+    )
+    foundation.checkpoint_provider_response(
+        CASE_ID,
+        client_request_id=request.client_request_id,
+        operation=c.AnalyzerOperation.TURN_ANALYSIS.value,
+        provider_response_id="resp_known_turn_correction",
+    )
+    table = V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            table.update()
+            .where(table.c.job_id == correction["job_id"])
+            .values(lease_expires_at="2026-08-12T11:59:00Z")
+        )
+
+    restarted_worker = DurableAnalyzerWorker(
+        orchestrator, worker_id="resumed-correction-worker"
+    )
+    assert asyncio.run(restarted_worker.run_once()) is True
+    assert asyncio.run(restarted_worker.run_once()) is False
+    completed = next(
+        item
+        for item in foundation.analyzer_jobs(CASE_ID)
+        if item["job_id"] == correction["job_id"]
+    )
+    assert completed["state"] == "COMPLETED"
+    assert completed["attempt_count"] == 2
+    assert completed["candidate_json"] is not None
+    assert adapter.create_calls == 0
+    assert adapter.resume_calls == 1
 
 
 def test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_three(tmp_path):

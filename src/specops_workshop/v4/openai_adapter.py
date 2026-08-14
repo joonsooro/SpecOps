@@ -14,6 +14,7 @@ import json
 import logging
 import time
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Literal
@@ -1062,6 +1063,7 @@ class StoredConversationOpenAIAdapter:
     ) -> dict[str, Any]:
         operation = contracts.AnalyzerOperation(request.request_type)
         schema_name, schema, _ = native_schema_for(operation)
+        schema = self._bind_candidate_echo_schema(request, schema)
         content: list[dict[str, str]] = []
         if turn_correction_keys:
             if not isinstance(request, contracts.AnalyzeFinalTurnRequest):
@@ -1144,6 +1146,31 @@ class StoredConversationOpenAIAdapter:
             },
             "max_output_tokens": MAX_OUTPUT_TOKENS[operation],
         }
+
+    @staticmethod
+    def _bind_candidate_echo_schema(
+        request: contracts.AnalyzerProviderRequest,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Constrain provider echoes without replacing local admission checks."""
+
+        bound = deepcopy(schema)
+        properties = bound.get("properties")
+        if not isinstance(properties, dict):
+            raise ValueError("candidate schema must expose root properties")
+        request_values = request.model_dump(mode="json")
+        for field in (
+            "analyzer_run_id",
+            "context_id",
+            "request_hash",
+            "source_set_hash",
+            "based_on_case_revision",
+        ):
+            field_schema = properties.get(field)
+            if not isinstance(field_schema, dict) or field not in request_values:
+                raise ValueError(f"candidate schema cannot bind {field}")
+            field_schema["const"] = request_values[field]
+        return bound
 
     def _emit_lifecycle(
         self,

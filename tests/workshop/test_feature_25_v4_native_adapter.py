@@ -367,6 +367,41 @@ def test_bootstrap_provider_schema_enforces_local_question_shape_invariants():
     validator.validate(valid_boolean)
 
 
+def test_provider_schema_binds_immutable_request_echoes_before_generation():
+    adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
+    sources = (
+        _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+        _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical.md", b"Technical"),
+    )
+    prepared = adapter.prepared_from_ids(
+        sources, ("file_pm", "file_technical"), "conv_schema_binding"
+    )
+    request = _bootstrap_request(prepared)
+    arguments = adapter._response_arguments(request, bootstrap=True)
+    schema = arguments["text"]["format"]["schema"]
+    expected = request.model_dump(mode="json")
+
+    for field in (
+        "analyzer_run_id",
+        "context_id",
+        "request_hash",
+        "source_set_hash",
+        "based_on_case_revision",
+    ):
+        assert schema["properties"][field]["const"] == expected[field]
+
+    validator = Draft202012Validator(schema)
+    payload = _brief(request).model_dump(mode="json")
+    validator.validate(payload)
+    wrong_request_hash = deepcopy(payload)
+    wrong_request_hash["request_hash"] = ONE_HASH
+    assert list(validator.iter_errors(wrong_request_hash))
+
+    # The compiled shared schema remains request-agnostic for later calls.
+    shared = compile_openai_strict_schema(c.InterviewBriefCandidate)
+    assert "const" not in shared["properties"]["request_hash"]
+
+
 def test_quote_search_grounding_requires_one_exact_terra_quote():
     exact_quote = "Export filtered orders."
     locator = c.QuoteSearchLocator(

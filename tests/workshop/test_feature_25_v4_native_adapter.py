@@ -1318,3 +1318,33 @@ def test_unmapped_http_400_is_never_stored_as_message_or_bare_http_400():
     assert safe.receipt.code is c.ProviderFailureCode.UNKNOWN_SAFE
     assert "full provider body" not in dumped
     assert "something_new" not in dumped
+
+
+def test_schema_rejection_retains_only_allowlisted_provider_schema_terms():
+    adapter = StoredConversationOpenAIAdapter(api_key="unused", client=FakeOpenAI(), now=lambda: NOW)
+    error = RuntimeError("full provider body with source and transcript text")
+    error.status_code = 400
+    error.request_id = "req_schema_safe"
+    error.code = "invalid_json_schema"
+    error.param = "text.format.schema"
+    error.body = {
+        "message": (
+            "raw source and transcript: in schema context, 'minLength' and "
+            "'uniqueItems' are not permitted"
+        )
+    }
+
+    safe = adapter._provider_error(
+        error,
+        stage=c.ProviderProcessingStage.SPEC_PACKAGE_SYNTHESIS,
+        client_request_id="client-schema-safe",
+    )
+
+    dumped = safe.receipt.model_dump_json()
+    assert safe.receipt.code is c.ProviderFailureCode.SCHEMA_REJECTED
+    assert {item.path for item in safe.receipt.validation_diagnostics} == {
+        ("provider_schema", "min_length"),
+        ("provider_schema", "unique_items"),
+    }
+    assert "raw source" not in dumped
+    assert "transcript" not in dumped

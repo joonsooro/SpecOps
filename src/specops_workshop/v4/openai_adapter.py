@@ -245,6 +245,64 @@ def safe_validation_diagnostics(error: Exception) -> tuple[contracts.SafeValidat
     return tuple(result)
 
 
+_SAFE_PROVIDER_SCHEMA_TERMS = {
+    "additionalProperties": "additional_properties",
+    "allOf": "all_of",
+    "anyOf": "any_of",
+    "const": "const",
+    "contains": "contains",
+    "dependentRequired": "dependent_required",
+    "dependentSchemas": "dependent_schemas",
+    "enum": "enum",
+    "exclusiveMaximum": "exclusive_maximum",
+    "exclusiveMinimum": "exclusive_minimum",
+    "format": "format",
+    "items": "items",
+    "maxContains": "max_contains",
+    "maxItems": "max_items",
+    "maxLength": "max_length",
+    "maximum": "maximum",
+    "minContains": "min_contains",
+    "minItems": "min_items",
+    "minLength": "min_length",
+    "minimum": "minimum",
+    "multipleOf": "multiple_of",
+    "not": "not",
+    "oneOf": "one_of",
+    "pattern": "pattern",
+    "patternProperties": "pattern_properties",
+    "propertyNames": "property_names",
+    "required": "required",
+    "type": "type",
+    "unevaluatedProperties": "unevaluated_properties",
+    "uniqueItems": "unique_items",
+    "$defs": "defs",
+    "$ref": "ref",
+}
+
+
+def safe_provider_schema_diagnostics(
+    error: Exception,
+) -> tuple[contracts.SafeValidationDiagnostic, ...]:
+    """Extract only allowlisted JSON-Schema terms from a provider 400 body."""
+
+    body = getattr(error, "body", None)
+    message = body.get("message") if isinstance(body, dict) else None
+    if not isinstance(message, str) or len(message) > 20_000:
+        return ()
+    return tuple(
+        contracts.SafeValidationDiagnostic(
+            path=("provider_schema", safe_term),
+            code=contracts.SafeValidationCode.INVARIANT_FAILED,
+        )
+        for provider_term, safe_term in _SAFE_PROVIDER_SCHEMA_TERMS.items()
+        if any(
+            f"{quote}{provider_term}{quote}" in message
+            for quote in ("'", '"', "`")
+        )
+    )[:16]
+
+
 class StoredConversationOpenAIAdapter:
     """Sole V4 production provider adapter (Terra, medium, stored Conversation)."""
 
@@ -1512,7 +1570,15 @@ class StoredConversationOpenAIAdapter:
             status_code=status_code,
             code=code,
             retryable=retryable,
-            validation_diagnostics=(),
+            validation_diagnostics=(
+                safe_provider_schema_diagnostics(error)
+                if code
+                in {
+                    contracts.ProviderFailureCode.SCHEMA_REJECTED,
+                    contracts.ProviderFailureCode.UNSUPPORTED_SCHEMA_KEYWORD,
+                }
+                else ()
+            ),
             occurred_at=self._now(),
         )
         self._failures.append(receipt)

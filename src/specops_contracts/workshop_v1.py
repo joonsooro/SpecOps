@@ -1524,11 +1524,63 @@ class ProviderFailureReceipt(ContractModel):
             raise ValueError("safe invalid-request categories require HTTP 400")
         if self.code in {ProviderFailureCode.TIMEOUT, ProviderFailureCode.CONNECTION} and self.status_code is not None:
             raise ValueError("transport failures do not carry an HTTP status")
-        if self.validation_diagnostics and (
-            self.code is not ProviderFailureCode.OUTPUT_INVALID
-            or self.stage is not ProviderProcessingStage.LOCAL_VALIDATION
+        local_output_diagnostics = (
+            self.code is ProviderFailureCode.OUTPUT_INVALID
+            and self.stage is ProviderProcessingStage.LOCAL_VALIDATION
+        )
+        safe_schema_terms = {
+            "additional_properties",
+            "all_of",
+            "any_of",
+            "const",
+            "contains",
+            "defs",
+            "dependent_required",
+            "dependent_schemas",
+            "enum",
+            "exclusive_maximum",
+            "exclusive_minimum",
+            "format",
+            "items",
+            "max_contains",
+            "max_items",
+            "max_length",
+            "maximum",
+            "min_contains",
+            "min_items",
+            "min_length",
+            "minimum",
+            "multiple_of",
+            "not",
+            "one_of",
+            "pattern",
+            "pattern_properties",
+            "property_names",
+            "ref",
+            "required",
+            "type",
+            "unevaluated_properties",
+            "unique_items",
+        }
+        provider_schema_diagnostics = (
+            self.code
+            in {
+                ProviderFailureCode.SCHEMA_REJECTED,
+                ProviderFailureCode.UNSUPPORTED_SCHEMA_KEYWORD,
+            }
+            and self.status_code == 400
+            and all(
+                item.code is SafeValidationCode.INVARIANT_FAILED
+                and len(item.path) == 2
+                and item.path[0] == "provider_schema"
+                and item.path[1] in safe_schema_terms
+                for item in self.validation_diagnostics
+            )
+        )
+        if self.validation_diagnostics and not (
+            local_output_diagnostics or provider_schema_diagnostics
         ):
-            raise ValueError("field-path diagnostics are only for local output validation")
+            raise ValueError("validation diagnostics are outside the safe allowlist")
         return self
 
 

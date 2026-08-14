@@ -415,7 +415,8 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
         c.AnalyzerOperation.GUIDANCE
     )
     assert "safe_without_current_turn_interpretation field is true" in guidance
-    assert "reject that selected branch rather than reinterpret it" in guidance
+    assert "neither already ASKED nor listed in do_not_ask_question_refs" in guidance
+    assert "reject that selected branch rather than reinterpret or repeat it" in guidance
 
 
 def test_stored_conversation_bootstrap_uploads_exactly_two_files_and_reuses_conversation():

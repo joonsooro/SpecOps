@@ -1134,6 +1134,76 @@ def test_guidance_quarantines_unsafe_selection_and_preserves_safe_runway(tmp_pat
     assert str(unsafe_id) not in {item["question_id"] for item in runway["questions"]}
 
 
+def test_guidance_quarantines_asked_selection_without_repeating_it(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    brief_receipt = _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    mappings = {
+        item.candidate_key: item
+        for item in brief_receipt.identity_mappings
+        if item.entity_kind == "QUESTION"
+    }
+    first_question_id = mappings["question-1"].foundation_id
+    foundation.execute(
+        _transcript_command(
+            foundation.case_revision(CASE_ID),
+            1,
+            "The first admitted question has now been answered.",
+        )
+    )
+
+    def selection(index: int) -> c.GuidanceQuestion:
+        mapping = mappings[f"question-{index}"]
+        return c.GuidanceQuestion(
+            question_ref=c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=mapping.foundation_id,
+                expected_version=mapping.record_version,
+            ),
+            exact_text=f"Which confirmed export choice applies to clarification area {index}?",
+            reason=f"Clarification area {index} is selected for the live runway.",
+        )
+
+    run_id = uuid4()
+    request_hash = "sha256:" + "6" * 64
+    candidate = c.GuidanceCandidate(
+        protocol_version="1.0.0",
+        output_type="GUIDANCE_CANDIDATE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        request_hash=request_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        recommended_question=selection(1),
+        safe_alternates=(selection(2), selection(3)),
+        do_not_ask_question_refs=(),
+        dependencies=(
+            c.GuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_ref=None,
+            ),
+        ),
+        acknowledgement_suggestion="The unanswered verified runway remains available.",
+    )
+    values = _base(foundation.case_revision(CASE_ID))
+    values.update(
+        command_type="ADMIT_GUIDANCE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=request_hash,
+        candidate=candidate,
+    )
+
+    foundation.execute(c.AdmitGuidanceCommand(**values))
+
+    runway = foundation.runway_projection(CASE_ID)
+    assert runway["depth"] == c.INITIAL_RUNWAY_DEPTH - 1
+    assert str(first_question_id) not in {
+        item["question_id"] for item in runway["questions"]
+    }
+
+
 def test_foundation_derives_current_dependencies_for_every_guidance_question(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)

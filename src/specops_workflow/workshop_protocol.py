@@ -2346,15 +2346,16 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             command.candidate.recommended_question,
             *command.candidate.safe_alternates,
         )
-        for question in proposed:
-            identity = (
-                str(question.question_ref.foundation_id),
-                question.question_ref.expected_version,
-            )
-            if identity in asked_by_question:
-                raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
         admitted_proposed_values: list[c.AdmittedGuidanceQuestion] = []
         for item in proposed:
+            identity = (
+                str(item.question_ref.foundation_id),
+                item.question_ref.expected_version,
+            )
+            if identity in asked_by_question:
+                # An exact previously asked question can never re-enter the
+                # runway, but it must not discard independent safe selections.
+                continue
             try:
                 admitted_proposed_values.append(admitted_question(item))
             except FoundationProtocolError as exc:

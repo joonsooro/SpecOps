@@ -323,7 +323,7 @@ class _BackgroundResponses:
             _request_id="req_background_create",
         )
 
-    async def retrieve(self, response_id):
+    async def retrieve(self, response_id, **_kwargs):
         self.retrieve_ids.append(response_id)
         completed = len(self.retrieve_ids) >= 7 or self.cancel_wait_once
         return SimpleNamespace(
@@ -1082,6 +1082,90 @@ def test_background_bootstrap_polls_one_stored_response_past_60_second_slow_obse
         encoded = json.dumps([event.__dict__ for event in adapter.lifecycle_events])
         assert "private PM source" not in encoded
         assert "private technical source" not in encoded
+
+    asyncio.run(scenario())
+
+
+def test_non_bootstrap_generation_checkpoints_one_background_response_and_waits_past_60_seconds():
+    async def scenario():
+        clock = _ManualMonotonic()
+        responses = _BackgroundResponses()
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=responses),
+            now=lambda: NOW,
+            monotonic=clock,
+            sleep=clock.advance,
+        )
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+            _source(
+                c.SourceRole.TECHNICAL_CONTRACT,
+                11,
+                "technical-contract.md",
+                b"private technical source",
+            ),
+        )
+        prepared = adapter.prepared_from_ids(
+            sources, ("file_pm", "file_technical"), "conv_background"
+        )
+        request = _spec_synthesis_request(prepared)
+        context = c.AnalyzerContextBinding(
+            protocol_version="1.0.0",
+            context_id=CONTEXT_ID,
+            session_id=SESSION_ID,
+            provider=c.ProviderName.OPENAI,
+            provider_conversation_id=prepared.provider_conversation_id,
+            bootstrap_response_id="resp_bootstrap",
+            model="gpt-5.6-terra",
+            reasoning_effort=c.ReasoningEffort.MEDIUM,
+            conversation_state_persisted=True,
+            response_store_enabled=True,
+            analyzer_contract=request.analyzer_contract,
+            source_set=prepared.source_set,
+            status=c.ContextStatus.ACTIVE,
+            created_at=NOW,
+            invalidated_at=None,
+            invalidation_reason=None,
+        )
+        candidate = c.SpecPackageSynthesisCandidate(
+            output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+            analyzer_run_id=request.analyzer_run_id,
+            context_id=request.context_id,
+            request_hash=request.request_hash,
+            source_set_hash=request.source_set_hash,
+            based_on_case_revision=request.based_on_case_revision,
+            foundation_artifact_id=request.target.foundation_artifact_id,
+            identity_plan_id=request.identity_plan.identity_plan_id,
+            identity_plan_version=request.identity_plan.identity_plan_version,
+            semantic_state_hash=request.identity_plan.semantic_state_hash,
+            payload_schema_id=request.payload_schema_id,
+            payload_schema_version=request.payload_schema_version,
+            candidate_payload_json="{}",
+        )
+        wire_candidate = candidate.model_dump(mode="json")
+        wire_candidate["candidate_payload_json"] = {}
+        responses.output_text = json.dumps(wire_candidate)
+        checkpoints: list[str] = []
+
+        result = await adapter.execute_with_response_checkpoint(
+            request,
+            context=context,
+            checkpoint=checkpoints.append,
+        )
+
+        assert result == candidate
+        assert checkpoints == ["resp_background_bootstrap"]
+        assert len(responses.create_calls) == 1
+        assert responses.create_calls[0]["background"] is True
+        assert responses.retrieve_ids == ["resp_background_bootstrap"] * 7
+        assert [event.event for event in adapter.lifecycle_events] == [
+            "provider_request.started",
+            "provider_request.accepted",
+            "provider_request.timeout",
+            "provider_request.completed",
+        ]
+        assert adapter.lifecycle_events[-1].duration_ms == 70_000
 
     asyncio.run(scenario())
 

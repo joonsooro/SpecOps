@@ -1062,6 +1062,7 @@ class StoredConversationOpenAIAdapter:
             bootstrap=bootstrap,
             turn_correction_keys=turn_correction_keys,
         )
+        arguments["background"] = True
         started_at = self._monotonic()
         self._emit_lifecycle(
             event="provider_request.started",
@@ -1103,6 +1104,65 @@ class StoredConversationOpenAIAdapter:
                 client_request_id=request.client_request_id,
             ) from exc
 
+        response_id = _safe_provider_identifier(getattr(response, "id", None))
+        if response_id is None:
+            raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
+        if response_checkpoint is not None:
+            response_checkpoint(response_id)
+        self._emit_lifecycle(
+            event="provider_request.accepted",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+            response=response,
+        )
+        status = getattr(response, "status", None) or "completed"
+        slow_observed = False
+        try:
+            while status in {"queued", "in_progress"}:
+                await self._sleep(BACKGROUND_POLL_SECONDS)
+                response = await asyncio.wait_for(
+                    self._client.responses.retrieve(
+                        response_id,
+                        extra_headers={
+                            "X-Client-Request-Id": request.client_request_id
+                        },
+                    ),
+                    timeout=PROVIDER_IO_TIMEOUT_SECONDS,
+                )
+                if _safe_provider_identifier(getattr(response, "id", None)) != response_id:
+                    raise ValueError("retrieved Response identity changed")
+                status = getattr(response, "status", None) or "completed"
+                if (
+                    not slow_observed
+                    and self._monotonic() - started_at
+                    >= SLOW_RESPONSE_OBSERVATION_SECONDS
+                ):
+                    slow_observed = True
+                    self._emit_lifecycle(
+                        event="provider_request.timeout",
+                        operation=operation,
+                        client_request_id=request.client_request_id,
+                        started_at=started_at,
+                        response=response,
+                    )
+        except asyncio.CancelledError:
+            self._emit_lifecycle(
+                event="provider_request.cancelled",
+                operation=operation,
+                client_request_id=request.client_request_id,
+                started_at=started_at,
+                response=response,
+                status="KNOWN_RESPONSE_WAIT_CANCELLED",
+            )
+            raise
+        except Exception as exc:
+            raise self._provider_error(
+                exc,
+                stage=contracts.ProviderProcessingStage(operation.value),
+                client_request_id=request.client_request_id,
+            ) from exc
+
         self._emit_lifecycle(
             event="provider_request.completed",
             operation=operation,
@@ -1110,12 +1170,12 @@ class StoredConversationOpenAIAdapter:
             started_at=started_at,
             response=response,
         )
-
-        response_id = _safe_provider_identifier(getattr(response, "id", None))
-        if response_id is None:
-            raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
-        if response_checkpoint is not None:
-            response_checkpoint(response_id)
+        if status != "completed":
+            raise self._provider_error(
+                RuntimeError(f"safe terminal response status: {status}"),
+                stage=contracts.ProviderProcessingStage(operation.value),
+                client_request_id=request.client_request_id,
+            )
         try:
             candidate = self._candidate_from_provider_output(
                 operation, candidate_type, response.output_text

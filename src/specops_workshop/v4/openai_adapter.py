@@ -17,6 +17,7 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 from uuid import UUID
 
@@ -37,6 +38,16 @@ MAX_OUTPUT_TOKENS = {
     contracts.AnalyzerOperation.REVIEW_NARRATION: 8_000,
     contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS: 24_000,
     contracts.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS: 24_000,
+}
+ARTIFACT_PAYLOAD_SCHEMAS = {
+    contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS: (
+        "spec-package-payload.schema.json",
+        "https://example.local/schemas/spec-package-payload.schema.json",
+    ),
+    contracts.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS: (
+        "technical-contract-payload.schema.json",
+        "https://example.local/schemas/technical-contract-payload.schema.json",
+    ),
 }
 
 
@@ -1122,6 +1133,17 @@ class StoredConversationOpenAIAdapter:
                 {"type": "input_file", "file_id": item.provider_file_id}
                 for item in request.source_set.ordered_sources
             )
+        payload_schema = self._artifact_payload_schema_text(operation)
+        if payload_schema is not None:
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": (
+                        "Normative Foundation artifact payload JSON Schema: "
+                        f"{payload_schema}"
+                    ),
+                }
+            )
         content.append(
             {
                 "type": "input_text",
@@ -1146,6 +1168,25 @@ class StoredConversationOpenAIAdapter:
             },
             "max_output_tokens": MAX_OUTPUT_TOKENS[operation],
         }
+
+    @staticmethod
+    def _artifact_payload_schema_text(
+        operation: contracts.AnalyzerOperation,
+    ) -> str | None:
+        binding = ARTIFACT_PAYLOAD_SCHEMAS.get(operation)
+        if binding is None:
+            return None
+        filename, expected_schema_id = binding
+        schema_path = Path(__file__).resolve().parent / "schemas" / filename
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(schema, dict)
+            or schema.get("$id") != expected_schema_id
+            or schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+        ):
+            raise ValueError("artifact payload schema binding is invalid")
+        return json.dumps(schema, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
     def _bind_candidate_echo_schema(
@@ -1253,6 +1294,16 @@ class StoredConversationOpenAIAdapter:
                 "question as an alternate and never duplicate an alternate. Also use each "
                 "do_not_ask_question_refs identity at most once, and never place any selected "
                 "question identity in do_not_ask_question_refs."
+            )
+        if operation in ARTIFACT_PAYLOAD_SCHEMAS:
+            instructions += (
+                " Decode candidate_payload_json as exactly one JSON object that validates "
+                "against the normative Foundation payload schema supplied in this request, "
+                "then JSON-encode that object as the candidate_payload_json string; never use "
+                "Markdown or prose in that field. Use every identity_plan.planned_identities "
+                "foundation_id exactly once at the payload path for its entity_kind, and create "
+                "no other payload-owned identity. Foundation will independently enforce the "
+                "payload schema and identity plan."
             )
         return instructions
 

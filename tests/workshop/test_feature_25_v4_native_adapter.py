@@ -106,6 +106,53 @@ def _bootstrap_request(prepared) -> c.BootstrapAnalyzerRequest:
     return c.BootstrapAnalyzerRequest.model_validate(data)
 
 
+def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
+    target = c.ArtifactDraftTarget(
+        artifact_type="SPEC_PACKAGE",
+        foundation_artifact_id=UUID("00000000-0000-4000-8000-000000000020"),
+        artifact_key="SPEC-TEST",
+        next_artifact_version=1,
+    )
+    plan = c.ArtifactSynthesisIdentityPlan(
+        identity_plan_id=UUID("00000000-0000-4000-8000-000000000021"),
+        identity_plan_version=1,
+        target=target,
+        based_on_case_revision=0,
+        semantic_state_hash=ONE_HASH,
+        planned_identities=(
+            c.PlannedArtifactIdentity(
+                foundation_id=UUID("00000000-0000-4000-8000-000000000022"),
+                foundation_version=1,
+                entity_kind="PACKAGE_ITEM",
+                source_entity_refs=(),
+            ),
+        ),
+    )
+    snapshot = _snapshot(prepared.source_set.source_set_hash)
+    data = {
+        "protocol_version": "1.0.0",
+        "request_type": c.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS,
+        "client_request_id": "client-spec-synthesis",
+        "analyzer_run_id": RUN_ID,
+        "context_id": CONTEXT_ID,
+        "provider_conversation_id": prepared.provider_conversation_id,
+        "source_set_hash": prepared.source_set.source_set_hash,
+        "analyzer_contract": _contract(),
+        "based_on_case_revision": 0,
+        "target": target,
+        "identity_plan": plan,
+        "foundation_snapshot": snapshot,
+        "canonical_semantic_state_json": json.dumps(
+            snapshot.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        ),
+        "payload_schema_id": "spec-package-payload",
+        "payload_schema_version": "4.0.0",
+        "requested_output": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+    }
+    data["request_hash"] = _request_hash(data)
+    return c.SpecPackageSynthesisRequest.model_validate(data)
+
+
 def _brief(request: c.BootstrapAnalyzerRequest) -> c.InterviewBriefCandidate:
     return c.InterviewBriefCandidate(
         protocol_version="1.0.0",
@@ -400,6 +447,36 @@ def test_provider_schema_binds_immutable_request_echoes_before_generation():
     # The compiled shared schema remains request-agnostic for later calls.
     shared = compile_openai_strict_schema(c.InterviewBriefCandidate)
     assert "const" not in shared["properties"]["request_hash"]
+
+
+def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules():
+    adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
+    sources = (
+        _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+        _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical.md", b"Technical"),
+    )
+    prepared = adapter.prepared_from_ids(
+        sources, ("file_pm", "file_technical"), "conv_artifact_schema"
+    )
+    request = _spec_synthesis_request(prepared)
+
+    arguments = adapter._response_arguments(request, bootstrap=False)
+    content = arguments["input"][0]["content"]
+    assert [item["type"] for item in content] == ["input_text", "input_text"]
+    prefix = "Normative Foundation artifact payload JSON Schema: "
+    assert content[0]["text"].startswith(prefix)
+    payload_schema = json.loads(content[0]["text"].removeprefix(prefix))
+    assert payload_schema["$id"].endswith("/spec-package-payload.schema.json")
+    assert payload_schema["type"] == "object"
+    assert payload_schema["additionalProperties"] is False
+    assert "product_thesis" in payload_schema["required"]
+    assert json.loads(content[1]["text"])["request_type"] == "SPEC_PACKAGE_SYNTHESIS"
+
+    instructions = arguments["instructions"]
+    assert "candidate_payload_json as exactly one JSON object" in instructions
+    assert "never use Markdown or prose" in instructions
+    assert "foundation_id exactly once" in instructions
+    assert "create no other payload-owned identity" in instructions
 
 
 def test_quote_search_grounding_requires_one_exact_terra_quote():

@@ -2847,6 +2847,18 @@ def test_last_browser_client_gets_exact_fifteen_minute_resume_grace(tmp_path):
         foundation = app.state.workshop_protocol_foundation
         await orchestrator.prepare_workshop()
         original = foundation.active_analyzer_context(app.state.bootstrap.case_id)
+        await orchestrator.record_final_transcript(
+            FinalTranscriptInput(
+                turn_sequence=1,
+                text="One admitted question has been answered before the restart.",
+                provider_request_id="restart-with-current-runway-turn",
+                speaker_actor_id=foundation.case_actor(app.state.bootstrap.case_id, "PM"),
+                actor="PM",
+            )
+        )
+        worker = DurableAnalyzerWorker(orchestrator)
+        assert await worker.run_once() is True
+        assert foundation.runway_projection(app.state.bootstrap.case_id)["depth"] == 3
 
         assert await orchestrator.note_last_client_disconnected() == "RESTART_GRACE"
         grace = foundation.preparation_projection(app.state.bootstrap.case_id)
@@ -2897,6 +2909,12 @@ def test_last_browser_client_gets_exact_fifteen_minute_resume_grace(tmp_path):
         assert rebuilt_context.context_id != original.context_id
         assert rebuilt_context.provider_conversation_id == "conv_task27_rebuilt"
         assert rebuilt_adapter.operations == [c.AnalyzerOperation.BOOTSTRAP]
+        assert (
+            restarted.state.workshop_protocol_foundation.runway_projection(
+                restarted.state.bootstrap.case_id
+            )["depth"]
+            == 3
+        )
 
     asyncio.run(scenario())
 

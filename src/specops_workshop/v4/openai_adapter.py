@@ -25,7 +25,11 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
 from . import contracts
-from .schema_compiler import native_schema_for
+from .schema_compiler import (
+    compile_openai_strict_payload_schema,
+    native_schema_for,
+    validate_openai_strict_schema,
+)
 
 
 PROVIDER_IO_TIMEOUT_SECONDS = 60.0
@@ -778,7 +782,9 @@ class StoredConversationOpenAIAdapter:
                 client_request_id=request.client_request_id,
             )
         try:
-            candidate = candidate_type.model_validate_json(response.output_text)
+            candidate = self._candidate_from_provider_output(
+                operation, candidate_type, response.output_text
+            )
             self._validate_candidate_echo(request, candidate)
         except Exception as exc:
             raise self._output_error(
@@ -1053,7 +1059,9 @@ class StoredConversationOpenAIAdapter:
         if response_checkpoint is not None:
             response_checkpoint(response_id)
         try:
-            candidate = candidate_type.model_validate_json(response.output_text)
+            candidate = self._candidate_from_provider_output(
+                operation, candidate_type, response.output_text
+            )
             self._validate_candidate_echo(request, candidate)
         except Exception as exc:
             raise self._output_error(
@@ -1075,6 +1083,7 @@ class StoredConversationOpenAIAdapter:
         operation = contracts.AnalyzerOperation(request.request_type)
         schema_name, schema, _ = native_schema_for(operation)
         schema = self._bind_candidate_echo_schema(request, schema)
+        schema = self._bind_artifact_payload_output_schema(operation, schema)
         content: list[dict[str, str]] = []
         if turn_correction_keys:
             if not isinstance(request, contracts.AnalyzeFinalTurnRequest):
@@ -1173,6 +1182,15 @@ class StoredConversationOpenAIAdapter:
     def _artifact_payload_schema_text(
         operation: contracts.AnalyzerOperation,
     ) -> str | None:
+        schema = StoredConversationOpenAIAdapter._artifact_payload_schema(operation)
+        if schema is None:
+            return None
+        return json.dumps(schema, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _artifact_payload_schema(
+        operation: contracts.AnalyzerOperation,
+    ) -> dict[str, Any] | None:
         binding = ARTIFACT_PAYLOAD_SCHEMAS.get(operation)
         if binding is None:
             return None
@@ -1186,7 +1204,79 @@ class StoredConversationOpenAIAdapter:
             or schema.get("additionalProperties") is not False
         ):
             raise ValueError("artifact payload schema binding is invalid")
-        return json.dumps(schema, sort_keys=True, separators=(",", ":"))
+        return schema
+
+    @staticmethod
+    def _bind_artifact_payload_output_schema(
+        operation: contracts.AnalyzerOperation,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload_schema = StoredConversationOpenAIAdapter._artifact_payload_schema(
+            operation
+        )
+        if payload_schema is None:
+            return schema
+        payload_wire_schema = compile_openai_strict_payload_schema(payload_schema)
+        payload_definitions = payload_wire_schema.pop("$defs", {})
+        prefix = f"{operation.value.title().replace('_', '')}Payload_"
+        renamed = {name: f"{prefix}{name}" for name in payload_definitions}
+
+        def rebase(value: Any) -> Any:
+            if isinstance(value, list):
+                return [rebase(item) for item in value]
+            if not isinstance(value, dict):
+                return value
+            result = {key: rebase(item) for key, item in value.items()}
+            reference = result.get("$ref")
+            if isinstance(reference, str) and reference.startswith("#/$defs/"):
+                name = reference.removeprefix("#/$defs/")
+                if name not in renamed:
+                    raise ValueError("artifact payload schema reference is unresolved")
+                result["$ref"] = f"#/$defs/{renamed[name]}"
+            return result
+
+        bound = deepcopy(schema)
+        definitions = bound.setdefault("$defs", {})
+        if not isinstance(definitions, dict):
+            raise ValueError("candidate schema definitions must be an object")
+        root_name = f"{prefix}Root"
+        new_names = set(renamed.values()) | {root_name}
+        if new_names.intersection(definitions):
+            raise ValueError("artifact payload schema definition collides")
+        definitions.update(
+            {
+                renamed[name]: rebase(definition)
+                for name, definition in payload_definitions.items()
+            }
+        )
+        definitions[root_name] = rebase(payload_wire_schema)
+        properties = bound.get("properties")
+        if not isinstance(properties, dict) or "candidate_payload_json" not in properties:
+            raise ValueError("candidate schema lacks artifact payload field")
+        properties["candidate_payload_json"] = {"$ref": f"#/$defs/{root_name}"}
+        validate_openai_strict_schema(bound)
+        return bound
+
+    @staticmethod
+    def _candidate_from_provider_output(
+        operation: contracts.AnalyzerOperation,
+        candidate_type: type[BaseModel],
+        output_text: str,
+    ) -> BaseModel:
+        if operation not in ARTIFACT_PAYLOAD_SCHEMAS:
+            return candidate_type.model_validate_json(output_text)
+        envelope = json.loads(output_text)
+        if not isinstance(envelope, dict):
+            raise ValueError("artifact candidate envelope must be an object")
+        payload = envelope.get("candidate_payload_json")
+        if not isinstance(payload, dict):
+            raise ValueError("artifact candidate payload must be an object")
+        envelope["candidate_payload_json"] = json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        )
+        return candidate_type.model_validate_json(
+            json.dumps(envelope, sort_keys=True, separators=(",", ":"))
+        )
 
     @staticmethod
     def _bind_candidate_echo_schema(
@@ -1297,10 +1387,10 @@ class StoredConversationOpenAIAdapter:
             )
         if operation in ARTIFACT_PAYLOAD_SCHEMAS:
             instructions += (
-                " Decode candidate_payload_json as exactly one JSON object that validates "
-                "against the normative Foundation payload schema supplied in this request, "
-                "then JSON-encode that object as the candidate_payload_json string; never use "
-                "Markdown or prose in that field. Use every identity_plan.planned_identities "
+                " Populate candidate_payload_json as exactly one nested JSON object that "
+                "validates against the normative Foundation payload schema supplied in this "
+                "request; never use Markdown, prose, or a JSON-encoded string in that field. "
+                "Use every identity_plan.planned_identities "
                 "foundation_id exactly once at the payload path for its entity_kind, and create "
                 "no other payload-owned identity. Foundation will independently enforce the "
                 "payload schema and identity plan."

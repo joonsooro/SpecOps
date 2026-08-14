@@ -187,11 +187,34 @@ def _encode_question_invariants(schema: dict[str, Any]) -> None:
 def _walk(value: Any):
     if isinstance(value, dict):
         yield value
-        for child in value.values():
-            yield from _walk(child)
+        for key, child in value.items():
+            if key in {"properties", "$defs"} and isinstance(child, dict):
+                for nested_schema in child.values():
+                    yield from _walk(nested_schema)
+            else:
+                yield from _walk(child)
     elif isinstance(value, list):
         for child in value:
             yield from _walk(child)
+
+
+def _without_unsupported_keywords(value: Any) -> Any:
+    """Project a Foundation schema into the provider's structural subset."""
+
+    if isinstance(value, list):
+        return [_without_unsupported_keywords(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {"properties", "$defs"} and isinstance(item, dict):
+            projected[key] = {
+                name: _without_unsupported_keywords(schema)
+                for name, schema in item.items()
+            }
+        elif key not in _UNSUPPORTED_KEYS:
+            projected[key] = _without_unsupported_keywords(item)
+    return projected
 
 
 def _resolved_depth(schema: dict[str, Any]) -> int:
@@ -211,11 +234,20 @@ def _resolved_depth(schema: dict[str, Any]) -> int:
             if target is None:
                 raise ValueError(f"unresolved native-schema reference: {reference}")
             return depth(target, level, resolving | {name})
-        next_level = level + (1 if value.get("type") in {"object", "array"} else 0)
-        return max(
-            (depth(child, next_level, resolving) for child in value.values()),
-            default=next_level,
+        node_type = value.get("type")
+        next_level = level + (
+            1 if isinstance(node_type, str) and node_type in {"object", "array"} else 0
         )
+        child_depths: list[int] = []
+        for key, child in value.items():
+            if key in {"properties", "$defs"} and isinstance(child, dict):
+                child_depths.extend(
+                    depth(nested_schema, next_level, resolving)
+                    for nested_schema in child.values()
+                )
+            else:
+                child_depths.append(depth(child, next_level, resolving))
+        return max(child_depths, default=next_level)
 
     return depth(schema, 0, frozenset())
 
@@ -267,6 +299,23 @@ def compile_openai_strict_schema(model: type[ModelT]) -> dict[str, Any]:
     local_schema = model.model_json_schema(mode="validation")
     compiled = _compile_node(deepcopy(local_schema))
     _encode_question_invariants(compiled)
+    validate_openai_strict_schema(compiled)
+    return compiled
+
+
+def compile_openai_strict_payload_schema(
+    local_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Compile one full Foundation payload schema for provider wire output.
+
+    Unsupported conditional keywords are omitted only from this provider-side
+    structural projection. The unmodified normative schema remains authoritative
+    during local Foundation admission.
+    """
+
+    compiled = _compile_node(deepcopy(local_schema))
+    compiled.pop("$id", None)
+    compiled = _without_unsupported_keywords(compiled)
     validate_openai_strict_schema(compiled)
     return compiled
 

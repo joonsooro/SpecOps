@@ -472,11 +472,41 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "product_thesis" in payload_schema["required"]
     assert json.loads(content[1]["text"])["request_type"] == "SPEC_PACKAGE_SYNTHESIS"
 
+    output_schema = arguments["text"]["format"]["schema"]
+    payload_reference = output_schema["properties"]["candidate_payload_json"]["$ref"]
+    payload_root = output_schema["$defs"][payload_reference.removeprefix("#/$defs/")]
+    assert payload_root["type"] == "object"
+    assert "product_thesis" in payload_root["properties"]
+    assert "allOf" not in json.dumps(output_schema)
+
     instructions = arguments["instructions"]
-    assert "candidate_payload_json as exactly one JSON object" in instructions
-    assert "never use Markdown or prose" in instructions
+    assert "candidate_payload_json as exactly one nested JSON object" in instructions
+    assert "never use Markdown, prose" in instructions
+    assert "JSON-encoded string" in instructions
     assert "foundation_id exactly once" in instructions
     assert "create no other payload-owned identity" in instructions
+
+    wire_candidate = {
+        "analyzer_run_id": str(request.analyzer_run_id),
+        "context_id": str(request.context_id),
+        "request_hash": request.request_hash,
+        "source_set_hash": request.source_set_hash,
+        "based_on_case_revision": request.based_on_case_revision,
+        "foundation_artifact_id": str(request.target.foundation_artifact_id),
+        "identity_plan_id": str(request.identity_plan.identity_plan_id),
+        "identity_plan_version": request.identity_plan.identity_plan_version,
+        "semantic_state_hash": request.identity_plan.semantic_state_hash,
+        "candidate_payload_json": {"wire_object": True},
+        "output_type": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        "payload_schema_id": "spec-package-payload",
+        "payload_schema_version": "4.0.0",
+    }
+    candidate = adapter._candidate_from_provider_output(
+        c.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS,
+        c.SpecPackageSynthesisCandidate,
+        json.dumps(wire_candidate),
+    )
+    assert candidate.candidate_payload_json == '{"wire_object":true}'
 
 
 def test_quote_search_grounding_requires_one_exact_terra_quote():

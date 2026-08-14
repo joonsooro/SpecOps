@@ -758,7 +758,9 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
         c.AnalyzerOperation.GUIDANCE
     )
     assert "safe_without_current_turn_interpretation field is true" in guidance
-    assert "addresses_problem_refs and prerequisite_problem_refs" in guidance
+    assert "addresses_problem_refs identify current OPEN problems" in guidance
+    assert "prerequisite_problem_refs identify RESOLVED problems" in guidance
+    assert "highest-severity open problem first" in guidance
     assert "current OPEN problems" in guidance
     assert "neither already ASKED nor listed in do_not_ask_question_refs" in guidance
     assert "unsafe, dependency-ineligible, or already-asked" in guidance

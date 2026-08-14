@@ -99,7 +99,7 @@ class FoundationProtocolError(RuntimeError):
 
 
 class _GuidanceBranchUnavailable(RuntimeError):
-    """One current question is ineligible because a bound problem is no longer open."""
+    """One current question has an unresolved prerequisite or no open target."""
 
 
 @dataclass(frozen=True)
@@ -1919,6 +1919,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             return None
         if any(not questions[key].safe_without_current_turn_interpretation for key in keys):
             return None
+        # Every BOOTSTRAP problem is newly OPEN. A question with a prerequisite
+        # therefore cannot yet be independently safe in the initial runway.
+        if any(questions[key].prerequisite_problem_keys for key in keys):
+            return None
 
         def admitted_question(key):
             entity_kind, foundation_id, version = allocated[key]
@@ -2352,23 +2356,32 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     question.question_ref.expected_version,
                 )
             }
-            for prerequisite in (
-                *payload.get("addresses_problem_refs", ()),
-                *payload.get("prerequisite_problem_refs", ()),
-            ):
+            addressed = payload.get("addresses_problem_refs", ())
+            prerequisites = payload.get("prerequisite_problem_refs", ())
+
+            def require_problem_status(problem_ref, required_status):
                 problem = self._semantic_record_for_ref(
-                    connection, command.case_id, prerequisite
+                    connection, command.case_id, problem_ref
                 )
                 if problem["entity_kind"] != "PROBLEM":
                     raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
-                if problem["status"] != c.SemanticRecordStatus.OPEN.value:
+                if problem["status"] != required_status:
                     raise _GuidanceBranchUnavailable
                 question_dependency_refs.add(
                     (
                         c.GuidanceDependencyKind.PROBLEM,
-                        UUID(prerequisite["foundation_id"]),
-                        prerequisite["expected_version"],
+                        UUID(problem_ref["foundation_id"]),
+                        problem_ref["expected_version"],
                     )
+                )
+
+            for problem_ref in addressed:
+                require_problem_status(
+                    problem_ref, c.SemanticRecordStatus.OPEN.value
+                )
+            for problem_ref in prerequisites:
+                require_problem_status(
+                    problem_ref, c.SemanticRecordStatus.RESOLVED.value
                 )
             derived_dependency_refs.update(question_dependency_refs)
             return c.AdmittedGuidanceQuestion(
@@ -2395,8 +2408,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             try:
                 admitted_proposed_values.append(admitted_question(item))
             except _GuidanceBranchUnavailable:
-                # A resolved dependency invalidates only this otherwise-current
-                # question. Independent current selections remain admissible.
+                # A resolved target or unresolved prerequisite invalidates only
+                # this branch. Independent current selections remain admissible.
                 continue
             except FoundationProtocolError as exc:
                 # An existing question that requires current-turn

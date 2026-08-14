@@ -1359,6 +1359,43 @@ class StoredConversationOpenAIAdapter:
             if not isinstance(field_schema, dict) or field not in request_values:
                 raise ValueError(f"candidate schema cannot bind {field}")
             field_schema["const"] = request_values[field]
+        if isinstance(request, contracts.GenerateReviewNarrationRequest):
+            for field, expected in (
+                ("decision_batch_view_id", str(request.review_view.view_id)),
+                ("decision_batch_view_hash", request.review_view.view_hash),
+            ):
+                field_schema = properties.get(field)
+                if not isinstance(field_schema, dict):
+                    raise ValueError(f"review narration schema cannot bind {field}")
+                field_schema["const"] = expected
+
+            items_schema = properties.get("items")
+            if not isinstance(items_schema, dict):
+                raise ValueError("review narration schema cannot bind items")
+            item_schema = items_schema.get("items")
+            reference = item_schema.get("$ref") if isinstance(item_schema, dict) else None
+            if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+                raise ValueError("review narration item schema is unresolved")
+            definitions = bound.get("$defs")
+            definition = (
+                definitions.get(reference.removeprefix("#/$defs/"))
+                if isinstance(definitions, dict)
+                else None
+            )
+            item_properties = (
+                definition.get("properties") if isinstance(definition, dict) else None
+            )
+            handle_schema = (
+                item_properties.get("handle")
+                if isinstance(item_properties, dict)
+                else None
+            )
+            if not isinstance(handle_schema, dict):
+                raise ValueError("review narration schema cannot bind handles")
+            handles = [item.handle for item in request.review_view.items]
+            items_schema["minItems"] = len(handles)
+            items_schema["maxItems"] = len(handles)
+            handle_schema["enum"] = handles
         return bound
 
     def _emit_lifecycle(

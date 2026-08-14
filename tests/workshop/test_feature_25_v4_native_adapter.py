@@ -24,6 +24,7 @@ from specops_workshop.v4.schema_compiler import (
     NATIVE_SCHEMA_SPECS,
     compile_openai_strict_payload_schema,
     compile_openai_strict_schema,
+    native_schema_for,
     validate_openai_strict_schema,
 )
 
@@ -504,6 +505,85 @@ def test_provider_schema_binds_immutable_request_echoes_before_generation():
     # The compiled shared schema remains request-agnostic for later calls.
     shared = compile_openai_strict_schema(c.InterviewBriefCandidate)
     assert "const" not in shared["properties"]["request_hash"]
+
+
+def test_review_narration_schema_binds_current_view_and_complete_handle_set():
+    view = c.DecisionBatchReviewView.model_construct(
+        protocol_version="1.0.0",
+        view_type="DECISION_BATCH_REVIEW",
+        view_id=UUID("00000000-0000-4000-8000-000000000071"),
+        view_hash=ONE_HASH,
+        session_id=SESSION_ID,
+        based_on_case_revision=7,
+        derived_from_cluster_ids=(),
+        items=tuple(
+            c.DecisionReviewItemView.model_construct(handle=handle)
+            for handle in ("A", "B", "C")
+        ),
+        generated_at=NOW,
+    )
+    request = c.GenerateReviewNarrationRequest.model_construct(
+        protocol_version="1.0.0",
+        request_type=c.AnalyzerOperation.REVIEW_NARRATION,
+        client_request_id="client-review-narration",
+        analyzer_run_id=RUN_ID,
+        context_id=CONTEXT_ID,
+        provider_conversation_id="conv_review_narration",
+        request_hash=ZERO_HASH,
+        source_set_hash=ONE_HASH,
+        analyzer_contract=_contract(),
+        based_on_case_revision=7,
+        review_view=view,
+        requested_output="REVIEW_NARRATION_CANDIDATE",
+    )
+    _, shared, _ = native_schema_for(c.AnalyzerOperation.REVIEW_NARRATION)
+    schema = StoredConversationOpenAIAdapter._bind_candidate_echo_schema(
+        request, shared
+    )
+
+    properties = schema["properties"]
+    assert properties["decision_batch_view_id"]["const"] == str(view.view_id)
+    assert properties["decision_batch_view_hash"]["const"] == view.view_hash
+    assert properties["items"]["minItems"] == 3
+    assert properties["items"]["maxItems"] == 3
+    item_reference = properties["items"]["items"]["$ref"]
+    item_definition = schema["$defs"][item_reference.removeprefix("#/$defs/")]
+    assert item_definition["properties"]["handle"]["enum"] == ["A", "B", "C"]
+
+    payload = {
+        "protocol_version": "1.0.0",
+        "output_type": "REVIEW_NARRATION_CANDIDATE",
+        "analyzer_run_id": str(request.analyzer_run_id),
+        "context_id": str(request.context_id),
+        "request_hash": request.request_hash,
+        "source_set_hash": request.source_set_hash,
+        "decision_batch_view_id": str(view.view_id),
+        "decision_batch_view_hash": view.view_hash,
+        "based_on_case_revision": request.based_on_case_revision,
+        "spoken_opening": "Review these decisions.",
+        "items": [
+            {
+                "handle": handle,
+                "core_concept": f"Decision {handle}.",
+                "material_considerations": [],
+            }
+            for handle in ("A", "B", "C")
+        ],
+        "spoken_confirmation_question": "Confirm, revise, reject, or defer each item?",
+    }
+    validator = Draft202012Validator(schema)
+    validator.validate(payload)
+    wrong_view = deepcopy(payload)
+    wrong_view["decision_batch_view_id"] = str(
+        UUID("00000000-0000-4000-8000-000000000072")
+    )
+    assert list(validator.iter_errors(wrong_view))
+    missing_item = deepcopy(payload)
+    missing_item["items"].pop()
+    assert list(validator.iter_errors(missing_item))
+    unknown_handle = deepcopy(payload)
+    unknown_handle["items"][0]["handle"] = "D"
+    assert list(validator.iter_errors(unknown_handle))
 
 
 def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules():

@@ -1185,7 +1185,7 @@ class StoredConversationOpenAIAdapter:
 
     @staticmethod
     def _instructions(operation: contracts.AnalyzerOperation) -> str:
-        return (
+        instructions = (
             "You are the SpecOps Workshop Analyzer. Use the two source documents already "
             "attached to this Conversation and the new Foundation-bound request. Return only "
             f"the strict {operation.value} candidate. Propose semantics; never claim authority, "
@@ -1197,6 +1197,14 @@ class StoredConversationOpenAIAdapter:
             "not, omit that evidence candidate and every proposal that depends on it; never "
             "reconstruct, normalize, or approximately quote source text."
         )
+        if operation is contracts.AnalyzerOperation.GUIDANCE:
+            instructions += (
+                " Select recommended_question and safe_alternates only from Foundation "
+                "question records whose safe_without_current_turn_interpretation field is "
+                "true. Put an unsafe question in neither selected field; Foundation will "
+                "reject that selected branch rather than reinterpret it."
+            )
+        return instructions
 
     @staticmethod
     def _validate_context(

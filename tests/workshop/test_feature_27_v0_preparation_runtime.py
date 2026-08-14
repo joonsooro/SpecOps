@@ -53,7 +53,9 @@ from test_feature_26_v4_production_seam import (
 )
 
 
-def _brief(*, unsafe_question_index: int | None = None) -> c.InterviewBriefCandidate:
+def _brief(
+    *, unsafe_question_index: int | None = None, extra_question_count: int = 0
+) -> c.InterviewBriefCandidate:
     questions = tuple(
         c.QuestionCandidate(
             candidate_key=f"question-{index}",
@@ -66,7 +68,7 @@ def _brief(*, unsafe_question_index: int | None = None) -> c.InterviewBriefCandi
             prerequisite_problem_keys=(),
             safe_without_current_turn_interpretation=index != unsafe_question_index,
         )
-        for index in range(1, c.INITIAL_RUNWAY_DEPTH + 1)
+        for index in range(1, c.INITIAL_RUNWAY_DEPTH + extra_question_count + 1)
     )
     return c.InterviewBriefCandidate(
         protocol_version="1.0.0",
@@ -139,14 +141,22 @@ def _bootstrap_provider_error(
     )
 
 
-def _admit_brief(foundation, *, unsafe_question_index: int | None = None):
+def _admit_brief(
+    foundation,
+    *,
+    unsafe_question_index: int | None = None,
+    extra_question_count: int = 0,
+):
     values = _base(4)
     values.update(
         command_type="ADMIT_INTERVIEW_BRIEF",
         analyzer_run_id=RUN_ID,
         context_id=CONTEXT_ID,
         provider_request_hash=REQUEST_HASH,
-        candidate=_brief(unsafe_question_index=unsafe_question_index),
+        candidate=_brief(
+            unsafe_question_index=unsafe_question_index,
+            extra_question_count=extra_question_count,
+        ),
     )
     return foundation.execute(c.AdmitInterviewBriefCommand(**values))
 
@@ -909,6 +919,71 @@ def test_guidance_is_selection_only_and_rejects_question_text_smuggling(tmp_path
     with pytest.raises(FoundationProtocolError) as error:
         foundation.execute(c.AdmitGuidanceCommand(**values))
     assert error.value.code is c.FoundationRejectionCode.STALE_ENTITY
+
+
+def test_guidance_quarantines_unsafe_selection_and_preserves_safe_runway(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    unsafe_index = c.INITIAL_RUNWAY_DEPTH + 1
+    brief_receipt = _admit_brief(
+        foundation,
+        unsafe_question_index=unsafe_index,
+        extra_question_count=1,
+    )
+    question_mappings = {
+        item.candidate_key: item
+        for item in brief_receipt.identity_mappings
+        if item.entity_kind == "QUESTION"
+    }
+
+    def selection(index: int) -> c.GuidanceQuestion:
+        mapping = question_mappings[f"question-{index}"]
+        return c.GuidanceQuestion(
+            question_ref=c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=mapping.foundation_id,
+                expected_version=mapping.record_version,
+            ),
+            exact_text=f"Which confirmed export choice applies to clarification area {index}?",
+            reason=f"Clarification area {index} is selected for the live runway.",
+        )
+
+    run_id = uuid4()
+    request_hash = "sha256:" + "5" * 64
+    candidate = c.GuidanceCandidate(
+        protocol_version="1.0.0",
+        output_type="GUIDANCE_CANDIDATE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        request_hash=request_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        recommended_question=selection(1),
+        safe_alternates=(selection(2), selection(unsafe_index)),
+        do_not_ask_question_refs=(),
+        dependencies=(
+            c.GuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_ref=None,
+            ),
+        ),
+        acknowledgement_suggestion="The verified runway remains available.",
+    )
+    values = _base(foundation.case_revision(CASE_ID))
+    values.update(
+        command_type="ADMIT_GUIDANCE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=request_hash,
+        candidate=candidate,
+    )
+
+    foundation.execute(c.AdmitGuidanceCommand(**values))
+
+    runway = foundation.runway_projection(CASE_ID)
+    unsafe_id = question_mappings[f"question-{unsafe_index}"].foundation_id
+    assert runway["depth"] == c.INITIAL_RUNWAY_DEPTH
+    assert str(unsafe_id) not in {item["question_id"] for item in runway["questions"]}
 
 
 def test_foundation_derives_current_dependencies_for_every_guidance_question(tmp_path):

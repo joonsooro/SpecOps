@@ -92,6 +92,7 @@ class V4LiveTransport:
         provider_reader_started = time.monotonic()
         self._emit_lifecycle("voice_provider_reader.started", provider_reader_started)
         session_closed = False
+        end_requested = False
         try:
             done, pending = await asyncio.wait(
                 (client, provider), return_when=asyncio.FIRST_COMPLETED
@@ -113,7 +114,7 @@ class V4LiveTransport:
                 await self._cancel_pending_provider_tasks(
                     {provider} if provider in pending else set()
                 )
-                client.result()
+                end_requested = client.result()
             else:
                 # The provider may finish a turn before the browser's END
                 # control arrives. Preserve the client task so END can still
@@ -129,12 +130,14 @@ class V4LiveTransport:
                     )
                 await self._close_provider_session(session)
                 session_closed = True
-                await client
+                end_requested = await client
         except WebSocketDisconnect:
             pass
         finally:
             if not session_closed:
                 await self._close_provider_session(session)
+        if end_requested:
+            await websocket.send_json({"type": "CALL_STATE", "state": "ENDED"})
 
     def _emit_lifecycle(self, event: str, started: float) -> None:
         _LOGGER.info(
@@ -319,14 +322,14 @@ class V4LiveTransport:
 
     async def _client(
         self, websocket: WebSocket, session, voice_available: asyncio.Event
-    ) -> None:
+    ) -> bool:
         while True:
             message = await websocket.receive()
             if message.get("bytes") is not None:
                 await session.send_audio(message["bytes"])
                 continue
             if message.get("text") is None:
-                return
+                return False
             value = json.loads(message["text"])
             if value.get("type") == "TEXT":
                 completed = await self._commit(
@@ -336,7 +339,7 @@ class V4LiveTransport:
                     session=session if voice_available.is_set() else None,
                 )
                 if completed:
-                    return
+                    return False
             elif value.get("type") == "INTERRUPT":
                 await session.interrupt()
             elif value.get("type") == "DECISION_SELECTION":
@@ -356,8 +359,7 @@ class V4LiveTransport:
                     }
                 )
             elif value.get("type") == "END":
-                await websocket.send_json({"type": "CALL_STATE", "state": "ENDED"})
-                return
+                return True
             else:
                 await websocket.send_json({"type": "ERROR", "code": "INVALID_CONTROL"})
 

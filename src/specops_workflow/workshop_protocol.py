@@ -2353,7 +2353,18 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             )
             if identity in asked_by_question:
                 raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
-        admitted_proposed = tuple(admitted_question(item) for item in proposed)
+        admitted_proposed_values: list[c.AdmittedGuidanceQuestion] = []
+        for item in proposed:
+            try:
+                admitted_proposed_values.append(admitted_question(item))
+            except FoundationProtocolError as exc:
+                # An existing question that requires current-turn
+                # interpretation is not safe for the live runway. Quarantine
+                # only that selected branch; stale or unknown refs still fail
+                # the complete GUIDANCE admission closed.
+                if exc.code is not c.FoundationRejectionCode.INVALID_TRANSITION:
+                    raise
+        admitted_proposed = tuple(admitted_proposed_values)
 
         # Replenishment is additive: keep still-current live questions first,
         # then append newly selected, source-verified questions without duplicates.

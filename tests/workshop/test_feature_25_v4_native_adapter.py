@@ -411,6 +411,12 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
     assert "omit that evidence candidate" in instructions
     assert "never claim authority" in instructions
 
+    guidance = StoredConversationOpenAIAdapter._instructions(
+        c.AnalyzerOperation.GUIDANCE
+    )
+    assert "safe_without_current_turn_interpretation field is true" in guidance
+    assert "reject that selected branch rather than reinterpret it" in guidance
+
 
 def test_stored_conversation_bootstrap_uploads_exactly_two_files_and_reuses_conversation():
     asyncio.run(_stored_conversation_bootstrap_case())

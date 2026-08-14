@@ -1233,7 +1233,12 @@ class StoredConversationOpenAIAdapter:
                 "with requires_human_confirmation=true. Bind existing_decision_ref to the exact "
                 "prior Foundation decision when the transcript and snapshot make that relation "
                 "unambiguous; otherwise leave the ref null. Do not invent a replacement when "
-                "the speaker did not state one or the intended replacement is ambiguous."
+                "the speaker did not state one or the intended replacement is ambiguous. For "
+                "every decisions[].problem_links[].problem_ref that uses CANDIDATE_KEY, reference "
+                "only a candidate_key declared in new_problems; never reference an "
+                "evidence_candidates key there. Put supporting evidence only in "
+                "decisions[].evidence_refs, where each CANDIDATE_KEY must reference a key "
+                "declared in evidence_candidates."
             )
         if operation is contracts.AnalyzerOperation.GUIDANCE:
             instructions += (

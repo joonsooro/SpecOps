@@ -454,6 +454,11 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
     assert "requires_human_confirmation=true" in turn_analysis
     assert "existing_decision_ref" in turn_analysis
     assert "Do not invent a replacement" in turn_analysis
+    assert "decisions[].problem_links[].problem_ref" in turn_analysis
+    assert "candidate_key declared in new_problems" in turn_analysis
+    assert "never reference an evidence_candidates key there" in turn_analysis
+    assert "decisions[].evidence_refs" in turn_analysis
+    assert "declared in evidence_candidates" in turn_analysis
 
     guidance = StoredConversationOpenAIAdapter._instructions(
         c.AnalyzerOperation.GUIDANCE

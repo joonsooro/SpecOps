@@ -82,6 +82,7 @@ _UNSUPPORTED_KEYS = frozenset(
         "contains",
         "minContains",
         "maxContains",
+        "uniqueItems",
     }
 )
 
@@ -308,9 +309,9 @@ def compile_openai_strict_payload_schema(
 ) -> dict[str, Any]:
     """Compile one full Foundation payload schema for provider wire output.
 
-    Unsupported conditional keywords are omitted only from this provider-side
-    structural projection. The unmodified normative schema remains authoritative
-    during local Foundation admission.
+    Unsupported conditional and collection keywords are omitted only from this
+    provider-side structural projection. The unmodified normative schema remains
+    authoritative during local Foundation admission.
     """
 
     compiled = _compile_node(deepcopy(local_schema))

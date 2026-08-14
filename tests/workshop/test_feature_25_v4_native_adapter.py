@@ -381,6 +381,24 @@ def test_native_schema_compiler_preserves_domain_property_names_at_every_object(
     assert "title" in cluster["required"]
 
 
+def test_native_schema_validator_rejects_provider_unsupported_array_uniqueness():
+    schema = {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {"type": "string"},
+                "uniqueItems": True,
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": False,
+    }
+
+    with pytest.raises(ValueError, match="uniqueItems"):
+        validate_openai_strict_schema(schema)
+
+
 def test_bootstrap_provider_schema_enforces_local_question_shape_invariants():
     adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
     sources = (
@@ -477,7 +495,10 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     payload_root = output_schema["$defs"][payload_reference.removeprefix("#/$defs/")]
     assert payload_root["type"] == "object"
     assert "product_thesis" in payload_root["properties"]
-    assert "allOf" not in json.dumps(output_schema)
+    encoded_output_schema = json.dumps(output_schema)
+    assert "allOf" not in encoded_output_schema
+    assert "uniqueItems" in json.dumps(payload_schema)
+    assert "uniqueItems" not in encoded_output_schema
 
     instructions = arguments["instructions"]
     assert "candidate_payload_json as exactly one nested JSON object" in instructions

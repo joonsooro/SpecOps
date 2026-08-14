@@ -1359,6 +1359,23 @@ class StoredConversationOpenAIAdapter:
             if not isinstance(field_schema, dict) or field not in request_values:
                 raise ValueError(f"candidate schema cannot bind {field}")
             field_schema["const"] = request_values[field]
+        if isinstance(
+            request,
+            (
+                contracts.SpecPackageSynthesisRequest,
+                contracts.TechnicalContractSynthesisRequest,
+            ),
+        ):
+            for field, expected in (
+                ("foundation_artifact_id", str(request.target.foundation_artifact_id)),
+                ("identity_plan_id", str(request.identity_plan.identity_plan_id)),
+                ("identity_plan_version", request.identity_plan.identity_plan_version),
+                ("semantic_state_hash", request.identity_plan.semantic_state_hash),
+            ):
+                field_schema = properties.get(field)
+                if not isinstance(field_schema, dict):
+                    raise ValueError(f"artifact synthesis schema cannot bind {field}")
+                field_schema["const"] = expected
         if isinstance(request, contracts.GenerateReviewNarrationRequest):
             for field, expected in (
                 ("decision_batch_view_id", str(request.review_view.view_id)),
@@ -1521,6 +1538,22 @@ class StoredConversationOpenAIAdapter:
             candidate.based_on_case_revision != request.based_on_case_revision
         ):
             raise ValueError("provider candidate does not echo based_on_case_revision")
+        if isinstance(
+            request,
+            (
+                contracts.SpecPackageSynthesisRequest,
+                contracts.TechnicalContractSynthesisRequest,
+            ),
+        ):
+            expected = {
+                "foundation_artifact_id": request.target.foundation_artifact_id,
+                "identity_plan_id": request.identity_plan.identity_plan_id,
+                "identity_plan_version": request.identity_plan.identity_plan_version,
+                "semantic_state_hash": request.identity_plan.semantic_state_hash,
+            }
+            for field, value in expected.items():
+                if getattr(candidate, field) != value:
+                    raise ValueError(f"provider candidate does not echo {field}")
 
     @staticmethod
     def source_set_hash(sources: tuple[contracts.SourceIdentity, contracts.SourceIdentity]) -> str:

@@ -610,6 +610,18 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert json.loads(content[1]["text"])["request_type"] == "SPEC_PACKAGE_SYNTHESIS"
 
     output_schema = arguments["text"]["format"]["schema"]
+    assert output_schema["properties"]["foundation_artifact_id"]["const"] == str(
+        request.target.foundation_artifact_id
+    )
+    assert output_schema["properties"]["identity_plan_id"]["const"] == str(
+        request.identity_plan.identity_plan_id
+    )
+    assert output_schema["properties"]["identity_plan_version"]["const"] == (
+        request.identity_plan.identity_plan_version
+    )
+    assert output_schema["properties"]["semantic_state_hash"]["const"] == (
+        request.identity_plan.semantic_state_hash
+    )
     payload_reference = output_schema["properties"]["candidate_payload_json"]["$ref"]
     payload_root = output_schema["$defs"][payload_reference.removeprefix("#/$defs/")]
     assert payload_root["type"] == "object"
@@ -664,6 +676,24 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
         json.dumps(wire_candidate),
     )
     assert candidate.candidate_payload_json == '{"wire_object":true}'
+    adapter._validate_candidate_echo(request, candidate)
+    for field in (
+        "foundation_artifact_id",
+        "identity_plan_id",
+        "identity_plan_version",
+        "semantic_state_hash",
+    ):
+        wrong_value = (
+            2
+            if field == "identity_plan_version"
+            else ZERO_HASH
+            if field == "semantic_state_hash"
+            else UUID("00000000-0000-4000-8000-000000000099")
+        )
+        with pytest.raises(ValueError, match=f"provider candidate does not echo {field}"):
+            adapter._validate_candidate_echo(
+                request, candidate.model_copy(update={field: wrong_value})
+            )
 
 
 def test_quote_search_grounding_requires_one_exact_terra_quote():

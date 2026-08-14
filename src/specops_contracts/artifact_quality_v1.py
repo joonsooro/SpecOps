@@ -334,6 +334,15 @@ class BindArtifactQualityEvaluatorCommand(StrictModel):
     started_at: datetime
 
 
+class CheckpointArtifactQualityResponseCommand(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    command_id: UUID
+    audit_id: UUID
+    request_hash: Sha256
+    client_request_id: ProviderIdentifier
+    provider_response_id: ProviderIdentifier
+
+
 class AdmitArtifactQualityAuditCommand(StrictModel):
     protocol_version: Literal["1.0.0"]
     command_id: UUID

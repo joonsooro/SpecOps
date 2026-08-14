@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
@@ -14,7 +16,9 @@ from specops_contracts import artifact_quality_v1 as q
 from .schema_compiler import artifact_quality_native_schema
 
 
-REQUEST_TIMEOUT_SECONDS = 30.0
+PROVIDER_IO_TIMEOUT_SECONDS = 60.0
+SLOW_RESPONSE_OBSERVATION_SECONDS = 60.0
+BACKGROUND_POLL_SECONDS = 1.0
 MAX_OUTPUT_TOKENS = 32_000
 
 
@@ -38,6 +42,24 @@ class PreparedArtifactQualityContext:
     provider_conversation_id: str
     client_request_id: str
     started_at: datetime
+    provider_response_id: str | None = None
+
+
+@dataclass(frozen=True)
+class QualityProviderLifecycleEvent:
+    """Content-free correlation for one semantic-quality provider request."""
+
+    event: str
+    client_request_id: str
+    response_id: str | None
+    provider_request_id: str | None
+    status: str | None
+    duration_ms: int
+    input_tokens: int | None
+    cached_input_tokens: int | None
+    output_tokens: int | None
+    reasoning_output_tokens: int | None
+    total_tokens: int | None
 
 
 @dataclass(frozen=True)
@@ -59,6 +81,7 @@ class ArtifactQualityEvaluator(Protocol):
         bundle: q.ArtifactQualityAuditBundle,
         *,
         prepared: PreparedArtifactQualityContext,
+        response_checkpoint: Callable[[str, str], None] | None = None,
     ) -> ArtifactQualityEvaluation: ...
 
     async def release(self, prepared: PreparedArtifactQualityContext) -> None: ...
@@ -115,13 +138,22 @@ class FreshConversationTerraQualityEvaluator:
         api_key: str,
         client: Any | None = None,
         now: Callable[[], datetime] = _utc_now,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
     ) -> None:
         self._client = client or AsyncOpenAI(
             api_key=api_key,
             max_retries=0,
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=PROVIDER_IO_TIMEOUT_SECONDS,
         )
         self._now = now
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._lifecycle_events: deque[QualityProviderLifecycleEvent] = deque(maxlen=64)
+
+    @property
+    def lifecycle_events(self) -> tuple[QualityProviderLifecycleEvent, ...]:
+        return tuple(self._lifecycle_events)
 
     async def prepare(
         self,
@@ -141,7 +173,7 @@ class FreshConversationTerraQualityEvaluator:
                     },
                     extra_headers={"X-Client-Request-Id": client_request_id},
                 ),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=PROVIDER_IO_TIMEOUT_SECONDS,
             )
             conversation_id = _safe_identifier(getattr(conversation, "id", None))
             if conversation_id is None:
@@ -168,6 +200,7 @@ class FreshConversationTerraQualityEvaluator:
         bundle: q.ArtifactQualityAuditBundle,
         *,
         prepared: PreparedArtifactQualityContext,
+        response_checkpoint: Callable[[str, str], None] | None = None,
     ) -> ArtifactQualityEvaluation:
         if (prepared.provider, prepared.model, prepared.reasoning_effort) != (
             "OPENAI", "gpt-5.6-terra", "medium"
@@ -213,21 +246,144 @@ class FreshConversationTerraQualityEvaluator:
                 }
             },
             "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "background": True,
         }
-        try:
-            response = await asyncio.wait_for(
-                self._client.responses.create(**arguments),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+        started_at = self._monotonic()
+        self._emit_lifecycle(
+            event="provider_request.started",
+            client_request_id=response_client_id,
+            started_at=started_at,
+        )
+        response = None
+        response_id = prepared.provider_response_id
+        if response_id is None:
+            try:
+                response = await asyncio.wait_for(
+                    self._client.responses.create(**arguments),
+                    timeout=PROVIDER_IO_TIMEOUT_SECONDS,
+                )
+            except asyncio.CancelledError:
+                self._emit_lifecycle(
+                    event="provider_request.cancelled",
+                    client_request_id=response_client_id,
+                    started_at=started_at,
+                    status="CREATE_CANCELLED",
+                )
+                raise
+            except TimeoutError as exc:
+                self._emit_lifecycle(
+                    event="provider_request.timeout",
+                    client_request_id=response_client_id,
+                    started_at=started_at,
+                    status="CREATE_ID_UNCERTAIN",
+                )
+                raise self._provider_error(
+                    exc,
+                    stage="ARTIFACT_QUALITY_AUDIT",
+                    client_request_id=response_client_id,
+                    retryable=False,
+                ) from exc
+            except Exception as exc:
+                raise self._provider_error(
+                    exc,
+                    stage="ARTIFACT_QUALITY_AUDIT",
+                    client_request_id=response_client_id,
+                ) from exc
+            response_id = _safe_identifier(getattr(response, "id", None))
+            if response_id is None:
+                raise self._output_error(
+                    response_client_id, ValueError("unsafe response ID")
+                )
+            if response_checkpoint is not None:
+                response_checkpoint(response_id, response_client_id)
+            self._emit_lifecycle(
+                event="provider_request.accepted",
+                client_request_id=response_client_id,
+                started_at=started_at,
+                response=response,
             )
+        else:
+            self._emit_lifecycle(
+                event="provider_request.resumed",
+                client_request_id=response_client_id,
+                started_at=started_at,
+                response_id=response_id,
+                status="KNOWN_RESPONSE",
+            )
+
+        status = (
+            (getattr(response, "status", None) or "completed")
+            if response is not None
+            else None
+        )
+        slow_observed = False
+        try:
+            while status in {None, "queued", "in_progress"}:
+                await self._sleep(BACKGROUND_POLL_SECONDS)
+                try:
+                    response = await asyncio.wait_for(
+                        self._client.responses.retrieve(
+                            response_id,
+                            extra_headers={"X-Client-Request-Id": response_client_id},
+                        ),
+                        timeout=PROVIDER_IO_TIMEOUT_SECONDS,
+                    )
+                except TimeoutError:
+                    if not slow_observed:
+                        slow_observed = True
+                        self._emit_lifecycle(
+                            event="provider_request.timeout",
+                            client_request_id=response_client_id,
+                            started_at=started_at,
+                            response_id=response_id,
+                            status="KNOWN_RESPONSE_RETRIEVE_TIMEOUT",
+                        )
+                    continue
+                if _safe_identifier(getattr(response, "id", None)) != response_id:
+                    raise ValueError("retrieved Response identity changed")
+                status = getattr(response, "status", None) or "completed"
+                if (
+                    not slow_observed
+                    and self._monotonic() - started_at
+                    >= SLOW_RESPONSE_OBSERVATION_SECONDS
+                ):
+                    slow_observed = True
+                    self._emit_lifecycle(
+                        event="provider_request.timeout",
+                        client_request_id=response_client_id,
+                        started_at=started_at,
+                        response=response,
+                    )
+        except asyncio.CancelledError:
+            self._emit_lifecycle(
+                event="provider_request.cancelled",
+                client_request_id=response_client_id,
+                started_at=started_at,
+                response=response,
+                response_id=response_id,
+                status="KNOWN_RESPONSE_WAIT_CANCELLED",
+            )
+            raise
         except Exception as exc:
             raise self._provider_error(
                 exc,
                 stage="ARTIFACT_QUALITY_AUDIT",
                 client_request_id=response_client_id,
             ) from exc
-        response_id = _safe_identifier(getattr(response, "id", None))
-        if response_id is None:
-            raise self._output_error(response_client_id, ValueError("unsafe response ID"))
+
+        self._emit_lifecycle(
+            event="provider_request.completed",
+            client_request_id=response_client_id,
+            started_at=started_at,
+            response=response,
+            response_id=response_id,
+        )
+        if status != "completed" or response is None:
+            raise self._provider_error(
+                RuntimeError(f"safe terminal response status: {status}"),
+                stage="ARTIFACT_QUALITY_AUDIT",
+                client_request_id=response_client_id,
+            )
         try:
             candidate = q.ArtifactSemanticAttestationCandidate.model_validate_json(
                 response.output_text
@@ -268,7 +424,7 @@ class FreshConversationTerraQualityEvaluator:
                         )
                     },
                 ),
-                timeout=REQUEST_TIMEOUT_SECONDS,
+                timeout=PROVIDER_IO_TIMEOUT_SECONDS,
             )
         except Exception:
             return
@@ -321,10 +477,13 @@ class FreshConversationTerraQualityEvaluator:
         *,
         stage: str,
         client_request_id: str,
+        retryable: bool | None = None,
     ) -> ArtifactQualityEvaluatorError:
         status = getattr(error, "status_code", None)
         status_code = status if isinstance(status, int) and 100 <= status <= 599 else None
-        code, retryable = self._classify(status_code, type(error).__name__)
+        code, classified_retryable = self._classify(
+            status_code, type(error).__name__
+        )
         return ArtifactQualityEvaluatorError(
             q.QualityProviderFailureReceipt(
                 provider="OPENAI",
@@ -333,9 +492,45 @@ class FreshConversationTerraQualityEvaluator:
                 provider_request_id=_safe_identifier(getattr(error, "request_id", None)),
                 status_code=status_code,
                 code=code,
-                retryable=retryable,
+                retryable=(
+                    classified_retryable if retryable is None else retryable
+                ),
                 validation_diagnostics=(),
                 occurred_at=self._now(),
+            )
+        )
+
+    def _emit_lifecycle(
+        self,
+        *,
+        event: str,
+        client_request_id: str,
+        started_at: float,
+        response: Any | None = None,
+        response_id: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        usage = getattr(response, "usage", None)
+        input_details = getattr(usage, "input_tokens_details", None)
+        output_details = getattr(usage, "output_tokens_details", None)
+        self._lifecycle_events.append(
+            QualityProviderLifecycleEvent(
+                event=event,
+                client_request_id=client_request_id,
+                response_id=(
+                    response_id
+                    or _safe_identifier(getattr(response, "id", None))
+                ),
+                provider_request_id=_safe_identifier(
+                    getattr(response, "_request_id", None)
+                ),
+                status=status or getattr(response, "status", None),
+                duration_ms=max(0, round((self._monotonic() - started_at) * 1000)),
+                input_tokens=getattr(usage, "input_tokens", None),
+                cached_input_tokens=getattr(input_details, "cached_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+                reasoning_output_tokens=getattr(output_details, "reasoning_tokens", None),
+                total_tokens=getattr(usage, "total_tokens", None),
             )
         )
 

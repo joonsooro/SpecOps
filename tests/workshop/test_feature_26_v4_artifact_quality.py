@@ -12,6 +12,7 @@ from specops_contracts import artifact_quality_v1 as q
 from specops_workshop.v4.artifact_quality_adapter import (
     ArtifactQualityEvaluatorError,
     FreshConversationTerraQualityEvaluator,
+    PreparedArtifactQualityContext,
 )
 from specops_workshop.v4.schema_compiler import artifact_quality_native_schema
 from v4_quality_factory import all_pass_candidate
@@ -141,6 +142,49 @@ class _Conversations(_Endpoint):
         self.deleted.append((conversation_id, values))
 
 
+class _Clock:
+    def __init__(self):
+        self.elapsed = 0.0
+
+    def monotonic(self):
+        return self.elapsed
+
+    async def sleep(self, _seconds):
+        self.elapsed += 12.0
+
+
+class _BackgroundResponses:
+    def __init__(self, bundle, *, complete_after=6):
+        self.bundle = bundle
+        self.complete_after = complete_after
+        self.create_calls: list[dict] = []
+        self.retrieve_calls: list[tuple[str, dict]] = []
+
+    async def create(self, **values):
+        self.create_calls.append(values)
+        return SimpleNamespace(
+            id="resp_quality_background",
+            _request_id="req_quality_create",
+            status="queued",
+            usage=None,
+        )
+
+    async def retrieve(self, response_id, **values):
+        self.retrieve_calls.append((response_id, values))
+        completed = len(self.retrieve_calls) >= self.complete_after
+        return SimpleNamespace(
+            id=response_id,
+            _request_id=f"req_quality_retrieve_{len(self.retrieve_calls)}",
+            status="completed" if completed else "in_progress",
+            usage=None,
+            output_text=(
+                all_pass_candidate(self.bundle).model_dump_json()
+                if completed
+                else ""
+            ),
+        )
+
+
 def _client(bundle, *, conversation_id="conv_quality_isolated", output_text=None):
     conversations = _Conversations(SimpleNamespace(id=conversation_id))
     responses = _Endpoint(
@@ -187,6 +231,84 @@ def test_fresh_terra_audit_serializes_the_closed_universe_without_network():
     assert result.execution.store_enabled is True
     assert result.candidate.request_hash == bundle.request_hash
     assert client.conversations.deleted[0][0] == "conv_quality_isolated"
+
+
+def test_quality_response_crosses_slow_observation_without_recreate_or_hard_stop():
+    bundle = _bundle()
+    clock = _Clock()
+    conversations = _Conversations(SimpleNamespace(id="conv_quality_isolated"))
+    responses = _BackgroundResponses(bundle)
+    evaluator = FreshConversationTerraQualityEvaluator(
+        api_key="not-called",
+        client=SimpleNamespace(conversations=conversations, responses=responses),
+        now=lambda: NOW,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+    prepared = asyncio.run(
+        evaluator.prepare(bundle, prohibited_conversation_id="conv_workshop_active")
+    )
+    checkpoints: list[tuple[str, str]] = []
+
+    result = asyncio.run(
+        evaluator.evaluate(
+            bundle,
+            prepared=prepared,
+            response_checkpoint=lambda response_id, client_request_id: checkpoints.append(
+                (response_id, client_request_id)
+            ),
+        )
+    )
+
+    assert len(responses.create_calls) == 1
+    assert responses.create_calls[0]["background"] is True
+    assert len(responses.retrieve_calls) == 6
+    assert checkpoints == [
+        (
+            "resp_quality_background",
+            f"aqa-response-{bundle.request_hash[7:39]}",
+        )
+    ]
+    assert [event.event for event in evaluator.lifecycle_events] == [
+        "provider_request.started",
+        "provider_request.accepted",
+        "provider_request.timeout",
+        "provider_request.completed",
+    ]
+    assert evaluator.lifecycle_events[2].duration_ms == 60_000
+    assert result.execution.provider_response_id == "resp_quality_background"
+
+
+def test_quality_response_resume_polls_checkpointed_identity_without_create():
+    bundle = _bundle()
+    responses = _BackgroundResponses(bundle, complete_after=1)
+    evaluator = FreshConversationTerraQualityEvaluator(
+        api_key="not-called",
+        client=SimpleNamespace(
+            conversations=_Conversations(SimpleNamespace(id="unused")),
+            responses=responses,
+        ),
+    )
+    prepared = PreparedArtifactQualityContext(
+        provider="OPENAI",
+        model="gpt-5.6-terra",
+        reasoning_effort="medium",
+        provider_conversation_id="conv_quality_isolated",
+        client_request_id="aqa-conversation-known",
+        started_at=NOW,
+        provider_response_id="resp_quality_background",
+    )
+
+    result = asyncio.run(evaluator.evaluate(bundle, prepared=prepared))
+
+    assert responses.create_calls == []
+    assert len(responses.retrieve_calls) == 1
+    assert [event.event for event in evaluator.lifecycle_events] == [
+        "provider_request.started",
+        "provider_request.resumed",
+        "provider_request.completed",
+    ]
+    assert result.execution.provider_response_id == prepared.provider_response_id
 
 
 def test_audit_rejects_workshop_conversation_reuse_with_bounded_diagnostics():

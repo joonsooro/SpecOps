@@ -122,16 +122,21 @@ class DeterministicQualityEvaluator:
             started_at=datetime(2026, 8, 13, 8, 0, tzinfo=timezone.utc),
         )
 
-    async def evaluate(self, bundle, *, prepared):
+    async def evaluate(self, bundle, *, prepared, response_checkpoint=None):
         self.evaluate_calls += 1
         started = prepared.started_at
+        response_id = f"resp_quality_{bundle.request_hash[7:23]}"
+        if response_checkpoint is not None:
+            response_checkpoint(
+                response_id, f"aqa-response-{bundle.request_hash[7:23]}"
+            )
         return ArtifactQualityEvaluation(
             execution=q.EvaluatorExecutionBinding(
                 provider="OPENAI",
                 model="gpt-5.6-terra",
                 reasoning_effort="medium",
                 provider_conversation_id=prepared.provider_conversation_id,
-                provider_response_id=f"resp_quality_{bundle.request_hash[7:23]}",
+                provider_response_id=response_id,
                 client_request_id=f"aqa-response-{bundle.request_hash[7:23]}",
                 store_enabled=True,
                 started_at=started,

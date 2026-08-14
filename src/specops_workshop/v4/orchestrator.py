@@ -1339,8 +1339,24 @@ class V4ProductionOrchestrator:
                 provider_conversation_id=provider_context["provider_conversation_id"],
                 client_request_id=provider_context["client_request_id"],
                 started_at=started_at,
+                provider_response_id=provider_context.get("provider_response_id"),
             )
-        evaluation = await self.quality_evaluator.evaluate(bundle, prepared=prepared)
+        evaluation = await self.quality_evaluator.evaluate(
+            bundle,
+            prepared=prepared,
+            response_checkpoint=lambda response_id, client_request_id: (
+                self.foundation.checkpoint_artifact_quality_response(
+                    q.CheckpointArtifactQualityResponseCommand(
+                        protocol_version=q.PROTOCOL_VERSION,
+                        command_id=_stable_id(audit_id, "checkpoint-response"),
+                        audit_id=audit_id,
+                        request_hash=bundle.request_hash,
+                        client_request_id=client_request_id,
+                        provider_response_id=response_id,
+                    )
+                )
+            ),
+        )
         receipt = self.foundation.admit_artifact_quality_audit(
             q.AdmitArtifactQualityAuditCommand(
                 protocol_version=q.PROTOCOL_VERSION,

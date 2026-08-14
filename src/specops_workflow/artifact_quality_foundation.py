@@ -220,6 +220,47 @@ class ArtifactQualityFoundationMixin:
             ).scalar_one_or_none()
         return None if value is None else json.loads(value)
 
+    def checkpoint_artifact_quality_response(
+        self, command: q.CheckpointArtifactQualityResponseCommand
+    ) -> None:
+        """Durably bind the one accepted provider Response before polling it."""
+
+        audits = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_audits"]
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(audits).where(audits.c.audit_id == str(command.audit_id))
+            ).mappings().one_or_none()
+            if (
+                row is None
+                or row["request_hash"] != command.request_hash
+                or row["state"] != q.AuditState.CONTEXT_READY.value
+            ):
+                self._quality_reject(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+            if row["provider_response_id"] is not None:
+                if (
+                    row["provider_response_id"] != command.provider_response_id
+                    or row["client_request_id"] != command.client_request_id
+                ):
+                    self._quality_reject(c.FoundationRejectionCode.DUPLICATE_CONFLICT)
+                return
+            provider_context = json.loads(row["provider_context_json"])
+            provider_context.update(
+                {
+                    "provider_response_id": command.provider_response_id,
+                    "response_client_request_id": command.client_request_id,
+                }
+            )
+            connection.execute(
+                update(audits)
+                .where(audits.c.audit_id == str(command.audit_id))
+                .values(
+                    provider_response_id=command.provider_response_id,
+                    client_request_id=command.client_request_id,
+                    provider_context_json=_json(provider_context),
+                    updated_at=_instant(self.now()),
+                )
+            )
+
     def admit_artifact_quality_audit(
         self, command: q.AdmitArtifactQualityAuditCommand
     ) -> q.ArtifactQualityAuditReceipt:
@@ -257,6 +298,16 @@ class ArtifactQualityFoundationMixin:
                 command.execution.model,
                 command.execution.reasoning_effort,
                 command.execution.provider_conversation_id,
+            ):
+                self._quality_reject(c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED)
+            if (
+                row["provider_response_id"] is not None
+                and (
+                    row["provider_response_id"]
+                    != command.execution.provider_response_id
+                    or row["client_request_id"]
+                    != command.execution.client_request_id
+                )
             ):
                 self._quality_reject(c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED)
             if (

@@ -1239,6 +1239,36 @@ def test_quality_provider_mapping_and_admitted_receipt_survive_restart(tmp_path)
     assert replay.existing_receipt.model_copy(update={"replayed": False}) == admitted
 
 
+def test_quality_response_checkpoint_survives_restart_without_recreate(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    command = q.CheckpointArtifactQualityResponseCommand(
+        protocol_version=q.PROTOCOL_VERSION,
+        command_id=quality_stable_id(bundle.audit_id, "checkpoint-response"),
+        audit_id=bundle.audit_id,
+        request_hash=bundle.request_hash,
+        client_request_id=f"aqa-response-{bundle.request_hash[7:39]}",
+        provider_response_id=f"resp_checkpoint_{str(bundle.audit_id)[:12]}",
+    )
+
+    foundation.checkpoint_artifact_quality_response(command)
+    foundation.checkpoint_artifact_quality_response(command)
+
+    restarted = WorkshopFoundationService(url, now=lambda: NOW)
+    provider = restarted.artifact_quality_provider_context(bundle.audit_id)
+    assert provider["provider_response_id"] == command.provider_response_id
+    assert provider["response_client_request_id"] == command.client_request_id
+
+    with pytest.raises(FoundationProtocolError) as caught:
+        restarted.checkpoint_artifact_quality_response(
+            command.model_copy(update={"provider_response_id": "resp_conflict"})
+        )
+    assert caught.value.code is c.FoundationRejectionCode.DUPLICATE_CONFLICT
+
+
 @pytest.mark.parametrize("shape", ["missing", "duplicate"])
 def test_semantic_attestation_requires_exactly_one_result_per_semantic_rule(shape):
     # Use a complete runtime-shaped bundle from the strict contract fixture.

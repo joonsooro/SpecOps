@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from typing import Any, Callable
+from uuid import UUID
 
 from pydantic import TypeAdapter
 from specops_contracts import workshop_v1 as c
@@ -274,7 +275,7 @@ class DurableAnalyzerWorker:
                         active_question_refs=tuple(
                             c.FoundationEntityRef(
                                 ref_kind="FOUNDATION_ID",
-                                foundation_id=item["question_id"],
+                                foundation_id=UUID(item["question_id"]),
                                 expected_version=item["question_version"],
                             )
                             for item in runway["questions"]
@@ -282,7 +283,7 @@ class DurableAnalyzerWorker:
                         asked_question_refs=tuple(
                             c.FoundationEntityRef(
                                 ref_kind="FOUNDATION_ID",
-                                foundation_id=identity,
+                                foundation_id=UUID(identity),
                                 expected_version=1,
                             )
                             for identity in runway["asked"]

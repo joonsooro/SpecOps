@@ -343,6 +343,43 @@ def test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_three(tm
     assert foundation.current_admitted_guidance(CASE_ID).guidance_id == receipt.admitted_guidance_id
 
 
+def test_guidance_request_rehydrates_persisted_runway_ids_as_uuids(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    context = foundation.active_analyzer_context(CASE_ID)
+    runway = foundation.runway_projection(CASE_ID)
+    assert all(isinstance(item["question_id"], str) for item in runway["questions"])
+
+    class SnapshotHashAdapter(DeterministicAdapter):
+        @staticmethod
+        def source_set_hash(sources):
+            return SOURCE_SET_HASH
+
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=SnapshotHashAdapter(),
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    request = DurableAnalyzerWorker(orchestrator)._build_request(
+        {"job_id": str(uuid4()), "operation": c.AnalyzerOperation.GUIDANCE.value},
+        context,
+    )
+
+    assert isinstance(request, c.ReplenishGuidanceRequest)
+    assert all(
+        isinstance(item.foundation_id, UUID)
+        for item in request.runway_state.active_question_refs
+    )
+    assert {item.foundation_id for item in request.runway_state.active_question_refs} == {
+        UUID(item["question_id"]) for item in runway["questions"]
+    }
+
+
 def test_unsafe_bootstrap_runway_fails_closed_without_guidance(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)

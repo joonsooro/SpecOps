@@ -411,6 +411,15 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
     assert "omit that evidence candidate" in instructions
     assert "never claim authority" in instructions
 
+    turn_analysis = StoredConversationOpenAIAdapter._instructions(
+        c.AnalyzerOperation.TURN_ANALYSIS
+    )
+    assert "explicitly rejects, changes, or replaces" in turn_analysis
+    assert "include exactly the stated replacement in decisions" in turn_analysis
+    assert "requires_human_confirmation=true" in turn_analysis
+    assert "existing_decision_ref" in turn_analysis
+    assert "Do not invent a replacement" in turn_analysis
+
     guidance = StoredConversationOpenAIAdapter._instructions(
         c.AnalyzerOperation.GUIDANCE
     )

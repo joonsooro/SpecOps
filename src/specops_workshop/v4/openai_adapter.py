@@ -1197,6 +1197,17 @@ class StoredConversationOpenAIAdapter:
             "not, omit that evidence candidate and every proposal that depends on it; never "
             "reconstruct, normalize, or approximately quote source text."
         )
+        if operation is contracts.AnalyzerOperation.TURN_ANALYSIS:
+            instructions += (
+                " Treat an explicit decision replacement in the finalized transcript as a "
+                "decision candidate, not only as a problem or follow-up question. When the "
+                "speaker explicitly rejects, changes, or replaces a reviewed decision and "
+                "states its replacement, include exactly the stated replacement in decisions "
+                "with requires_human_confirmation=true. Bind existing_decision_ref to the exact "
+                "prior Foundation decision when the transcript and snapshot make that relation "
+                "unambiguous; otherwise leave the ref null. Do not invent a replacement when "
+                "the speaker did not state one or the intended replacement is ambiguous."
+            )
         if operation is contracts.AnalyzerOperation.GUIDANCE:
             instructions += (
                 " Select recommended_question and safe_alternates only from Foundation "

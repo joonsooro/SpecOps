@@ -464,6 +464,10 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
     assert "neither already ASKED nor listed in do_not_ask_question_refs" in guidance
     assert "unsafe, dependency-ineligible, or already-asked" in guidance
     assert "reject that selected branch" in guidance
+    assert "never repeat the recommended question as an alternate" in guidance
+    assert "never duplicate an alternate" in guidance
+    assert "do_not_ask_question_refs identity at most once" in guidance
+    assert "never place any selected question identity in do_not_ask_question_refs" in guidance
 
 
 def test_stored_conversation_bootstrap_uploads_exactly_two_files_and_reuses_conversation():

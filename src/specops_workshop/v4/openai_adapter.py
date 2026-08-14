@@ -1243,7 +1243,11 @@ class StoredConversationOpenAIAdapter:
                 "current OPEN problems, and that are neither already ASKED nor listed in "
                 "do_not_ask_question_refs. Put an unsafe, dependency-ineligible, or already-asked "
                 "question in neither selected field; Foundation will reject that selected branch "
-                "rather than reinterpret or repeat it."
+                "rather than reinterpret or repeat it. Use each question identity at most once "
+                "across recommended_question and safe_alternates: never repeat the recommended "
+                "question as an alternate and never duplicate an alternate. Also use each "
+                "do_not_ask_question_refs identity at most once, and never place any selected "
+                "question identity in do_not_ask_question_refs."
             )
         return instructions
 

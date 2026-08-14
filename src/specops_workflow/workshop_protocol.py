@@ -1568,8 +1568,23 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 updated_at=now,
             )
         )
+        decision_reviews = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        artifact_reviews = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"]
+        active_review = any(
+            connection.execute(
+                select(func.count()).select_from(table).where(
+                    table.c.case_id == str(command.case_id),
+                    table.c.current == 1,
+                )
+            ).scalar_one()
+            for table in (decision_reviews, artifact_reviews)
+        )
         self._consume_runway_and_schedule_guidance(
-            connection, command.case_id, command.session_id, now
+            connection,
+            command.case_id,
+            command.session_id,
+            now,
+            consume_question=not active_review,
         )
         self._advance_revision(connection, command.case_id, prior_revision)
         return c.TranscriptRecordedReceipt(
@@ -1651,7 +1666,13 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
 
     def _consume_runway_and_schedule_guidance(
-        self, connection, case_id: UUID, session_id: UUID, now: str
+        self,
+        connection,
+        case_id: UUID,
+        session_id: UUID,
+        now: str,
+        *,
+        consume_question: bool = True,
     ) -> None:
         runway = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
         guidance = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
@@ -1673,7 +1694,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             )
             .order_by(runway.c.position)
         ).mappings().all()
-        if current:
+        if current and consume_question:
             connection.execute(
                 update(runway)
                 .where(
@@ -1683,7 +1704,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 )
                 .values(status="ASKED", consumed_at=now)
             )
-        depth = max(0, len(current) - 1)
+        depth = max(0, len(current) - (1 if current and consume_question else 0))
         if depth > 2:
             return
         subject_id = str(current_guidance)

@@ -1460,6 +1460,56 @@ def test_depth_two_enqueues_one_guidance_and_turn_jobs_remain_first(tmp_path):
     assert claimed["operation"] == "TURN_ANALYSIS"
 
 
+def test_current_review_response_does_not_consume_an_interview_question(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+
+    opening = _transcript_command(
+        foundation.case_revision(CASE_ID),
+        1,
+        "Confirm UTF-8 and one header row.",
+    )
+    foundation.execute(opening)
+    candidate = _turn_candidate(
+        opening.transcript.event_id, foundation.case_revision(CASE_ID)
+    )
+    admit_values = _base(foundation.case_revision(CASE_ID))
+    admit_values.update(
+        command_type="ADMIT_TURN_ANALYSIS",
+        analyzer_run_id=RUN_ID,
+        context_id=CONTEXT_ID,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+    admitted = foundation.execute(c.AdmitTurnAnalysisCommand(**admit_values))
+    decision_ids = tuple(
+        item.foundation_id
+        for item in admitted.identity_mappings
+        if item.entity_kind == "DECISION"
+    )
+    review_values = _base(foundation.case_revision(CASE_ID))
+    review_values.update(
+        command_type="MATERIALIZE_DECISION_BATCH_REVIEW",
+        pending_decision_ids=decision_ids,
+        derived_from_cluster_ids=(),
+    )
+    foundation.execute(c.MaterializeDecisionBatchReviewCommand(**review_values))
+    depth_before = foundation.runway_projection(CASE_ID)["depth"]
+
+    foundation.execute(
+        _transcript_command(
+            foundation.case_revision(CASE_ID),
+            2,
+            "Confirm item A and reject item B.",
+        )
+    )
+
+    assert depth_before == 3
+    assert foundation.runway_projection(CASE_ID)["depth"] == depth_before
+
+
 def test_current_depth_one_guidance_enqueues_replenishment_not_superseded_runway(
     tmp_path,
 ):

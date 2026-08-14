@@ -85,19 +85,69 @@ class V4LiveTransport:
             await self._text_only(websocket)
             return
         await websocket.send_json({"type": "CALL_STATE", "state": "LISTENING"})
-        client = asyncio.create_task(self._client(websocket, session))
+        voice_available = asyncio.Event()
+        voice_available.set()
+        client = asyncio.create_task(self._client(websocket, session, voice_available))
         provider = asyncio.create_task(self._provider(websocket, session))
+        provider_reader_started = time.monotonic()
+        self._emit_lifecycle("voice_provider_reader.started", provider_reader_started)
+        session_closed = False
         try:
             done, pending = await asyncio.wait(
                 (client, provider), return_when=asyncio.FIRST_COMPLETED
             )
-            await self._cancel_pending_provider_tasks(pending)
-            for task in done:
-                task.result()
+            provider_disconnected = False
+            if provider in done:
+                try:
+                    provider_disconnected = provider.result()
+                except Exception:
+                    provider_disconnected = True
+                    self._emit_lifecycle(
+                        "voice_provider_reader.failed", provider_reader_started
+                    )
+                else:
+                    self._emit_lifecycle(
+                        "voice_provider_reader.completed", provider_reader_started
+                    )
+            if client in done:
+                await self._cancel_pending_provider_tasks(
+                    {provider} if provider in pending else set()
+                )
+                client.result()
+            else:
+                # The provider may finish a turn before the browser's END
+                # control arrives. Preserve the client task so END can still
+                # receive ENDED and later TEXT input uses Foundation fallback.
+                voice_available.clear()
+                if provider_disconnected:
+                    await websocket.send_json(
+                        {
+                            "type": "CALL_STATE",
+                            "state": "DISCONNECTED",
+                            "guidance": "Voice unavailable. Continue with text.",
+                        }
+                    )
+                await self._close_provider_session(session)
+                session_closed = True
+                await client
         except WebSocketDisconnect:
             pass
         finally:
-            await self._close_provider_session(session)
+            if not session_closed:
+                await self._close_provider_session(session)
+
+    def _emit_lifecycle(self, event: str, started: float) -> None:
+        _LOGGER.info(
+            json.dumps(
+                {
+                    "correlation_id": str(self.orchestrator.case_id),
+                    "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                    "event": event,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
 
     async def _cancel_pending_provider_tasks(
         self, tasks: set[asyncio.Task]
@@ -267,7 +317,9 @@ class V4LiveTransport:
             f"Runway health: {card.runway_health.value}.\n{allowed}"
         )
 
-    async def _client(self, websocket: WebSocket, session) -> None:
+    async def _client(
+        self, websocket: WebSocket, session, voice_available: asyncio.Event
+    ) -> None:
         while True:
             message = await websocket.receive()
             if message.get("bytes") is not None:
@@ -281,7 +333,7 @@ class V4LiveTransport:
                     websocket,
                     value,
                     provider_id=str(value["provider_request_id"]),
-                    session=session,
+                    session=session if voice_available.is_set() else None,
                 )
                 if completed:
                     return
@@ -309,7 +361,7 @@ class V4LiveTransport:
             else:
                 await websocket.send_json({"type": "ERROR", "code": "INVALID_CONTROL"})
 
-    async def _provider(self, websocket: WebSocket, session) -> None:
+    async def _provider(self, websocket: WebSocket, session) -> bool:
         sequence = (
             1
             if self.orchestrator.foundation.latest_final_transcript(
@@ -335,13 +387,14 @@ class V4LiveTransport:
                 )
                 sequence += 1
                 if completed:
-                    return
+                    return False
             elif event.type is VoiceEventType.OUTPUT_TRANSCRIPT:
                 await websocket.send_json({"type": "AGENT_TRANSCRIPT", "text": event.text})
             elif event.type is VoiceEventType.INTERRUPTED:
                 await websocket.send_json({"type": "INTERRUPTED", "playback_cleared": True})
             elif event.type is VoiceEventType.DISCONNECTED:
-                return
+                return True
+        return False
 
     async def _text_only(self, websocket: WebSocket) -> None:
         while True:

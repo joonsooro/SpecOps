@@ -1220,6 +1220,96 @@ def test_voice_provider_reader_cancellation_timeout_does_not_block_teardown(capl
         "voice_provider_reader_cancel.timed_out",
     ]
     assert all(event["correlation_id"] == str(CASE_ID) for event in events)
+
+
+def test_voice_provider_completion_preserves_pending_client_end(caplog):
+    async def scenario():
+        provider_finished = asyncio.Event()
+
+        class ProviderFinishesFirstSession:
+            def __init__(self):
+                self.closed = False
+
+            async def send_audio(self, frame):
+                return None
+
+            async def send_text(self, value):
+                return None
+
+            async def interrupt(self):
+                return None
+
+            async def events(self):
+                provider_finished.set()
+                if False:
+                    yield None
+
+            async def close(self):
+                self.closed = True
+
+        class Provider:
+            def __init__(self, session):
+                self.session = session
+
+            async def connect(self, context):
+                return self.session
+
+        class Socket:
+            def __init__(self):
+                self.messages = []
+
+            async def accept(self):
+                return None
+
+            async def send_json(self, value):
+                self.messages.append(value)
+
+            async def send_bytes(self, value):
+                raise AssertionError("fixture provider must not emit audio")
+
+            async def receive(self):
+                await provider_finished.wait()
+                await asyncio.sleep(0.01)
+                return {"text": json.dumps({"type": "END"})}
+
+        foundation = SimpleNamespace(
+            preparation_projection=lambda case_id: {
+                "phase": "READY",
+                "workshop_complete_at": None,
+            },
+            runway_projection=lambda case_id: {
+                "depth": 1,
+                "questions": [{"exact_text": "Which export scope should be canonical?"}],
+            },
+            voice_session_card=lambda case_id: SimpleNamespace(
+                runway_health=SimpleNamespace(value="HEALTHY")
+            ),
+            latest_final_transcript=lambda case_id: None,
+        )
+        orchestrator = SimpleNamespace(foundation=foundation, case_id=CASE_ID)
+        session = ProviderFinishesFirstSession()
+        socket = Socket()
+        transport = V4LiveTransport(Provider(session), orchestrator)
+
+        await asyncio.wait_for(transport.handle(socket), timeout=0.2)
+
+        assert socket.messages == [
+            {"type": "CALL_STATE", "state": "CONNECTING"},
+            {"type": "CALL_STATE", "state": "LISTENING"},
+            {"type": "CALL_STATE", "state": "ENDED"},
+        ]
+        assert session.closed is True
+
+    with caplog.at_level("INFO", logger="specops.workshop.voice"):
+        asyncio.run(scenario())
+    events = [json.loads(record.message) for record in caplog.records]
+    assert [event["event"] for event in events] == [
+        "voice_provider_reader.started",
+        "voice_provider_reader.completed",
+        "voice_provider_close.started",
+        "voice_provider_close.completed",
+    ]
+    assert all(event["correlation_id"] == str(CASE_ID) for event in events)
     assert all(event["duration_ms"] >= 0 for event in events)
 
 
@@ -1323,6 +1413,7 @@ def test_voice_end_bounds_reader_then_close_and_releases_complete_handler(caplog
         asyncio.run(scenario())
     events = [json.loads(record.message) for record in caplog.records]
     assert [event["event"] for event in events] == [
+        "voice_provider_reader.started",
         "voice_provider_reader_cancel.started",
         "voice_provider_reader_cancel.timed_out",
         "voice_provider_close.started",

@@ -98,6 +98,10 @@ class FoundationProtocolError(RuntimeError):
         self.code = code
 
 
+class _GuidanceBranchUnavailable(RuntimeError):
+    """One current question is ineligible because a bound problem is no longer open."""
+
+
 @dataclass(frozen=True)
 class ProtocolCase:
     case_id: UUID
@@ -2322,11 +2326,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 problem = self._semantic_record_for_ref(
                     connection, command.case_id, prerequisite
                 )
-                if (
-                    problem["entity_kind"] != "PROBLEM"
-                    or problem["status"] != c.SemanticRecordStatus.OPEN.value
-                ):
-                    raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+                if problem["entity_kind"] != "PROBLEM":
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                if problem["status"] != c.SemanticRecordStatus.OPEN.value:
+                    raise _GuidanceBranchUnavailable
                 question_dependency_refs.add(
                     (
                         c.GuidanceDependencyKind.PROBLEM,
@@ -2358,11 +2361,15 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 continue
             try:
                 admitted_proposed_values.append(admitted_question(item))
+            except _GuidanceBranchUnavailable:
+                # A resolved dependency invalidates only this otherwise-current
+                # question. Independent current selections remain admissible.
+                continue
             except FoundationProtocolError as exc:
                 # An existing question that requires current-turn
                 # interpretation is not safe for the live runway. Quarantine
-                # only that selected branch; stale or unknown refs still fail
-                # the complete GUIDANCE admission closed.
+                # only that selected branch; stale question/text or unknown
+                # refs still fail the complete GUIDANCE admission closed.
                 if exc.code is not c.FoundationRejectionCode.INVALID_TRANSITION:
                     raise
         admitted_proposed = tuple(admitted_proposed_values)
@@ -2387,6 +2394,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                         )
                     )
                 )
+            except _GuidanceBranchUnavailable:
+                continue
             except FoundationProtocolError as exc:
                 if exc.code not in {
                     c.FoundationRejectionCode.STALE_ENTITY,

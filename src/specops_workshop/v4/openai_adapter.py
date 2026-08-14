@@ -1212,9 +1212,11 @@ class StoredConversationOpenAIAdapter:
             instructions += (
                 " Select recommended_question and safe_alternates only from Foundation "
                 "question records whose safe_without_current_turn_interpretation field is "
-                "true and that are neither already ASKED nor listed in do_not_ask_question_refs. "
-                "Put an unsafe or already-asked question in neither selected field; Foundation "
-                "will reject that selected branch rather than reinterpret or repeat it."
+                "true, whose addresses_problem_refs and prerequisite_problem_refs all identify "
+                "current OPEN problems, and that are neither already ASKED nor listed in "
+                "do_not_ask_question_refs. Put an unsafe, dependency-ineligible, or already-asked "
+                "question in neither selected field; Foundation will reject that selected branch "
+                "rather than reinterpret or repeat it."
             )
         return instructions
 

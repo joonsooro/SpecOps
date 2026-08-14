@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -1151,6 +1152,39 @@ def test_voice_provider_is_not_created_before_ready():
         ]
 
     asyncio.run(scenario())
+
+
+def test_voice_provider_close_timeout_cancels_teardown_without_blocking_transport(caplog):
+    async def scenario():
+        class HangingSession:
+            def __init__(self):
+                self.cancelled = False
+
+            async def close(self):
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.cancelled = True
+
+        session = HangingSession()
+        transport = V4LiveTransport(
+            SimpleNamespace(),
+            SimpleNamespace(case_id=CASE_ID),
+            provider_close_timeout_seconds=0.01,
+        )
+        await asyncio.wait_for(transport._close_provider_session(session), timeout=0.2)
+        await asyncio.sleep(0)
+        assert session.cancelled is True
+
+    with caplog.at_level("INFO", logger="specops.workshop.voice"):
+        asyncio.run(scenario())
+    events = [json.loads(record.message) for record in caplog.records]
+    assert [event["event"] for event in events] == [
+        "voice_provider_close.started",
+        "voice_provider_close.timed_out",
+    ]
+    assert all(event["correlation_id"] == str(CASE_ID) for event in events)
+    assert all(event["duration_ms"] >= 0 for event in events)
 
 
 def test_voice_guidance_refresh_is_applied_only_at_final_turn_boundary():

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import TypeAdapter
@@ -15,10 +17,23 @@ from specops_workshop.ports import LiveVoiceProvider, VoiceContext, VoiceEventTy
 from .orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
 
 
+VOICE_PROVIDER_CLOSE_TIMEOUT_SECONDS = 5.0
+_LOGGER = logging.getLogger("specops.workshop.voice")
+
+
 class V4LiveTransport:
-    def __init__(self, provider: LiveVoiceProvider, orchestrator: V4ProductionOrchestrator) -> None:
+    def __init__(
+        self,
+        provider: LiveVoiceProvider,
+        orchestrator: V4ProductionOrchestrator,
+        *,
+        provider_close_timeout_seconds: float = VOICE_PROVIDER_CLOSE_TIMEOUT_SECONDS,
+    ) -> None:
+        if provider_close_timeout_seconds <= 0:
+            raise ValueError("provider close timeout must be positive")
         self.provider = provider
         self.orchestrator = orchestrator
+        self.provider_close_timeout_seconds = provider_close_timeout_seconds
 
     async def handle(self, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -75,7 +90,61 @@ class V4LiveTransport:
         except WebSocketDisconnect:
             pass
         finally:
-            await session.close()
+            await self._close_provider_session(session)
+
+    async def _close_provider_session(self, session) -> None:
+        """Bound teardown only after the client/provider turn has ended.
+
+        Model completion is never timed out here.  This bound prevents a
+        provider SDK close handshake from retaining the WebSocket handler after
+        Foundation has already stored the final transcript or the client has
+        explicitly ended the call.
+        """
+
+        started = time.monotonic()
+        correlation = str(self.orchestrator.case_id)
+
+        def emit(event: str) -> None:
+            _LOGGER.info(
+                json.dumps(
+                    {
+                        "correlation_id": correlation,
+                        "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                        "event": event,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+
+        emit("voice_provider_close.started")
+        close_task = asyncio.create_task(session.close())
+
+        def consume(task: asyncio.Task) -> None:
+            if task.cancelled():
+                return
+            task.exception()
+
+        try:
+            done, _ = await asyncio.wait(
+                (close_task,), timeout=self.provider_close_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            close_task.cancel()
+            close_task.add_done_callback(consume)
+            emit("voice_provider_close.cancelled")
+            raise
+        if not done:
+            close_task.cancel()
+            close_task.add_done_callback(consume)
+            emit("voice_provider_close.timed_out")
+            return
+        try:
+            close_task.result()
+        except Exception:
+            emit("voice_provider_close.failed")
+        else:
+            emit("voice_provider_close.completed")
 
     async def _commit(
         self, websocket: WebSocket, value: dict, *, provider_id: str, session=None

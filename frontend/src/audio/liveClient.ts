@@ -53,6 +53,11 @@ export class LiveAudioClient {
           this.playbackActive = false;
         }
         onEvent(value);
+        if (value.type === "CALL_STATE" && value.state === "ENDED") {
+          const endedSocket = this.socket;
+          this.socket = null;
+          endedSocket?.close(1000, "call ended");
+        }
       }
     };
     this.stream.getAudioTracks().forEach((track) => {

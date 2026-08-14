@@ -522,6 +522,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
 
         now = _instant(self.now())
         table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        resources = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
         with self.engine.begin() as connection:
             result = connection.execute(
                 update(table)
@@ -542,6 +543,17 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             )
             if result.rowcount != 1:
                 raise ValueError("unknown Workshop preparation")
+            resource_result = connection.execute(
+                update(resources)
+                .where(resources.c.case_id == str(case_id))
+                .values(
+                    bootstrap_candidate_json=None,
+                    context_json=None,
+                    updated_at=now,
+                )
+            )
+            if resource_result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation resources")
 
     def preparation_resources(self, case_id: UUID) -> dict[str, Any]:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]

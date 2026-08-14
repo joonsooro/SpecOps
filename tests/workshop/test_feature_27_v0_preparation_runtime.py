@@ -2874,6 +2874,29 @@ def test_last_browser_client_gets_exact_fifteen_minute_resume_grace(tmp_path):
         assert foundation.preparation_projection(app.state.bootstrap.case_id)[
             "phase"
         ] == "VALIDATING_DOCUMENTS"
+        reset_resources = foundation.preparation_resources(app.state.bootstrap.case_id)
+        assert reset_resources["bootstrap_candidate_json"] is None
+        assert reset_resources["context_json"] is None
+
+        rebuilt_adapter = DeterministicAdapter(conversation_id="conv_task27_rebuilt")
+        restarted = create_app(
+            settings=configured(tmp_path),
+            clock=clock,
+            source_catalog=SourceCatalog(ROOT),
+            live_provider=object(),
+            analyzer_adapter=rebuilt_adapter,
+        )
+        rebuilt = await restarted.state.workshop_protocol_orchestrator.prepare_workshop()
+        rebuilt_context = (
+            restarted.state.workshop_protocol_foundation.active_analyzer_context(
+                restarted.state.bootstrap.case_id
+            )
+        )
+        assert rebuilt["phase"] == "READY"
+        assert rebuilt_context is not None
+        assert rebuilt_context.context_id != original.context_id
+        assert rebuilt_context.provider_conversation_id == "conv_task27_rebuilt"
+        assert rebuilt_adapter.operations == [c.AnalyzerOperation.BOOTSTRAP]
 
     asyncio.run(scenario())
 

@@ -218,6 +218,32 @@ def _without_unsupported_keywords(value: Any) -> Any:
             }
         elif key not in _UNSUPPORTED_KEYS:
             projected[key] = _without_unsupported_keywords(item)
+    if "type" not in projected and ("const" in projected or "enum" in projected):
+        literals = (
+            [projected["const"]]
+            if "const" in projected
+            else projected["enum"]
+        )
+        if not isinstance(literals, list) or not literals:
+            raise ValueError("provider wire schema literal set must be non-empty")
+
+        def literal_type(literal: Any) -> str:
+            if literal is None:
+                return "null"
+            if isinstance(literal, bool):
+                return "boolean"
+            if isinstance(literal, str):
+                return "string"
+            if isinstance(literal, int):
+                return "integer"
+            if isinstance(literal, float):
+                return "number"
+            raise ValueError("provider wire schema literal has no scalar type")
+
+        literal_types = {literal_type(literal) for literal in literals}
+        if len(literal_types) != 1:
+            raise ValueError("provider wire schema literals must share one scalar type")
+        projected["type"] = literal_types.pop()
     node_types = projected.get("type")
     if isinstance(node_types, list):
         if (
@@ -285,6 +311,8 @@ def validate_openai_strict_schema(schema: dict[str, Any]) -> None:
         if forbidden:
             raise ValueError(f"unsupported OpenAI schema keyword(s): {sorted(forbidden)}")
         node_type = node.get("type")
+        if node_type is None and ("const" in node or "enum" in node):
+            raise ValueError("OpenAI literal schema nodes must declare one scalar type")
         if node_type is not None and (
             not isinstance(node_type, str) or node_type not in _PROVIDER_TYPES
         ):

@@ -22,6 +22,7 @@ from specops_workshop.v4.openai_adapter import (
 )
 from specops_workshop.v4.schema_compiler import (
     NATIVE_SCHEMA_SPECS,
+    compile_openai_strict_payload_schema,
     compile_openai_strict_schema,
     validate_openai_strict_schema,
 )
@@ -411,6 +412,32 @@ def test_native_schema_validator_rejects_multi_type_syntax():
         validate_openai_strict_schema(schema)
 
 
+def test_payload_schema_compiler_adds_scalar_types_to_literal_only_nodes():
+    local_schema = {
+        "type": "object",
+        "properties": {
+            "mode": {"enum": ["always", "never"]},
+            "version": {"const": "1.0.0"},
+        },
+        "required": ["mode", "version"],
+        "additionalProperties": False,
+    }
+
+    with pytest.raises(ValueError, match="literal schema nodes must declare"):
+        validate_openai_strict_schema(local_schema)
+
+    compiled = compile_openai_strict_payload_schema(local_schema)
+
+    assert compiled["properties"]["mode"] == {
+        "enum": ["always", "never"],
+        "type": "string",
+    }
+    assert compiled["properties"]["version"] == {
+        "const": "1.0.0",
+        "type": "string",
+    }
+
+
 def test_bootstrap_provider_schema_enforces_local_question_shape_invariants():
     adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
     sources = (
@@ -513,6 +540,12 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "uniqueItems" not in encoded_output_schema
     assert '"type": ["string", "null"]' in json.dumps(payload_schema)
     assert '"type": ["string", "null"]' not in encoded_output_schema
+    assert output_schema["$defs"][
+        "SpecPackageSynthesisPayload_acceptanceCheck"
+    ]["properties"]["type"]["type"] == "string"
+    assert output_schema["$defs"][
+        "SpecPackageSynthesisPayload_semanticEvidenceFinding"
+    ]["properties"]["analyzer_contract_version"]["type"] == "string"
     due_date = output_schema["$defs"][
         "SpecPackageSynthesisPayload_dependency"
     ]["properties"]["due_date"]

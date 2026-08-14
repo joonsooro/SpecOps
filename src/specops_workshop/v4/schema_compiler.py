@@ -67,6 +67,9 @@ _PRESENTATION_KEYS = frozenset({"title", "description", "examples", "default", "
 _QUESTION_DEFINITION_NAMES = frozenset(
     {"QuestionCandidate", "TurnQuestionCandidate", "TurnQuestionRevisionCandidate"}
 )
+_PROVIDER_TYPES = frozenset(
+    {"string", "number", "boolean", "integer", "object", "array", "null"}
+)
 _UNSUPPORTED_KEYS = frozenset(
     {
         "allOf",
@@ -215,6 +218,21 @@ def _without_unsupported_keywords(value: Any) -> Any:
             }
         elif key not in _UNSUPPORTED_KEYS:
             projected[key] = _without_unsupported_keywords(item)
+    node_types = projected.get("type")
+    if isinstance(node_types, list):
+        if (
+            len(node_types) != 2
+            or "null" not in node_types
+            or any(not isinstance(node_type, str) for node_type in node_types)
+        ):
+            raise ValueError("provider wire schema has an unsupported type union")
+        constraints = {key: item for key, item in projected.items() if key != "type"}
+        projected = {
+            "anyOf": [
+                ({"type": node_type} if node_type == "null" else {"type": node_type, **constraints})
+                for node_type in node_types
+            ]
+        }
     return projected
 
 
@@ -266,6 +284,11 @@ def validate_openai_strict_schema(schema: dict[str, Any]) -> None:
         forbidden = _UNSUPPORTED_KEYS.intersection(node)
         if forbidden:
             raise ValueError(f"unsupported OpenAI schema keyword(s): {sorted(forbidden)}")
+        node_type = node.get("type")
+        if node_type is not None and (
+            not isinstance(node_type, str) or node_type not in _PROVIDER_TYPES
+        ):
+            raise ValueError(f"unsupported OpenAI schema type: {node_type!r}")
         properties = node.get("properties")
         if isinstance(properties, dict):
             if node.get("additionalProperties") is not False:

@@ -399,6 +399,18 @@ def test_native_schema_validator_rejects_provider_unsupported_array_uniqueness()
         validate_openai_strict_schema(schema)
 
 
+def test_native_schema_validator_rejects_multi_type_syntax():
+    schema = {
+        "type": "object",
+        "properties": {"optional": {"type": ["string", "null"]}},
+        "required": ["optional"],
+        "additionalProperties": False,
+    }
+
+    with pytest.raises(ValueError, match="unsupported OpenAI schema type"):
+        validate_openai_strict_schema(schema)
+
+
 def test_bootstrap_provider_schema_enforces_local_question_shape_invariants():
     adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
     sources = (
@@ -499,6 +511,17 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "allOf" not in encoded_output_schema
     assert "uniqueItems" in json.dumps(payload_schema)
     assert "uniqueItems" not in encoded_output_schema
+    assert '"type": ["string", "null"]' in json.dumps(payload_schema)
+    assert '"type": ["string", "null"]' not in encoded_output_schema
+    due_date = output_schema["$defs"][
+        "SpecPackageSynthesisPayload_dependency"
+    ]["properties"]["due_date"]
+    assert due_date == {
+        "anyOf": [
+            {"type": "string", "format": "date"},
+            {"type": "null"},
+        ]
+    }
 
     instructions = arguments["instructions"]
     assert "candidate_payload_json as exactly one nested JSON object" in instructions

@@ -1202,6 +1202,7 @@ class StoredConversationOpenAIAdapter:
         schema_name, schema, _ = native_schema_for(operation)
         schema = self._bind_candidate_echo_schema(request, schema)
         schema = self._bind_artifact_payload_output_schema(operation, schema)
+        schema = self._bind_artifact_request_constraints(request, schema)
         content: list[dict[str, str]] = []
         if turn_correction_keys:
             if not isinstance(request, contracts.AnalyzeFinalTurnRequest):
@@ -1372,6 +1373,72 @@ class StoredConversationOpenAIAdapter:
         if not isinstance(properties, dict) or "candidate_payload_json" not in properties:
             raise ValueError("candidate schema lacks artifact payload field")
         properties["candidate_payload_json"] = {"$ref": f"#/$defs/{root_name}"}
+        validate_openai_strict_schema(bound)
+        return bound
+
+    @staticmethod
+    def _bind_artifact_request_constraints(
+        request: contracts.AnalyzerProviderRequest,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Expose request-specific confirmed-decision cardinality to the provider."""
+
+        if not isinstance(request, contracts.SpecPackageSynthesisRequest):
+            return schema
+        bindings = getattr(request, "confirmed_decision_bindings", ())
+        if not bindings:
+            return schema
+
+        bound = deepcopy(schema)
+        properties = bound.get("properties")
+        definitions = bound.get("$defs")
+        payload_ref = (
+            properties.get("candidate_payload_json", {}).get("$ref")
+            if isinstance(properties, dict)
+            else None
+        )
+        if not isinstance(definitions, dict) or not isinstance(payload_ref, str):
+            raise ValueError("artifact output schema does not expose its payload root")
+        payload_root = definitions.get(payload_ref.removeprefix("#/$defs/"))
+        payload_properties = (
+            payload_root.get("properties") if isinstance(payload_root, dict) else None
+        )
+        decisions = (
+            payload_properties.get("decisions")
+            if isinstance(payload_properties, dict)
+            else None
+        )
+        if not isinstance(decisions, dict):
+            raise ValueError("Spec payload schema does not expose decisions")
+        decisions["minItems"] = len(bindings)
+
+        # A terminal synthesis request has no legitimate deferred decision slots.
+        # Binding exact length and IDs keeps the structured response focused on the
+        # already-confirmed Foundation set; local admission remains authoritative.
+        has_open_problem = any(
+            item.status is contracts.SemanticRecordStatus.OPEN
+            for item in request.foundation_snapshot.problems
+        )
+        if not has_open_problem:
+            decisions["maxItems"] = len(bindings)
+            decision_ref = decisions.get("items", {}).get("$ref")
+            decision_definition = (
+                definitions.get(decision_ref.removeprefix("#/$defs/"))
+                if isinstance(decision_ref, str)
+                else None
+            )
+            decision_properties = (
+                decision_definition.get("properties")
+                if isinstance(decision_definition, dict)
+                else None
+            )
+            if not isinstance(decision_properties, dict):
+                raise ValueError("Spec payload schema does not expose decision fields")
+            decision_properties["id"]["enum"] = [
+                str(item.decision_id) for item in bindings
+            ]
+            decision_properties["status"]["const"] = "confirmed"
+
         validate_openai_strict_schema(bound)
         return bound
 

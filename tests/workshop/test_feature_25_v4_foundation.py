@@ -604,6 +604,58 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
     snapshot = foundation.semantic_snapshot(CASE_ID)
     assert snapshot.evidence_findings == (finding,)
 
+    bindings = foundation.confirmed_decision_synthesis_bindings(CASE_ID)
+    assert len(bindings) == 1
+    omitted_payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(
+        omitted_payload
+    )
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID, "SPEC_PACKAGE", (*identity_kinds.values(), "DECISION")
+    )
+    omitted_payload = bind_planned_identities(
+        omitted_payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities[: len(identity_kinds)],
+                strict=True,
+            )
+        },
+    )
+    omitted_payload["decisions"] = []
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=9,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(
+            omitted_payload, separators=(",", ":"), sort_keys=True
+        ),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.0",
+    )
+    admission_values = _base(9)
+    admission_values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        confirmed_decision_bindings=bindings,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+    with pytest.raises(FoundationProtocolError) as omitted_error:
+        foundation.execute(c.AdmitSpecPackageSynthesisCommand(**admission_values))
+    assert omitted_error.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+    assert foundation.case_revision(CASE_ID) == 9
+
     restarted = WorkflowService(database_url=url)
     assert restarted._cases[CASE_ID].revision == 9
 

@@ -1087,6 +1087,11 @@ export interface components {
              */
             command_type: "ADMIT_SPEC_PACKAGE_SYNTHESIS";
             /**
+             * Confirmed Decision Bindings
+             * @default []
+             */
+            confirmed_decision_bindings: components["schemas"]["V4_ConfirmedDecisionSynthesisBinding"][];
+            /**
              * Correlation Id
              * Format: uuid
              */
@@ -1716,6 +1721,69 @@ export interface components {
          * @enum {string}
          */
         V4_ConfirmationMappingStatus: "MAPPED" | "CLARIFICATION_REQUIRED";
+        /**
+         * ConfirmedDecisionSynthesisBinding
+         * @description Exact Foundation ceremony needed to project one confirmed decision.
+         */
+        V4_ConfirmedDecisionSynthesisBinding: {
+            /**
+             * Actor Ref
+             * Format: uuid
+             */
+            actor_ref: string;
+            /** Alternatives Considered */
+            alternatives_considered: string[];
+            /**
+             * Authority Validation Id
+             * Format: uuid
+             */
+            authority_validation_id: string;
+            classification: components["schemas"]["V4_Domain"];
+            /**
+             * Confirmation Id
+             * Format: uuid
+             */
+            confirmation_id: string;
+            /**
+             * Confirmed At
+             * Format: date-time
+             */
+            confirmed_at: string;
+            /** Confirmed Case Revision */
+            confirmed_case_revision: number;
+            /** Decision Batch View Hash */
+            decision_batch_view_hash: string;
+            /**
+             * Decision Batch View Id
+             * Format: uuid
+             */
+            decision_batch_view_id: string;
+            /**
+             * Decision Id
+             * Format: uuid
+             */
+            decision_id: string;
+            /** Decision Version */
+            decision_version: number;
+            /** Evidence Ids */
+            evidence_ids: string[];
+            /** Problem Ids */
+            problem_ids: string[];
+            /** Rationale */
+            rationale: string;
+            /**
+             * Review Item Id
+             * Format: uuid
+             */
+            review_item_id: string;
+            /** Statement */
+            statement: string;
+            /**
+             * Transcript Event Id
+             * Format: uuid
+             */
+            transcript_event_id: string;
+        };
         /** ConfirmedSpecSynthesisBinding */
         V4_ConfirmedSpecSynthesisBinding: {
             /** Artifact Key */

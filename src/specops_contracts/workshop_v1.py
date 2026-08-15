@@ -1837,6 +1837,9 @@ class AdmitSpecPackageSynthesisCommand(StrictRevisionCommandEnvelope):
     acting_actor_id: Literal["SYSTEM"]
     target: ArtifactDraftTarget
     identity_plan: ArtifactSynthesisIdentityPlan
+    confirmed_decision_bindings: Annotated[
+        tuple[ConfirmedDecisionSynthesisBinding, ...], Field(max_length=26)
+    ] = ()
     provider_request_hash: Sha256
     candidate: SpecPackageSynthesisCandidate
 
@@ -1861,6 +1864,15 @@ class AdmitSpecPackageSynthesisCommand(StrictRevisionCommandEnvelope):
             raise ValueError("command and candidate case revision must match")
         if self.expected_case_revision != self.identity_plan.based_on_case_revision:
             raise ValueError("command and identity plan case revision must match")
+        planned = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.identity_plan.planned_identities
+        }
+        if any(
+            planned.get((item.decision_id, item.decision_version)) != "DECISION"
+            for item in self.confirmed_decision_bindings
+        ):
+            raise ValueError("confirmed decisions must retain their canonical planned identities")
         return self
 
 

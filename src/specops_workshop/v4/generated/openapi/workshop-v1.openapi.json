@@ -1889,6 +1889,15 @@
             "title": "Command Type",
             "type": "string"
           },
+          "confirmed_decision_bindings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_ConfirmedDecisionSynthesisBinding"
+            },
+            "maxItems": 26,
+            "title": "Confirmed Decision Bindings",
+            "type": "array"
+          },
           "correlation_id": {
             "format": "uuid",
             "title": "Correlation Id",
@@ -3156,6 +3165,135 @@
         ],
         "title": "ConfirmationMappingStatus",
         "type": "string"
+      },
+      "V4_ConfirmedDecisionSynthesisBinding": {
+        "additionalProperties": false,
+        "description": "Exact Foundation ceremony needed to project one confirmed decision.",
+        "properties": {
+          "actor_ref": {
+            "format": "uuid",
+            "title": "Actor Ref",
+            "type": "string"
+          },
+          "alternatives_considered": {
+            "items": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Alternatives Considered",
+            "type": "array"
+          },
+          "authority_validation_id": {
+            "format": "uuid",
+            "title": "Authority Validation Id",
+            "type": "string"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/V4_Domain"
+          },
+          "confirmation_id": {
+            "format": "uuid",
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "confirmed_at": {
+            "format": "date-time",
+            "title": "Confirmed At",
+            "type": "string"
+          },
+          "confirmed_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Confirmed Case Revision",
+            "type": "integer"
+          },
+          "decision_batch_view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Decision Batch View Hash",
+            "type": "string"
+          },
+          "decision_batch_view_id": {
+            "format": "uuid",
+            "title": "Decision Batch View Id",
+            "type": "string"
+          },
+          "decision_id": {
+            "format": "uuid",
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "decision_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Decision Version",
+            "type": "integer"
+          },
+          "evidence_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "problem_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Problem Ids",
+            "type": "array"
+          },
+          "rationale": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "review_item_id": {
+            "format": "uuid",
+            "title": "Review Item Id",
+            "type": "string"
+          },
+          "statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "decision_version",
+          "classification",
+          "statement",
+          "rationale",
+          "alternatives_considered",
+          "problem_ids",
+          "evidence_ids",
+          "confirmation_id",
+          "decision_batch_view_id",
+          "decision_batch_view_hash",
+          "review_item_id",
+          "confirmed_case_revision",
+          "actor_ref",
+          "authority_validation_id",
+          "transcript_event_id",
+          "confirmed_at"
+        ],
+        "title": "ConfirmedDecisionSynthesisBinding",
+        "type": "object"
       },
       "V4_ConfirmedSpecSynthesisBinding": {
         "additionalProperties": false,

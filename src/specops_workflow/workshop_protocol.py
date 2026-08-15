@@ -3260,6 +3260,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         errors = list(_payload_validator(schema_name).iter_errors(payload))
         if errors:
             raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED)
+        if artifact_type == "SPEC_PACKAGE":
+            self._validate_confirmed_decision_projection(command, payload)
         if artifact_type == "TECHNICAL_CONTRACT":
             self._validate_confirmed_spec_lineage(connection, command, prior_revision)
         planned = {str(item.foundation_id): item.entity_kind for item in command.identity_plan.planned_identities}
@@ -3362,6 +3364,62 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             record_revision=1,
             payload_hash=digest,
         )
+
+    def _validate_confirmed_decision_projection(self, command, payload):
+        """Reject drafts that omit or rewrite Foundation-confirmed decisions."""
+
+        canonical = self.confirmed_decision_synthesis_bindings(command.case_id)
+        supplied = command.confirmed_decision_bindings
+        if supplied != canonical:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+
+        decisions = payload["decisions"]
+        decision_ids = [item["id"] for item in decisions]
+        if len(decision_ids) != len(set(decision_ids)):
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+        confirmed = {
+            item["id"]: item for item in decisions if item["status"] == "confirmed"
+        }
+        expected_ids = {str(item.decision_id) for item in canonical}
+        if set(confirmed) != expected_ids:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+
+        for binding in canonical:
+            decision = confirmed[str(binding.decision_id)]
+            exact_confirmation = {
+                "confirmation_id": str(binding.confirmation_id),
+                "confirmed_decision_id": str(binding.decision_id),
+                "confirmed_decision_version": binding.decision_version,
+                "decision_batch_view_id": str(binding.decision_batch_view_id),
+                "decision_batch_view_hash": binding.decision_batch_view_hash,
+                "review_item_id": str(binding.review_item_id),
+                "confirmed_case_revision": binding.confirmed_case_revision,
+                "actor_ref": str(binding.actor_ref),
+                "authority_validation_id": str(binding.authority_validation_id),
+                "transcript_event_id": str(binding.transcript_event_id),
+                "confirmed_at": binding.confirmed_at.astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            if (
+                decision["decision_version"] != binding.decision_version
+                or decision["decision"] != binding.statement
+                or decision["rationale"] != binding.rationale
+                or decision["alternatives_considered"]
+                != list(binding.alternatives_considered)
+                or decision["evidence_refs"] != [str(item) for item in binding.evidence_ids]
+                or decision["confirmation_binding"] != exact_confirmation
+                or decision["authority"]["actor_ref"] != str(binding.actor_ref)
+                or decision["authority"]["foundation_validation_id"]
+                != str(binding.authority_validation_id)
+            ):
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+                )
 
     def _validate_confirmed_spec_lineage(self, connection, command, prior_revision):
         binding = command.confirmed_spec

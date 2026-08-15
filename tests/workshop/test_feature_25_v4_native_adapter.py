@@ -711,6 +711,54 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
             )
 
 
+def test_terminal_spec_schema_requires_confirmed_decision_slots():
+    adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
+    sources = (
+        _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+        _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical.md", b"Technical"),
+    )
+    prepared = adapter.prepared_from_ids(
+        sources, ("file_pm", "file_technical"), "conv_artifact_schema"
+    )
+    request = _spec_synthesis_request(prepared)
+    decision_id = UUID("00000000-0000-4000-8000-000000000031")
+    binding = c.ConfirmedDecisionSynthesisBinding(
+        decision_id=decision_id,
+        decision_version=1,
+        classification=c.Domain.PRODUCT,
+        statement="Use the confirmed export policy.",
+        rationale="The PM confirmed it.",
+        alternatives_considered=("Use the prior policy.",),
+        problem_ids=(UUID("00000000-0000-4000-8000-000000000032"),),
+        evidence_ids=(UUID("00000000-0000-4000-8000-000000000033"),),
+        confirmation_id=UUID("00000000-0000-4000-8000-000000000034"),
+        decision_batch_view_id=UUID("00000000-0000-4000-8000-000000000035"),
+        decision_batch_view_hash=ONE_HASH,
+        review_item_id=UUID("00000000-0000-4000-8000-000000000036"),
+        confirmed_case_revision=1,
+        actor_ref=UUID("00000000-0000-4000-8000-000000000037"),
+        authority_validation_id=UUID("00000000-0000-4000-8000-000000000038"),
+        transcript_event_id=UUID("00000000-0000-4000-8000-000000000039"),
+        confirmed_at=NOW,
+    )
+    request = request.model_copy(
+        update={"confirmed_decision_bindings": (binding,)}
+    )
+
+    schema = adapter._response_arguments(request, bootstrap=False)["text"]["format"][
+        "schema"
+    ]
+    payload_ref = schema["properties"]["candidate_payload_json"]["$ref"]
+    payload = schema["$defs"][payload_ref.removeprefix("#/$defs/")]
+    decisions = payload["properties"]["decisions"]
+    assert decisions["minItems"] == 1
+    assert decisions["maxItems"] == 1
+    decision_ref = decisions["items"]["$ref"]
+    decision = schema["$defs"][decision_ref.removeprefix("#/$defs/")]
+    assert decision["properties"]["id"]["enum"] == [str(decision_id)]
+    assert decision["properties"]["status"]["const"] == "confirmed"
+
+
 def test_quote_search_grounding_requires_one_exact_terra_quote():
     exact_quote = "Export filtered orders."
     locator = c.QuoteSearchLocator(

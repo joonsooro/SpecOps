@@ -1146,7 +1146,13 @@ class V4ProductionOrchestrator:
         elif isinstance(request, c.SpecPackageSynthesisRequest):
             model = c.AdmitSpecPackageSynthesisCommand
             command_type = "ADMIT_SPEC_PACKAGE_SYNTHESIS"
-            common.update(target=request.target, identity_plan=request.identity_plan)
+            common.update(
+                target=request.target,
+                identity_plan=request.identity_plan,
+                confirmed_decision_bindings=getattr(
+                    request, "confirmed_decision_bindings", ()
+                ),
+            )
         elif isinstance(request, c.TechnicalContractSynthesisRequest):
             model = c.AdmitTechnicalContractSynthesisCommand
             command_type = "ADMIT_TECHNICAL_CONTRACT_SYNTHESIS"

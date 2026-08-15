@@ -24,6 +24,22 @@ class EvidenceSupportProposal:
     finding_ref: UUID | None = None
 
 
+def _resolve_claim_owner(
+    payload: dict, claim_pointer: str, claim_ref: UUID
+) -> tuple[str, dict]:
+    """Resolve the nearest identity-bearing object that owns a text pointer."""
+
+    owner_pointer = claim_pointer.rsplit("/", 1)[0]
+    while owner_pointer:
+        candidate = resolve_payload_pointer(payload, owner_pointer)
+        if isinstance(candidate, dict) and "id" in candidate:
+            if candidate["id"] != str(claim_ref):
+                raise ValueError("claim ref does not own the exact claim pointer")
+            return owner_pointer, candidate
+        owner_pointer = owner_pointer.rsplit("/", 1)[0]
+    raise ValueError("claim ref does not own the exact claim pointer")
+
+
 def project_evidence_catalog(
     *,
     payload: dict,
@@ -55,10 +71,9 @@ def project_evidence_catalog(
         exact_claim = resolve_payload_pointer(revised, proposal.claim_pointer)
         if not isinstance(exact_claim, str) or not exact_claim.strip():
             raise ValueError("evidence-support claim pointer must resolve to exact text")
-        parent_pointer = proposal.claim_pointer.rsplit("/", 1)[0]
-        parent = resolve_payload_pointer(revised, parent_pointer)
-        if not isinstance(parent, dict) or parent.get("id") != str(proposal.claim_ref):
-            raise ValueError("claim ref does not own the exact claim pointer")
+        parent_pointer, parent = _resolve_claim_owner(
+            revised, proposal.claim_pointer, proposal.claim_ref
+        )
         evidence_field = (
             "source_evidence_refs"
             if "source_evidence_refs" in parent
@@ -120,10 +135,7 @@ def prepare_evidence_support_request(
             raise ValueError("evidence-support proposal references an unknown source")
         if proposal.exact_excerpt not in source.complete_text:
             raise ValueError("evidence-support excerpt is not an exact source substring")
-        parent_pointer = proposal.claim_pointer.rsplit("/", 1)[0]
-        parent = resolve_payload_pointer(payload, parent_pointer)
-        if not isinstance(parent, dict) or parent.get("id") != str(proposal.claim_ref):
-            raise ValueError("claim ref does not own the exact claim pointer")
+        _resolve_claim_owner(payload, proposal.claim_pointer, proposal.claim_ref)
         pairs.append(
             q.ExactEvidenceSupportPair(
                 pair_id=new_id(),

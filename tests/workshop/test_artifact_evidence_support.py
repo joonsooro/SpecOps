@@ -226,3 +226,65 @@ def test_untrusted_embedded_evidence_link_is_rejected_before_quote_projection():
                 ),
             ),
         )
+
+
+def test_nested_text_pointer_is_owned_by_nearest_identity_bearing_record():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    claim = payload["requirements"][0]
+    claim["exclusions"] = ["Pagination is a display concern only."]
+    claim["source_evidence_refs"] = []
+    source = _source("Pagination is a display concern only.\n")
+    proposal = EvidenceSupportProposal(
+        claim_ref=UUID(claim["id"]),
+        claim_pointer="/requirements/0/exclusions/0",
+        source_id=source.source_id,
+        locator="line:1",
+        exact_excerpt="Pagination is a display concern only.",
+        evidence_ref=uuid4(),
+        finding_ref=uuid4(),
+    )
+
+    revised, accepted, dropped = project_evidence_catalog(
+        payload=payload, sources=(source,), proposals=(proposal,)
+    )
+    request = prepare_evidence_support_request(
+        evaluator_run_id=uuid4(),
+        artifact_id=uuid4(),
+        artifact_version=1,
+        record_revision=1,
+        payload=revised,
+        sources=(source,),
+        proposals=(proposal,),
+    )
+
+    assert accepted == (proposal.evidence_ref,)
+    assert dropped == ()
+    assert revised["requirements"][0]["source_evidence_refs"] == [
+        str(proposal.evidence_ref)
+    ]
+    assert request.pairs[0].exact_claim == claim["exclusions"][0]
+
+
+def test_nested_text_pointer_rejects_a_different_record_identity():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    claim = payload["requirements"][0]
+    claim["exclusions"] = ["Pagination is a display concern only."]
+    claim["source_evidence_refs"] = []
+    source = _source("Pagination is a display concern only.\n")
+
+    with pytest.raises(ValueError, match="claim ref does not own"):
+        project_evidence_catalog(
+            payload=payload,
+            sources=(source,),
+            proposals=(
+                EvidenceSupportProposal(
+                    claim_ref=uuid4(),
+                    claim_pointer="/requirements/0/exclusions/0",
+                    source_id=source.source_id,
+                    locator="line:1",
+                    exact_excerpt="Pagination is a display concern only.",
+                    evidence_ref=uuid4(),
+                    finding_ref=uuid4(),
+                ),
+            ),
+        )

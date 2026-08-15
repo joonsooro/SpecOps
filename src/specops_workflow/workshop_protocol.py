@@ -4087,7 +4087,6 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     assessment_runs.c.artifact_version == record["artifact_version"],
                     assessment_runs.c.resulting_record_revision
                     <= record["record_revision"],
-                    assessment_runs.c.resulting_payload_hash == record["payload_hash"],
                     assessments.c.evidence_ref.in_(evidence_refs),
                     assessments.c.disposition == "CANONICAL",
                 )

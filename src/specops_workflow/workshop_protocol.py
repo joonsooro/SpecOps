@@ -2340,7 +2340,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             tuple[c.GuidanceDependencyKind, UUID, int]
         ] = set()
 
-        def admitted_question(question):
+        def admitted_question(question, *, track_dependencies=False):
             row = self._semantic_record_for_ref(connection, command.case_id, question.question_ref)
             if row["entity_kind"] != "QUESTION":
                 raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
@@ -2383,7 +2383,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 require_problem_status(
                     problem_ref, c.SemanticRecordStatus.RESOLVED.value
                 )
-            derived_dependency_refs.update(question_dependency_refs)
+            if track_dependencies:
+                derived_dependency_refs.update(question_dependency_refs)
             return c.AdmittedGuidanceQuestion(
                 question_id=question.question_ref.foundation_id,
                 question_version=question.question_ref.expected_version,
@@ -2449,32 +2450,115 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 }:
                     raise
 
-        merged: list[c.AdmittedGuidanceQuestion] = []
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        eligible_foundation_questions: list[c.AdmittedGuidanceQuestion] = []
+        for row in connection.execute(
+            select(records)
+            .where(
+                records.c.case_id == str(command.case_id),
+                records.c.entity_kind == "QUESTION",
+                records.c.status == c.SemanticRecordStatus.OPEN.value,
+            )
+            .order_by(records.c.foundation_id, records.c.record_version)
+        ).mappings():
+            identity = (row["foundation_id"], row["record_version"])
+            if identity in asked_by_question:
+                continue
+            payload = json.loads(row["payload_json"])
+            try:
+                eligible_foundation_questions.append(
+                    admitted_question(
+                        c.GuidanceQuestion(
+                            question_ref=c.FoundationEntityRef(
+                                ref_kind="FOUNDATION_ID",
+                                foundation_id=UUID(row["foundation_id"]),
+                                expected_version=row["record_version"],
+                            ),
+                            exact_text=payload["text"],
+                            reason=payload["rationale"],
+                        )
+                    )
+                )
+            except _GuidanceBranchUnavailable:
+                continue
+            except FoundationProtocolError as exc:
+                if exc.code is not c.FoundationRejectionCode.INVALID_TRANSITION:
+                    raise
+
+        severity_priority = {
+            c.Severity.CRITICAL.value: 0,
+            c.Severity.HIGH.value: 1,
+            c.Severity.MEDIUM.value: 2,
+            c.Severity.LOW.value: 3,
+        }
+
+        def guidance_priority(question: c.AdmittedGuidanceQuestion) -> int:
+            row = self._semantic_record_for_ref(
+                connection,
+                command.case_id,
+                {
+                    "foundation_id": str(question.question_id),
+                    "expected_version": question.question_version,
+                },
+            )
+            payload = json.loads(row["payload_json"])
+            return min(
+                severity_priority[
+                    json.loads(
+                        self._semantic_record_for_ref(
+                            connection, command.case_id, problem_ref
+                        )["payload_json"]
+                    )["severity"]
+                ]
+                for problem_ref in payload["addresses_problem_refs"]
+            )
+
+        merged_pool: list[c.AdmittedGuidanceQuestion] = []
         merged_ids: set[tuple[UUID, int]] = set()
-        for question in (*prior_available, *admitted_proposed):
+        for question in (
+            *prior_available,
+            *admitted_proposed,
+            *eligible_foundation_questions,
+        ):
             identity = (question.question_id, question.question_version)
             if identity in merged_ids:
                 continue
-            merged.append(question)
+            merged_pool.append(question)
             merged_ids.add(identity)
-            if len(merged) == POST_BOOTSTRAP_RUNWAY_TARGET:
-                break
+        merged = sorted(merged_pool, key=guidance_priority)[
+            :POST_BOOTSTRAP_RUNWAY_TARGET
+        ]
         for ref in command.candidate.do_not_ask_question_refs:
             if self._semantic_record_for_ref(connection, command.case_id, ref)["entity_kind"] != "QUESTION":
                 raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
-        do_not_ask = command.candidate.do_not_ask_question_refs
-        do_not_ask_identities = {
-            (item.foundation_id, item.expected_version) for item in do_not_ask
+        merged_identities = {
+            (item.question_id, item.question_version) for item in merged
         }
-        merged = [
+        # Terra's do-not-ask list cannot suppress a question that Foundation
+        # independently proved safe and eligible. Keep only genuinely unselected
+        # refs in the admitted diagnostic list.
+        do_not_ask = tuple(
             item
-            for item in merged
-            if (item.question_id, item.question_version) not in do_not_ask_identities
-        ]
+            for item in command.candidate.do_not_ask_question_refs
+            if (item.foundation_id, item.expected_version) not in merged_identities
+        )
         if not merged:
             raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
         recommended, *alternate_values = merged
         alternates = tuple(alternate_values)
+        for item in merged:
+            admitted_question(
+                c.GuidanceQuestion(
+                    question_ref=c.FoundationEntityRef(
+                        ref_kind="FOUNDATION_ID",
+                        foundation_id=item.question_id,
+                        expected_version=item.question_version,
+                    ),
+                    exact_text=item.exact_text,
+                    reason=item.reason,
+                ),
+                track_dependencies=True,
+            )
 
         dependencies = []
         admitted_dependency_refs: set[

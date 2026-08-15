@@ -1229,6 +1229,99 @@ def test_guidance_admits_question_after_its_prerequisite_problem_is_resolved(tmp
     }
 
 
+def test_foundation_fills_omitted_eligible_question_and_prioritizes_severity(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    brief = _brief(extra_question_count=1)
+    critical_problem = brief.problems[0].model_copy(
+        update={
+            "candidate_key": "problem-critical-omitted",
+            "severity": c.Severity.CRITICAL,
+            "statement": "A critical consistency decision remains open.",
+            "consequence": "Synthesis would encode an unconfirmed consistency guarantee.",
+        }
+    )
+    critical_question = brief.questions[-1].model_copy(
+        update={
+            "addresses_problem_keys": (critical_problem.candidate_key,),
+            "text": "Which bounded consistency guarantee should apply?",
+            "rationale": "The critical open decision must be resolved before synthesis.",
+        }
+    )
+    brief = brief.model_copy(
+        update={
+            "problems": (*brief.problems, critical_problem),
+            "questions": (*brief.questions[:-1], critical_question),
+        }
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_INTERVIEW_BRIEF",
+        analyzer_run_id=RUN_ID,
+        context_id=CONTEXT_ID,
+        provider_request_hash=REQUEST_HASH,
+        candidate=brief,
+    )
+    brief_receipt = foundation.execute(c.AdmitInterviewBriefCommand(**values))
+    mappings = {
+        item.candidate_key: item
+        for item in brief_receipt.identity_mappings
+        if item.entity_kind == "QUESTION"
+    }
+
+    def question_ref(candidate_key: str) -> c.FoundationEntityRef:
+        mapping = mappings[candidate_key]
+        return c.FoundationEntityRef(
+            ref_kind="FOUNDATION_ID",
+            foundation_id=mapping.foundation_id,
+            expected_version=mapping.record_version,
+        )
+
+    selected_ref = question_ref("question-1")
+    omitted_ref = question_ref("question-5")
+    run_id = uuid4()
+    request_hash = "sha256:" + "8" * 64
+    candidate = c.GuidanceCandidate(
+        protocol_version="1.0.0",
+        output_type="GUIDANCE_CANDIDATE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        request_hash=request_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        recommended_question=c.GuidanceQuestion(
+            question_ref=selected_ref,
+            exact_text=brief.questions[0].text,
+            reason=brief.questions[0].rationale,
+        ),
+        safe_alternates=(),
+        do_not_ask_question_refs=(omitted_ref,),
+        dependencies=(
+            c.GuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_ref=None,
+            ),
+        ),
+        acknowledgement_suggestion="The next admitted clarification is ready.",
+    )
+    admit_values = _base(foundation.case_revision(CASE_ID))
+    admit_values.update(
+        command_type="ADMIT_GUIDANCE",
+        analyzer_run_id=run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=request_hash,
+        candidate=candidate,
+    )
+
+    foundation.execute(c.AdmitGuidanceCommand(**admit_values))
+
+    runway = foundation.runway_projection(CASE_ID)
+    admitted = foundation.current_admitted_guidance(CASE_ID)
+    assert runway["depth"] == 5
+    assert runway["questions"][0]["question_id"] == str(omitted_ref.foundation_id)
+    assert omitted_ref not in admitted.do_not_ask_questions
+
+
 def test_guidance_quarantines_question_while_its_prerequisite_is_open(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)

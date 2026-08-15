@@ -3200,6 +3200,17 @@
             "title": "Protocol Version",
             "type": "string"
           },
+          "residual_quality_risk_acceptance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/V4_ResidualQualityRiskAcceptance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "session_id": {
             "format": "uuid",
             "title": "Session Id",
@@ -4988,6 +4999,45 @@
         "title": "RecordFinalTranscriptCommand",
         "type": "object"
       },
+      "V4_ResidualQualityRiskAcceptance": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Acceptance Statement",
+            "type": "string"
+          },
+          "accepted_failed_rule_ids": {
+            "items": {
+              "pattern": "^SPEC-Q-[0-9]{3}$",
+              "type": "string"
+            },
+            "maxItems": 26,
+            "minItems": 1,
+            "title": "Accepted Failed Rule Ids",
+            "type": "array"
+          },
+          "audit_id": {
+            "format": "uuid",
+            "title": "Audit Id",
+            "type": "string"
+          },
+          "policy_id": {
+            "const": "V0_EXPLICIT_RESIDUAL_SPEC_RISK",
+            "title": "Policy Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_id",
+          "audit_id",
+          "accepted_failed_rule_ids",
+          "acceptance_statement"
+        ],
+        "title": "ResidualQualityRiskAcceptance",
+        "type": "object"
+      },
       "V4_ReviewConsideration": {
         "additionalProperties": false,
         "properties": {
@@ -6749,6 +6799,16 @@
                     "format": "uuid",
                     "title": "Confirmation Transcript Event Id",
                     "type": "string"
+                  },
+                  "residual_quality_risk_acceptance": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/V4_ResidualQualityRiskAcceptance"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [

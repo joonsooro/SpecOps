@@ -2165,12 +2165,35 @@ class ArtifactConfirmationBinding(ArtifactReviewSubjectBinding):
     view_hash: Sha256
 
 
+class ResidualQualityRiskAcceptance(ContractModel):
+    policy_id: Literal["V0_EXPLICIT_RESIDUAL_SPEC_RISK"]
+    audit_id: UUID
+    accepted_failed_rule_ids: Annotated[
+        tuple[
+            Annotated[
+                str,
+                StringConstraints(strict=True, pattern=r"^SPEC-Q-[0-9]{3}$"),
+            ],
+            ...,
+        ],
+        Field(min_length=1, max_length=26),
+    ]
+    acceptance_statement: Statement
+
+    @model_validator(mode="after")
+    def exact_ordered_rule_set(self) -> ResidualQualityRiskAcceptance:
+        if tuple(sorted(set(self.accepted_failed_rule_ids))) != self.accepted_failed_rule_ids:
+            raise ValueError("accepted failed rule IDs must be unique and sorted")
+        return self
+
+
 class ConfirmArtifactCommand(StrictRevisionCommandEnvelope):
     command_type: Literal["CONFIRM_ARTIFACT"]
     actor_authentication: ActorAuthentication
     binding: ArtifactConfirmationBinding
     confirmation_transcript_event_id: UUID
     approved_exception_ids: Annotated[tuple[UUID, ...], Field(max_length=100)]
+    residual_quality_risk_acceptance: ResidualQualityRiskAcceptance | None = None
 
     @model_validator(mode="after")
     def human_actor(self) -> ConfirmArtifactCommand:
@@ -2186,6 +2209,11 @@ class ConfirmArtifactCommand(StrictRevisionCommandEnvelope):
             raise ValueError("verbal assertion must bind the artifact confirmation transcript")
         if len(self.approved_exception_ids) != len(set(self.approved_exception_ids)):
             raise ValueError("approved exception IDs must be unique")
+        if (
+            self.residual_quality_risk_acceptance is not None
+            and self.binding.artifact_type != "SPEC_PACKAGE"
+        ):
+            raise ValueError("residual quality risk acceptance applies only to a Spec Package")
         return self
 
 

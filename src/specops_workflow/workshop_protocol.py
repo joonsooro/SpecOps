@@ -4229,12 +4229,19 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if row is None:
             raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
         self._require_participant(connection, command.case_id, command.acting_actor_id)
-        if self._participant_transcript(
+        transcript = self._participant_transcript(
             connection,
             command.case_id,
             command.confirmation_transcript_event_id,
             command.acting_actor_id,
-        ) is None:
+        )
+        if transcript is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+        if (
+            command.residual_quality_risk_acceptance is not None
+            and transcript.text
+            != command.residual_quality_risk_acceptance.acceptance_statement
+        ):
             raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
         if command.approved_exception_ids:
             raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
@@ -4247,8 +4254,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 records.c.record_revision == command.binding.record_revision,
             )
         ).mappings().one()
-        audit, governance = self.require_quality_confirmation_gate(
-            connection, dict(artifact), dict(row)
+        audit, governance, residual_risk = self.require_quality_confirmation_gate(
+            connection, dict(artifact), dict(row), command
         )
         required_domain = "BUSINESS" if artifact["artifact_type"] == "SPEC_PACKAGE" else "TECHNICAL"
         if not self._has_domain_authority(
@@ -4263,6 +4270,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             view=dict(row),
             command=command,
             confirmed_case_revision=prior_revision + 1,
+            residual_risk=residual_risk,
         )
         try:
             validate_governance(artifact["artifact_type"], governance)

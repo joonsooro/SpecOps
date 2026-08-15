@@ -1743,6 +1743,8 @@ export interface components {
              * @constant
              */
             protocol_version: "1.0.0";
+            /** @default null */
+            residual_quality_risk_acceptance: components["schemas"]["V4_ResidualQualityRiskAcceptance"] | null;
             /**
              * Session Id
              * Format: uuid
@@ -2435,6 +2437,23 @@ export interface components {
             session_id: string;
             transcript: components["schemas"]["V4_TranscriptFinalizedEvent"];
         };
+        /** ResidualQualityRiskAcceptance */
+        V4_ResidualQualityRiskAcceptance: {
+            /** Acceptance Statement */
+            acceptance_statement: string;
+            /** Accepted Failed Rule Ids */
+            accepted_failed_rule_ids: string[];
+            /**
+             * Audit Id
+             * Format: uuid
+             */
+            audit_id: string;
+            /**
+             * Policy Id
+             * @constant
+             */
+            policy_id: "V0_EXPLICIT_RESIDUAL_SPEC_RISK";
+        };
         /** ReviewConsideration */
         V4_ReviewConsideration: {
             consideration_kind: components["schemas"]["V4_ReviewConsiderationKind"];
@@ -3099,6 +3118,7 @@ export interface operations {
                      * Format: uuid
                      */
                     confirmation_transcript_event_id: string;
+                    residual_quality_risk_acceptance?: components["schemas"]["V4_ResidualQualityRiskAcceptance"] | null;
                 };
             };
         };

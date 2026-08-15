@@ -1497,6 +1497,7 @@ class V4ProductionOrchestrator:
         *,
         actor_authentication: c.ActorAuthentication,
         confirmation_transcript_event_id: UUID,
+        residual_quality_risk_acceptance: c.ResidualQualityRiskAcceptance | None = None,
     ) -> c.ArtifactConfirmationReceipt:
         projection = self.foundation.current_artifact_review(self.case_id)
         if projection is None or projection["confirmed"]:
@@ -1530,6 +1531,7 @@ class V4ProductionOrchestrator:
             ),
             confirmation_transcript_event_id=confirmation_transcript_event_id,
             approved_exception_ids=(),
+            residual_quality_risk_acceptance=residual_quality_risk_acceptance,
         )
         receipt = self.foundation.execute(c.ConfirmArtifactCommand(**values))
         assert isinstance(receipt, c.ArtifactConfirmationReceipt)

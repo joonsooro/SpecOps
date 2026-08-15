@@ -85,6 +85,7 @@ class ArtifactConfirmationIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     actor_authentication: c.ActorAuthentication
     confirmation_transcript_event_id: UUID
+    residual_quality_risk_acceptance: c.ResidualQualityRiskAcceptance | None = None
 
 
 class DecisionResponseIntent(BaseModel):
@@ -345,6 +346,7 @@ async def confirm_current_artifact(
         return request.app.state.workshop_protocol_orchestrator.confirm_current_artifact(
             actor_authentication=value.actor_authentication,
             confirmation_transcript_event_id=value.confirmation_transcript_event_id,
+            residual_quality_risk_acceptance=value.residual_quality_risk_acceptance,
         )
     except FoundationProtocolError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code.value}) from None

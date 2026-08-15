@@ -891,6 +891,199 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
         assert connection.execute(select(func.count()).select_from(audit_events)).scalar_one() == 7
 
 
+def test_v0_residual_spec_risk_acceptance_is_exact_durable_and_audit_immutable(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    artifact_id = _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    candidate = all_pass_candidate(bundle)
+    q004 = next(item for item in candidate.assessments if item.rule_id == "SPEC-Q-004")
+    q004 = q004.model_copy(
+        update={
+            "result": q.SemanticAssessmentResult.FAIL,
+            "artifact_pointers": ("/actors",),
+            "explanation": "One actor has an unresolved authority definition.",
+            "findings": (
+                q.QualityFindingCandidate(
+                    candidate_key="actor-authority-unresolved",
+                    severity="HIGH",
+                    category="ACTOR_AUTHORITY",
+                    message="Define the actor authority before a production release.",
+                    artifact_pointers=("/actors",),
+                    evidence_ids=(),
+                    transcript_event_ids=(),
+                ),
+            ),
+        }
+    )
+    candidate = candidate.model_copy(
+        update={
+            "assessments": tuple(
+                q004 if item.rule_id == q004.rule_id else item
+                for item in candidate.assessments
+            )
+        }
+    )
+    audit = _admit_quality_candidate(foundation, bundle, candidate)
+    assert audit.outcome is q.AuditOutcome.BLOCKED
+    assert tuple(
+        item.rule_id
+        for item in audit.combined_rule_results
+        if item.result is q.ComponentResult.FAIL
+    ) == ("SPEC-Q-004",)
+    assert {
+        item.rule_id
+        for item in audit.combined_rule_results
+        if item.result is q.ComponentResult.PENDING
+    } == {"SPEC-Q-024", "SPEC-Q-025"}
+
+    record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    review_values = _base(foundation.case_revision(CASE_ID))
+    review_values.update(
+        command_type="MATERIALIZE_ARTIFACT_REVIEW",
+        subject=c.ArtifactReviewSubjectBinding(
+            artifact_type="SPEC_PACKAGE",
+            artifact_id=artifact_id,
+            artifact_key=record["artifact_key"],
+            artifact_version=record["artifact_version"],
+            record_revision=record["record_revision"],
+            payload_hash=record["payload_hash"],
+        ),
+        view_mode="REVIEW",
+    )
+    review = foundation.execute(c.MaterializeArtifactReviewCommand(**review_values))
+    statement = (
+        "I accept the listed residual Spec quality failures for this exact V0 review "
+        "and authorize Technical Contract continuation."
+    )
+    transcript = _transcript_command(
+        foundation.case_revision(CASE_ID), 1, statement
+    )
+    foundation.execute(transcript)
+    projection = foundation.current_artifact_review(CASE_ID)
+    source = projection["view"]["source"]
+    binding = c.ArtifactConfirmationBinding(
+        artifact_type="SPEC_PACKAGE",
+        artifact_id=UUID(source["artifact_id"]),
+        artifact_key=source["artifact_key"],
+        artifact_version=source["artifact_version"],
+        record_revision=source["record_revision"],
+        payload_hash=source["payload_hash"],
+        confirmation_id=review.confirmation_id,
+        view_id=review.view_id,
+        view_hash=review.view_hash,
+    )
+    authentication = c.VerbalSelfAssertion(
+        authentication_method=c.ActorAuthenticationMethod.VERBAL_SELF_ASSERTION,
+        assurance_level=c.AssuranceLevel.SELF_ASSERTED,
+        actor_id=PM_ID,
+        asserted_display_name="PM",
+        claimed_role="Product Manager",
+        assertion_transcript_event_id=transcript.transcript.event_id,
+    )
+
+    def confirm_command(*, failed_rule_ids, acceptance_statement=statement):
+        values = _base(foundation.case_revision(CASE_ID), actor=PM_ID)
+        values.update(
+            command_type="CONFIRM_ARTIFACT",
+            actor_authentication=authentication,
+            binding=binding,
+            confirmation_transcript_event_id=transcript.transcript.event_id,
+            approved_exception_ids=(),
+            residual_quality_risk_acceptance=c.ResidualQualityRiskAcceptance(
+                policy_id="V0_EXPLICIT_RESIDUAL_SPEC_RISK",
+                audit_id=audit.audit_id,
+                accepted_failed_rule_ids=failed_rule_ids,
+                acceptance_statement=acceptance_statement,
+            ),
+        )
+        return c.ConfirmArtifactCommand(**values)
+
+    audits = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_audits"]
+    with foundation.engine.connect() as connection:
+        immutable_before = dict(
+            connection.execute(
+                select(audits).where(audits.c.audit_id == str(audit.audit_id))
+            ).mappings().one()
+        )
+    with pytest.raises(FoundationProtocolError) as mismatch:
+        foundation.execute(confirm_command(failed_rule_ids=("SPEC-Q-005",)))
+    assert mismatch.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+    with pytest.raises(FoundationProtocolError) as transcript_mismatch:
+        foundation.execute(
+            confirm_command(
+                failed_rule_ids=("SPEC-Q-004",),
+                acceptance_statement="I accept a different statement.",
+            )
+        )
+    assert (
+        transcript_mismatch.value.code
+        is c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED
+    )
+
+    command = confirm_command(failed_rule_ids=("SPEC-Q-004",))
+    confirmed = foundation.execute(command)
+    assert foundation.execute(command) == confirmed
+    exact = foundation.confirmed_spec_binding(CASE_ID)
+    assert exact is not None
+    assert exact.foundation_artifact_id == artifact_id
+    assert exact.record_revision == source["record_revision"]
+    assert exact.payload_hash == source["payload_hash"]
+
+    phases = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_gate_phases"]
+    confirmations = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_confirmations"]
+    with foundation.engine.connect() as connection:
+        immutable_after = dict(
+            connection.execute(
+                select(audits).where(audits.c.audit_id == str(audit.audit_id))
+            ).mappings().one()
+        )
+        risk_phase = connection.execute(
+            select(phases).where(
+                phases.c.audit_id == str(audit.audit_id),
+                phases.c.phase == "RESIDUAL_RISK_ACCEPTANCE",
+            )
+        ).mappings().one()
+        confirmation_count = connection.execute(
+            select(func.count()).select_from(confirmations)
+        ).scalar_one()
+    assert immutable_after == immutable_before
+    evidence = json.loads(risk_phase["evidence_json"])
+    assert evidence["audit_outcome"] == "BLOCKED"
+    assert evidence["accepted_failed_rule_ids"] == ["SPEC-Q-004"]
+    assert evidence["approved_finding_ids"] == [str(audit.findings[0].finding_id)]
+    assert evidence["acceptance_statement"] == statement
+    governance = json.loads(
+        foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")["governance_json"]
+    )
+    results = {
+        item["rule_id"]: item["result"]
+        for item in governance["readiness_audit"]["rule_results"]
+    }
+    assert results["SPEC-Q-004"] == "fail"
+    assert results["SPEC-Q-024"] == "pass"
+    assert results["SPEC-Q-025"] == "pass"
+    assert governance["confirmation"]["exceptions"] == [
+        str(audit.findings[0].finding_id)
+    ]
+
+    stale = command.model_copy(
+        update={
+            "command_id": uuid4(),
+            "idempotency_key": f"idem-{uuid4()}",
+            "expected_case_revision": foundation.case_revision(CASE_ID),
+        }
+    )
+    with pytest.raises(FoundationProtocolError) as duplicate:
+        foundation.execute(stale)
+    assert duplicate.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+    with foundation.engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(confirmations)
+        ).scalar_one() == confirmation_count == 1
+
+
 def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependencies(tmp_path):
     url, foundation = _runtime(tmp_path)
     _activate(foundation)

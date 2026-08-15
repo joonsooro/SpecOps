@@ -1591,10 +1591,13 @@ class ArtifactQualityFoundationMixin:
             )
         )
 
-    def require_quality_confirmation_gate(self, connection, artifact, view):
+    def require_quality_confirmation_gate(self, connection, artifact, view, command):
         from .workshop_protocol import FoundationProtocolError
 
-        audit = self.quality_audit_for_record(connection, artifact, require_pass=True)
+        acceptance = command.residual_quality_risk_acceptance
+        audit = self.quality_audit_for_record(
+            connection, artifact, require_pass=acceptance is None
+        )
         phases = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_gate_phases"]
         phase = connection.execute(
             select(phases).where(
@@ -1626,11 +1629,69 @@ class ArtifactQualityFoundationMixin:
             for item in target["rule_results"]
             if item["result"] in {"pass", "not_applicable"}
         }
-        if actual != expected or any(
-            item["result"] == "fail" for item in target["rule_results"]
+        failed_in_governance = {
+            item["rule_id"]
+            for item in target["rule_results"]
+            if item["result"] == "fail"
+        }
+        if acceptance is None:
+            if actual != expected or failed_in_governance:
+                raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+            return audit, governance, None
+
+        if (
+            artifact["artifact_type"] != "SPEC_PACKAGE"
+            or audit["outcome"]
+            not in {
+                q.AuditOutcome.BLOCKED.value,
+                q.AuditOutcome.NEEDS_CLARIFICATION.value,
+            }
+            or str(acceptance.audit_id) != audit["audit_id"]
         ):
-            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
-        return audit, governance
+            raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+        combined = q.ArtifactQualityAuditReceipt.model_validate_json(
+            audit["receipt_json"]
+        ).combined_rule_results
+        failed = tuple(
+            sorted(
+                item.rule_id
+                for item in combined
+                if item.result is q.ComponentResult.FAIL
+            )
+        )
+        pending = {
+            item.rule_id
+            for item in combined
+            if item.result is q.ComponentResult.PENDING
+        }
+        expected_pending = {"SPEC-Q-024", "SPEC-Q-025"}
+        if (
+            not failed
+            or failed != acceptance.accepted_failed_rule_ids
+            or pending != expected_pending
+            or failed_in_governance != set(failed)
+            or actual != expected - set(failed)
+        ):
+            raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+        finding_ids = tuple(
+            sorted(
+                {
+                    finding_id
+                    for item in combined
+                    if item.rule_id in failed
+                    for finding_id in item.finding_refs
+                },
+                key=str,
+            )
+        )
+        return audit, governance, {
+            "policy_id": acceptance.policy_id,
+            "audit_id": str(acceptance.audit_id),
+            "audit_outcome": audit["outcome"],
+            "accepted_failed_rule_ids": list(failed),
+            "approved_finding_ids": [str(value) for value in finding_ids],
+            "acceptance_statement": acceptance.acceptance_statement,
+        }
 
     def finalize_confirmation_quality(
         self,
@@ -1642,6 +1703,7 @@ class ArtifactQualityFoundationMixin:
         view,
         command,
         confirmed_case_revision,
+        residual_risk,
     ):
         prefix = "SPEC" if artifact["artifact_type"] == "SPEC_PACKAGE" else "TECH"
         authority_validation_id = self.new_id()
@@ -1651,7 +1713,12 @@ class ArtifactQualityFoundationMixin:
             "finding_refs": [],
             "explanation": (
                 "Foundation atomically validated the current audit, exact immutable review "
-                "projection, participant transcript, actor authority, and artifact binding."
+                "projection, participant transcript, actor authority, artifact binding, and "
+                + (
+                    "the explicit residual-quality risk acceptance."
+                    if residual_risk is not None
+                    else "the no-failure quality confirmation gate."
+                )
             ),
         }
         target = (
@@ -1691,7 +1758,11 @@ class ArtifactQualityFoundationMixin:
                 "transcript_ref": str(command.confirmation_transcript_event_id),
                 "review_view": review_binding,
                 "confirmed_at": _instant(now),
-                "exceptions": [str(value) for value in command.approved_exception_ids],
+                "exceptions": (
+                    residual_risk["approved_finding_ids"]
+                    if residual_risk is not None
+                    else [str(value) for value in command.approved_exception_ids]
+                ),
             }
         else:
             target.update(
@@ -1723,6 +1794,40 @@ class ArtifactQualityFoundationMixin:
                 "authorized_at": _instant(now),
             }
         phases = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_gate_phases"]
+        if residual_risk is not None:
+            connection.execute(
+                insert(phases).values(
+                    phase_id=str(self.new_id()),
+                    audit_id=audit["audit_id"],
+                    case_id=artifact["case_id"],
+                    phase="RESIDUAL_RISK_ACCEPTANCE",
+                    rule_id=q24["rule_id"],
+                    artifact_id=artifact["artifact_id"],
+                    artifact_version=artifact["artifact_version"],
+                    record_revision=artifact["record_revision"],
+                    payload_hash=artifact["payload_hash"],
+                    view_id=view["view_id"],
+                    view_hash=view["view_hash"],
+                    result="PASS",
+                    evidence_json=_json(
+                        {
+                            **residual_risk,
+                            "confirmation_id": str(command.binding.confirmation_id),
+                            "actor_id": str(command.acting_actor_id),
+                            "transcript_event_id": str(
+                                command.confirmation_transcript_event_id
+                            ),
+                            "artifact_id": artifact["artifact_id"],
+                            "artifact_version": artifact["artifact_version"],
+                            "record_revision": artifact["record_revision"],
+                            "payload_hash": artifact["payload_hash"],
+                            "view_id": view["view_id"],
+                            "view_hash": view["view_hash"],
+                        }
+                    ),
+                    created_at=_instant(now),
+                )
+            )
         connection.execute(
             insert(phases).values(
                 phase_id=str(self.new_id()),

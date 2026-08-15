@@ -1363,3 +1363,54 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
                 WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
             )
         ).scalar_one() == 0
+
+
+def test_artifact_admission_accepts_unused_bounded_identity_capacity(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID,
+        "SPEC_PACKAGE",
+        (*identity_kinds.values(), "REQUIREMENT"),
+    )
+    payload = bind_planned_identities(
+        payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities[: len(identity_kinds)],
+                strict=True,
+            )
+        },
+    )
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.0",
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+
+    receipt = foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
+
+    assert receipt.artifact_type == "SPEC_PACKAGE"
+    assert foundation.case_revision(CASE_ID) == 5

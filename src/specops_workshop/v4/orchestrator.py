@@ -35,7 +35,7 @@ from .openai_adapter import (
     ProviderSourceUpload,
     StoredConversationOpenAIAdapter,
 )
-from .artifact_quality import build_audit_bundle
+from .artifact_quality import build_audit_bundle, load_quality_rules
 from .artifact_quality_adapter import (
     ArtifactQualityEvaluator,
     PreparedArtifactQualityContext,
@@ -1478,11 +1478,19 @@ class V4ProductionOrchestrator:
         if self.foundation.runway_projection(self.case_id)["depth"] < 3:
             raise ValueError("active interview runway is endangered")
         context = await self.ensure_context()
-        entity_kinds = self.foundation.artifact_identity_allocation_policy(artifact_type)
+        snapshot = self.foundation.semantic_snapshot(self.case_id)
+        confirmed_decisions = (
+            self.foundation.confirmed_decision_synthesis_bindings(self.case_id)
+            if artifact_type == "SPEC_PACKAGE"
+            else ()
+        )
+        entity_kinds = self.foundation.artifact_identity_allocation_policy(
+            artifact_type,
+            confirmed_decision_count=len(confirmed_decisions),
+        )
         plan = self.foundation.issue_artifact_identity_plan(
             self.case_id, artifact_type, entity_kinds
         )
-        snapshot = self.foundation.semantic_snapshot(self.case_id)
         semantic_json = canonical_bytes(snapshot).decode("utf-8")
         if domain_hash(
             "SPECOPS:SEMANTIC_STATE:v1", snapshot.model_dump(mode="json")
@@ -1509,6 +1517,13 @@ class V4ProductionOrchestrator:
                 c.SpecPackageSynthesisRequest,
                 dict(
                     common,
+                    quality_rule_manifest=tuple(
+                        c.ArtifactSynthesisQualityRule.model_validate(
+                            item.model_dump()
+                        )
+                        for item in load_quality_rules(q.ArtifactType.SPEC_PACKAGE)
+                    ),
+                    confirmed_decision_bindings=confirmed_decisions,
                     payload_schema_id="spec-package-payload",
                     payload_schema_version="4.0.0",
                     requested_output="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",

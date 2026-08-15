@@ -1154,6 +1154,91 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             canonical_payload_json=row["payload_json"],
         )
 
+    def confirmed_decision_synthesis_bindings(
+        self, case_id: UUID
+    ) -> tuple[c.ConfirmedDecisionSynthesisBinding, ...]:
+        """Project exact committed decision ceremonies for Spec synthesis."""
+
+        snapshot = self.semantic_snapshot(case_id)
+        confirmed = {
+            item.decision_id: item
+            for item in snapshot.decisions
+            if item.status is c.SemanticRecordStatus.CONFIRMED
+        }
+        if not confirmed:
+            return ()
+        events = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_events"]
+        views = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        actor_ref = self.case_actor(case_id, "PM")
+        result: dict[UUID, c.ConfirmedDecisionSynthesisBinding] = {}
+        with self.engine.connect() as connection:
+            applied = connection.execute(
+                select(events)
+                .where(
+                    events.c.case_id == str(case_id),
+                    events.c.event_type == "APPLY_DECISION_BATCH_RESPONSE_APPLIED",
+                )
+                .order_by(events.c.event_sequence.desc())
+            ).mappings().all()
+            for event in applied:
+                receipt = json.loads(event["event_json"])
+                view_row = connection.execute(
+                    select(views).where(
+                        views.c.case_id == str(case_id),
+                        views.c.view_id == receipt["decision_batch_view_id"],
+                    )
+                ).mappings().one()
+                view = json.loads(view_row["view_json"])
+                view_items = {
+                    UUID(item["pending_decision_id"]): item for item in view["items"]
+                }
+                transcript_event = connection.execute(
+                    select(events)
+                    .where(
+                        events.c.case_id == str(case_id),
+                        events.c.event_sequence < event["event_sequence"],
+                        events.c.event_type == "RECORD_FINAL_TRANSCRIPT_APPLIED",
+                    )
+                    .order_by(events.c.event_sequence.desc())
+                    .limit(1)
+                ).mappings().one()
+                transcript_receipt = json.loads(transcript_event["event_json"])
+                command = receipt["command"]
+                for item in receipt["item_results"]:
+                    if item["outcome"] != c.DecisionItemOutcome.COMMITTED.value:
+                        continue
+                    decision_id = UUID(item["committed_decision_id"])
+                    if decision_id not in confirmed or decision_id in result:
+                        continue
+                    decision = confirmed[decision_id]
+                    review_item = view_items[decision_id]
+                    result[decision_id] = c.ConfirmedDecisionSynthesisBinding(
+                        decision_id=decision.decision_id,
+                        decision_version=decision.decision_version,
+                        classification=decision.classification,
+                        statement=decision.statement,
+                        rationale=decision.rationale,
+                        alternatives_considered=decision.alternatives_considered,
+                        problem_ids=decision.problem_ids,
+                        evidence_ids=decision.evidence_ids,
+                        confirmation_id=UUID(command["command_id"]),
+                        decision_batch_view_id=UUID(view["view_id"]),
+                        decision_batch_view_hash=view["view_hash"],
+                        review_item_id=UUID(review_item["review_item_id"]),
+                        confirmed_case_revision=command["resulting_case_revision"],
+                        actor_ref=actor_ref,
+                        authority_validation_id=UUID(command["command_id"]),
+                        transcript_event_id=UUID(
+                            transcript_receipt["transcript_event_id"]
+                        ),
+                        confirmed_at=datetime.fromisoformat(
+                            command["occurred_at"].replace("Z", "+00:00")
+                        ),
+                    )
+        if set(result) != set(confirmed):
+            raise ValueError("confirmed decision lacks an exact response ceremony")
+        return tuple(result[key] for key in sorted(result, key=str))
+
     def issue_artifact_identity_plan(
         self,
         case_id: UUID,
@@ -1248,17 +1333,38 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
 
     @staticmethod
-    def artifact_identity_allocation_policy(artifact_type: str) -> tuple[str, ...]:
-        """Server-owned complete allocation policy derived from V4 payload paths."""
+    def artifact_identity_allocation_policy(
+        artifact_type: str, *, confirmed_decision_count: int = 0
+    ) -> tuple[str, ...]:
+        """Server-owned bounded identity capacity derived from V4 payload paths."""
 
         policies = {
-            "SPEC_PACKAGE": (
-                "PACKAGE_ITEM", "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING", "ACTOR",
-                "GLOSSARY_TERM", "OUTCOME", "SCOPE_ITEM", "SCOPE_ITEM",
-                "SCOPE_BOUNDARY", "JOURNEY", "BEHAVIOUR_RULE", "BEHAVIOUR_RULE",
-                "BEHAVIOUR_RULE", "REQUIREMENT", "DATA_RULE", "EXPERIENCE_STATE",
-                "SCENARIO", "QUALITY_ATTRIBUTE", "CONSTRAINT", "DEPENDENCY", "RISK",
-                "DECISION", "OPEN_ITEM", "ACCEPTANCE_CHECK",
+            "SPEC_PACKAGE": tuple(
+                kind
+                for kind, count in (
+                    ("PACKAGE_ITEM", 1),
+                    ("EVIDENCE", 8),
+                    ("SEMANTIC_EVIDENCE_FINDING", 8),
+                    ("ACTOR", 1),
+                    ("GLOSSARY_TERM", 4),
+                    ("OUTCOME", 1),
+                    ("SCOPE_ITEM", 3),
+                    ("SCOPE_BOUNDARY", 1),
+                    ("JOURNEY", 2),
+                    ("BEHAVIOUR_RULE", 8),
+                    ("REQUIREMENT", 7),
+                    ("DATA_RULE", 7),
+                    ("EXPERIENCE_STATE", 7),
+                    ("SCENARIO", 7),
+                    ("QUALITY_ATTRIBUTE", 3),
+                    ("CONSTRAINT", 3),
+                    ("DEPENDENCY", 2),
+                    ("RISK", 3),
+                    ("DECISION", min(26, max(4, confirmed_decision_count + 2))),
+                    ("OPEN_ITEM", 2),
+                    ("ACCEPTANCE_CHECK", 10),
+                )
+                for _ in range(count)
             ),
             "TECHNICAL_CONTRACT": (
                 "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING", "ARCHITECTURE_NODE",
@@ -3116,7 +3222,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             self._validate_confirmed_spec_lineage(connection, command, prior_revision)
         planned = {str(item.foundation_id): item.entity_kind for item in command.identity_plan.planned_identities}
         identifier_kinds = self._artifact_identity_kinds(payload)
-        if set(identifier_kinds) != set(planned) or any(
+        if not set(identifier_kinds).issubset(planned) or any(
             planned[identity] != kind for identity, kind in identifier_kinds.items()
         ):
             raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)

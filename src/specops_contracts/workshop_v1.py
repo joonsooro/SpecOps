@@ -1197,6 +1197,50 @@ class ArtifactSynthesisIdentityPlan(ContractModel):
         return self
 
 
+class ConfirmedDecisionSynthesisBinding(ContractModel):
+    """Exact Foundation ceremony needed to project one confirmed decision."""
+
+    decision_id: UUID
+    decision_version: PositiveInt
+    classification: Domain
+    statement: Statement
+    rationale: Statement
+    alternatives_considered: Annotated[tuple[Statement, ...], Field(max_length=20)]
+    problem_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=25)]
+    evidence_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=100)]
+    confirmation_id: UUID
+    decision_batch_view_id: UUID
+    decision_batch_view_hash: Sha256
+    review_item_id: UUID
+    confirmed_case_revision: PositiveInt
+    actor_ref: UUID
+    authority_validation_id: UUID
+    transcript_event_id: UUID
+    confirmed_at: datetime
+
+
+class ArtifactSynthesisQualityRule(ContractModel):
+    """Exact quality-contract rule supplied as a construction constraint."""
+
+    rule_id: Annotated[
+        str, StringConstraints(strict=True, pattern=r"^(?:SPEC|TECH)-Q-[0-9]{3}$")
+    ]
+    name: Statement
+    dimension: ShortText
+    check_types: Annotated[
+        tuple[Literal["structural", "referential", "semantic", "authority", "human"], ...],
+        Field(min_length=1, max_length=5),
+    ]
+    gate: Literal["block_confirmation", "block_handoff"]
+    primary_evaluator: Literal["analyzer", "foundation"]
+    requirement: Statement
+    pass_condition: Statement
+    evidence_of_pass: Statement
+    failure_effect: Literal[
+        "NEEDS_CLARIFICATION", "BLOCKED", "CONDITIONAL", "REJECT_MUTATION"
+    ]
+
+
 class ConfirmedSpecSynthesisBinding(ContractModel):
     foundation_artifact_id: UUID
     artifact_key: Annotated[str, StringConstraints(strict=True, pattern=r"^SPEC-[A-Z0-9][A-Z0-9-]{2,63}$")]
@@ -1219,6 +1263,12 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
     identity_plan: ArtifactSynthesisIdentityPlan
     foundation_snapshot: FoundationSemanticSnapshot
     canonical_semantic_state_json: JsonObjectText
+    quality_rule_manifest: Annotated[
+        tuple[ArtifactSynthesisQualityRule, ...], Field(min_length=26, max_length=26)
+    ]
+    confirmed_decision_bindings: Annotated[
+        tuple[ConfirmedDecisionSynthesisBinding, ...], Field(max_length=26)
+    ]
     payload_schema_id: Literal["spec-package-payload"]
     payload_schema_version: Literal["4.0.0"]
     requested_output: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
@@ -1240,6 +1290,27 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
             raise ValueError("request and snapshot case revisions must match")
         if self.source_set_hash != self.foundation_snapshot.source_set_hash:
             raise ValueError("request and snapshot source-set hashes must match")
+        expected_rules = tuple(f"SPEC-Q-{index:03d}" for index in range(1, 27))
+        if tuple(item.rule_id for item in self.quality_rule_manifest) != expected_rules:
+            raise ValueError("Spec synthesis requires the exact ordered 26-rule manifest")
+        snapshot_decisions = {
+            (item.decision_id, item.decision_version): item
+            for item in self.foundation_snapshot.decisions
+            if item.status is SemanticRecordStatus.CONFIRMED
+        }
+        supplied = {
+            (item.decision_id, item.decision_version): item
+            for item in self.confirmed_decision_bindings
+        }
+        if set(supplied) != set(snapshot_decisions):
+            raise ValueError("Spec synthesis must bind every confirmed Foundation decision")
+        if any(
+            supplied[key].statement != snapshot_decisions[key].statement
+            or supplied[key].problem_ids != snapshot_decisions[key].problem_ids
+            or supplied[key].evidence_ids != snapshot_decisions[key].evidence_ids
+            for key in supplied
+        ):
+            raise ValueError("confirmed decision synthesis binding changed semantic content")
         return self
 
 
@@ -2415,10 +2486,12 @@ __all__ = [
     "AnalyzeFinalTurnRequest",
     "ApplyDecisionBatchResponseCommand",
     "ArtifactConfirmationBinding",
+    "ArtifactSynthesisQualityRule",
     "ArtifactReviewSubjectBinding",
     "BootstrapAnalyzerRequest",
     "CaptureLowRiskFactCommand",
     "ConfirmArtifactCommand",
+    "ConfirmedDecisionSynthesisBinding",
     "GenerateReviewNarrationRequest",
     "DecisionBatchResponseReceipt",
     "DecisionBatchReviewView",

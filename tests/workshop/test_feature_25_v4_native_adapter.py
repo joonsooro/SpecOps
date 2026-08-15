@@ -12,8 +12,10 @@ import pytest
 import httpx
 from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI
+from specops_contracts import artifact_quality_v1 as q
 
 from specops_workshop.v4 import contracts as c
+from specops_workshop.v4.artifact_quality import load_quality_rules
 from specops_workshop.v4.canonical import analyzer_request_hash, payload_hash
 from specops_workshop.v4.openai_adapter import (
     ProviderAdapterError,
@@ -147,6 +149,13 @@ def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
         "canonical_semantic_state_json": json.dumps(
             snapshot.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         ),
+        "quality_rule_manifest": tuple(
+            c.ArtifactSynthesisQualityRule.model_validate(
+                item.model_dump()
+            )
+            for item in load_quality_rules(q.ArtifactType.SPEC_PACKAGE)
+        ),
+        "confirmed_decision_bindings": (),
         "payload_schema_id": "spec-package-payload",
         "payload_schema_version": "4.0.0",
         "requested_output": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
@@ -652,7 +661,11 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "candidate_payload_json as exactly one nested JSON object" in instructions
     assert "never use Markdown, prose" in instructions
     assert "JSON-encoded string" in instructions
-    assert "foundation_id exactly once" in instructions
+    assert "use each selected identity at most once" in instructions
+    assert "unused capacity identities are allowed" in instructions
+    assert "quality_rule_manifest as the exact construction checklist" in instructions
+    assert "every confirmed_decision_bindings entry" in instructions
+    assert len(json.loads(content[1]["text"])["quality_rule_manifest"]) == 26
     assert "create no other payload-owned identity" in instructions
 
     wire_candidate = {

@@ -31,6 +31,21 @@ SPEC_ENG = next(
 _temporary = tempfile.TemporaryDirectory(prefix="specops-task26-browser-")
 
 
+def _bind_matching_planned_identities(payload: dict, identity_plan) -> dict:
+    """Use the first available server-owned identity of each required kind."""
+
+    available: dict[str, list] = {}
+    for planned in identity_plan.planned_identities:
+        available.setdefault(planned.entity_kind, []).append(planned.foundation_id)
+    mapping = {}
+    for original, kind in WorkshopFoundationService._artifact_identity_kinds(payload).items():
+        try:
+            mapping[original] = available[kind].pop(0)
+        except (KeyError, IndexError) as exc:
+            raise AssertionError(f"identity plan lacks required {kind} capacity") from exc
+    return bind_planned_identities(payload, mapping)
+
+
 class BrowserAnalyzerAdapter(DeterministicAdapter):
     async def execute(self, request, *, context):
         self.operations.append(request.request_type)
@@ -38,16 +53,7 @@ class BrowserAnalyzerAdapter(DeterministicAdapter):
             payload = PayloadFactory(full_identity_plan=True).payload(
                 "spec-package-payload.schema.json"
             )
-            identities = WorkshopFoundationService._artifact_identity_kinds(payload)
-            payload = bind_planned_identities(
-                payload,
-                {
-                    original: planned.foundation_id
-                    for original, planned in zip(
-                        identities, request.identity_plan.planned_identities, strict=True
-                    )
-                },
-            )
+            payload = _bind_matching_planned_identities(payload, request.identity_plan)
             bind_fixture_references(payload)
             source_evidence = request.foundation_snapshot.evidence[0]
             evidence = payload["evidence_catalog"][0]
@@ -89,16 +95,7 @@ class BrowserAnalyzerAdapter(DeterministicAdapter):
             payload = PayloadFactory(full_identity_plan=True).payload(
                 "technical-contract-payload.schema.json"
             )
-            identities = WorkshopFoundationService._artifact_identity_kinds(payload)
-            payload = bind_planned_identities(
-                payload,
-                {
-                    original: planned.foundation_id
-                    for original, planned in zip(
-                        identities, request.identity_plan.planned_identities, strict=True
-                    )
-                },
-            )
+            payload = _bind_matching_planned_identities(payload, request.identity_plan)
             confirmed_spec = json.loads(request.confirmed_spec.canonical_payload_json)
             bind_fixture_references(payload, confirmed_spec)
             source_evidence = request.foundation_snapshot.evidence[0]

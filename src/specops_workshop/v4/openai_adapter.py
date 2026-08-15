@@ -1565,10 +1565,25 @@ class StoredConversationOpenAIAdapter:
                 " Populate candidate_payload_json as exactly one nested JSON object that "
                 "validates against the normative Foundation payload schema supplied in this "
                 "request; never use Markdown, prose, or a JSON-encoded string in that field. "
-                "Use every identity_plan.planned_identities "
-                "foundation_id exactly once at the payload path for its entity_kind, and create "
-                "no other payload-owned identity. Foundation will independently enforce the "
-                "payload schema and identity plan."
+                "Use only identity_plan.planned_identities foundation_id values at payload paths "
+                "for their matching entity_kind, use each selected identity at most once, and "
+                "create no other payload-owned identity; unused capacity identities are allowed. "
+                "Foundation will independently enforce the payload schema and identity plan."
+            )
+        if operation is contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS:
+            instructions += (
+                " Treat quality_rule_manifest as the exact construction checklist for this draft, "
+                "without claiming that any rule passed. Use enough separately identified, atomic "
+                "requirements, behavior rules, data rules, scenarios, experience states, and "
+                "acceptance checks to satisfy its stated coverage conditions; do not collapse "
+                "independently testable obligations into the schema-minimum single item. Reproduce "
+                "every confirmed_decision_bindings entry as one status=confirmed payload decision "
+                "with its exact statement and exact confirmation ceremony fields. Reference those "
+                "decisions from every requirement or rule they govern. Do not invent, defer, or "
+                "replace a Foundation-confirmed decision, and do not introduce a new deferred "
+                "decision unless the current Foundation snapshot contains a genuinely unresolved "
+                "problem. Evidence excerpts must support the exact atomic claim that cites them; a "
+                "source question alone never supports a broader combined requirement."
             )
         return instructions
 

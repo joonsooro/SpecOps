@@ -787,6 +787,27 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
         item.result is q.ComponentResult.PASS
         for item in audit.combined_rule_results
     ) == 24
+    # Review projection needs only the immutable source-set binding. Historical
+    # provider contexts remain readable after the semantic-quality contract advances.
+    contexts = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+    with engine_for(url).begin() as connection:
+        stored = connection.execute(
+            select(contexts.c.binding_json).where(
+                contexts.c.case_id == str(CASE_ID),
+                contexts.c.status == c.ContextStatus.ACTIVE.value,
+            )
+        ).scalar_one()
+        historical = json.loads(stored)
+        historical["analyzer_contract"]["semantic_quality_contract_version"] = "2.1.0"
+        connection.execute(
+            update(contexts)
+            .where(contexts.c.case_id == str(CASE_ID))
+            .values(
+                binding_json=json.dumps(
+                    historical, separators=(",", ":"), sort_keys=True
+                )
+            )
+        )
     review_values = _base(5)
     review_values.update(
         command_type="MATERIALIZE_ARTIFACT_REVIEW",

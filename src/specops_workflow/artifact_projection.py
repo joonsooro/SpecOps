@@ -196,10 +196,10 @@ def _pointer(group: str, index: int) -> str:
     return f"/payload/{group}/{index}"
 
 
-def _evidence_index(payload, snapshot, context):
+def _evidence_index(payload, snapshot, source_set: c.SourceSetBinding):
     by_id = {str(item.evidence_id): item for item in snapshot.evidence}
     source_by_id = {
-        str(item.source.source_id): item.source for item in context.source_set.ordered_sources
+        str(item.source.source_id): item.source for item in source_set.ordered_sources
     }
     finding_by_evidence: dict[str, list] = {}
     for item in snapshot.evidence_findings:
@@ -275,13 +275,13 @@ def build_review_view(
     view_id: UUID,
     view_mode: str,
     case_revision: int,
-    context: c.AnalyzerContextBinding,
+    source_set: c.SourceSetBinding,
     snapshot: c.FoundationSemanticSnapshot,
     now: datetime,
 ) -> dict[str, Any]:
     mode = view_mode.lower()
     instant = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    evidence = _evidence_index(payload, snapshot, context)
+    evidence = _evidence_index(payload, snapshot, source_set)
     integrity = {
         "profile_id": "artifact-review-view",
         "profile_version": "3.0.0",

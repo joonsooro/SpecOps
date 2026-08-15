@@ -4047,7 +4047,19 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 == c.ContextStatus.ACTIVE.value,
             )
         ).mappings().one()
-        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
+        try:
+            historical_context = json.loads(active_context["binding_json"])
+            source_set = c.SourceSetBinding.model_validate_json(
+                json.dumps(
+                    historical_context["source_set"],
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+            ) from exc
         next_record = dict(record)
         next_record["record_revision"] = record["record_revision"] + 1
         governance = json.loads(record["governance_json"])
@@ -4073,7 +4085,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 view_id=view_id,
                 view_mode=command.view_mode,
                 case_revision=prior_revision + 1,
-                context=context,
+                source_set=source_set,
                 snapshot=self.semantic_snapshot(command.case_id),
                 now=generated_at,
             )
@@ -4099,7 +4111,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 view_id=view_id,
                 view_mode=command.view_mode,
                 case_revision=prior_revision + 1,
-                context=context,
+                source_set=source_set,
                 snapshot=self.semantic_snapshot(command.case_id),
                 now=generated_at,
             )

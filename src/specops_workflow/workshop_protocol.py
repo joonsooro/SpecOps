@@ -1401,8 +1401,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if quality_rule_ids and quality_rule_ids != expected_rules:
             raise ValueError("Spec construction requires the exact ordered quality manifest")
 
-        requirement_count = max(14, confirmed_decision_count * 3)
-        evidence_count = max(8, confirmed_decision_count * 2)
+        requirement_count = max(14, confirmed_decision_count + 10)
+        evidence_count = max(8, confirmed_decision_count)
         groups = (
             ("PACKAGE_ITEM", 1, "ANALYZER", "Q020 complete package membership."),
             ("EVIDENCE", evidence_count, "FOUNDATION", "Source-ground one atomic semantic claim."),
@@ -1446,7 +1446,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ("OPEN_ITEM", 2, "ANALYZER", "Represent one genuine non-blocking open item."),
             (
                 "ACCEPTANCE_CHECK",
-                max(18, requirement_count + 4),
+                requirement_count,
                 "ANALYZER",
                 "Q017 verify one independently executable obligation.",
             ),
@@ -3566,6 +3566,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             raise FoundationProtocolError(
                 c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
             )
+        self._clear_provider_owned_evidence_refs(payload)
         payload.update(
             self._server_owned_spec_records(
                 confirmed_decision_bindings,
@@ -3581,6 +3582,22 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 )
             }
         )
+
+    @staticmethod
+    def _clear_provider_owned_evidence_refs(value: object) -> None:
+        """Evidence identities are Foundation-owned and enter via exact proposals."""
+
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in {"evidence_refs", "source_evidence_refs"} and isinstance(
+                    child, list
+                ):
+                    value[key] = []
+                else:
+                    WorkshopFoundationService._clear_provider_owned_evidence_refs(child)
+        elif isinstance(value, list):
+            for child in value:
+                WorkshopFoundationService._clear_provider_owned_evidence_refs(child)
 
     @staticmethod
     def _server_owned_spec_records(

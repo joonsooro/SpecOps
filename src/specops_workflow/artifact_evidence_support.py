@@ -24,6 +24,79 @@ class EvidenceSupportProposal:
     finding_ref: UUID | None = None
 
 
+def project_evidence_catalog(
+    *,
+    payload: dict,
+    sources: tuple[q.AuditSourceDocument, ...],
+    proposals: tuple[EvidenceSupportProposal, ...],
+) -> tuple[dict, tuple[UUID, ...], tuple[UUID, ...]]:
+    """Materialize exact evidence identities before reference-graph admission.
+
+    False source quotations are removed as evidence links only. Their claims and
+    canonical decision bindings remain unchanged, so quality evaluation can
+    honestly identify missing source support without admitting fabricated proof.
+    """
+
+    revised = json.loads(json.dumps(payload))
+    if revised.get("evidence_catalog") or revised.get("semantic_evidence_findings"):
+        raise ValueError("evidence catalog projection requires empty server-owned fields")
+    evidence_ids = [item.evidence_ref for item in proposals]
+    finding_ids = [item.finding_ref for item in proposals]
+    if None in evidence_ids or len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError("evidence proposal identities must be present and unique")
+    if None in finding_ids or len(finding_ids) != len(set(finding_ids)):
+        raise ValueError("evidence finding identities must be present and unique")
+
+    source_by_id = {item.source_id: item for item in sources}
+    accepted: list[UUID] = []
+    dropped: list[UUID] = []
+    for proposal in proposals:
+        exact_claim = resolve_payload_pointer(revised, proposal.claim_pointer)
+        if not isinstance(exact_claim, str) or not exact_claim.strip():
+            raise ValueError("evidence-support claim pointer must resolve to exact text")
+        parent_pointer = proposal.claim_pointer.rsplit("/", 1)[0]
+        parent = resolve_payload_pointer(revised, parent_pointer)
+        if not isinstance(parent, dict) or parent.get("id") != str(proposal.claim_ref):
+            raise ValueError("claim ref does not own the exact claim pointer")
+        source = source_by_id.get(proposal.source_id)
+        if source is None:
+            raise ValueError("evidence-support proposal references an unknown source")
+        assert proposal.evidence_ref is not None
+        if proposal.exact_excerpt not in source.complete_text:
+            dropped.append(proposal.evidence_ref)
+            continue
+        revised["evidence_catalog"].append(
+            {
+                "id": str(proposal.evidence_ref),
+                "source_id": str(proposal.source_id),
+                "source_hash": source.payload_hash,
+                "locator": proposal.locator,
+                "excerpt_hash": "sha256:"
+                + hashlib.sha256(proposal.exact_excerpt.encode("utf-8")).hexdigest(),
+                "claim_refs": [str(proposal.claim_ref)],
+            }
+        )
+        accepted.append(proposal.evidence_ref)
+
+    dropped_values = {str(item) for item in dropped}
+
+    def remove_false_evidence_refs(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in {"evidence_refs", "source_evidence_refs"} and isinstance(
+                    child, list
+                ):
+                    value[key] = [item for item in child if item not in dropped_values]
+                else:
+                    remove_false_evidence_refs(child)
+        elif isinstance(value, list):
+            for child in value:
+                remove_false_evidence_refs(child)
+
+    remove_false_evidence_refs(revised)
+    return revised, tuple(accepted), tuple(dropped)
+
+
 def prepare_evidence_support_request(
     *,
     evaluator_run_id: UUID,
@@ -117,8 +190,21 @@ def materialize_supported_evidence(
         raise ValueError("only exact SUPPORTS assessments may be materialized")
 
     revised = json.loads(json.dumps(payload))
-    if revised.get("evidence_catalog") or revised.get("semantic_evidence_findings"):
+    if revised.get("semantic_evidence_findings"):
         raise ValueError("evidence support may be materialized only once per exact revision")
+    expected_catalog = [
+        {
+            "id": str(pair.evidence_ref),
+            "source_id": str(pair.source_id),
+            "source_hash": pair.source_hash,
+            "locator": pair.locator,
+            "excerpt_hash": pair.excerpt_hash,
+            "claim_refs": [str(pair.claim_ref)],
+        }
+        for pair in request.pairs
+    ]
+    if revised.get("evidence_catalog") != expected_catalog:
+        raise ValueError("pre-admission evidence catalog changed")
     for pair in request.pairs:
         exact_claim = resolve_payload_pointer(revised, pair.claim_pointer)
         if (
@@ -126,16 +212,6 @@ def materialize_supported_evidence(
             or domain_hash("SPECOPS:ARTIFACT_CLAIM:v1", exact_claim) != pair.claim_hash
         ):
             raise ValueError("artifact claim changed after evidence assessment began")
-        revised["evidence_catalog"].append(
-            {
-                "id": str(pair.evidence_ref),
-                "source_id": str(pair.source_id),
-                "source_hash": pair.source_hash,
-                "locator": pair.locator,
-                "excerpt_hash": pair.excerpt_hash,
-                "claim_refs": [str(pair.claim_ref)],
-            }
-        )
         assessment = assessments[pair.pair_id]
         revised["semantic_evidence_findings"].append(
             {

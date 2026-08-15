@@ -202,7 +202,17 @@ def test_spec_evidence_support_is_checkpointed_then_materialized_before_audit():
                 "behaviour": "Only authorized users may export.",
             }
         ],
-        "evidence_catalog": [],
+        "evidence_catalog": [
+            {
+                "id": str(evidence_id),
+                "source_id": str(source_id),
+                "source_hash": source_hash,
+                "locator": "PM source line 1",
+                "excerpt_hash": "sha256:"
+                + hashlib.sha256(source_text.encode()).hexdigest(),
+                "claim_refs": [str(claim_id)],
+            }
+        ],
         "semantic_evidence_findings": [],
     }
     record = {
@@ -582,7 +592,11 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
                     semantic_state_hash=extras["identity_plan"].semantic_state_hash,
                     candidate_payload_json="{}",
                     payload_schema_id="technical-contract-payload" if operation is c.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS else "spec-package-payload",
-                    payload_schema_version="4.0.0",
+                    payload_schema_version=(
+                        "4.0.0"
+                        if operation is c.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS
+                        else "4.0.1"
+                    ),
                 )
             cases.append((request, candidate))
         for request, candidate in cases:

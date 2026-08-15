@@ -11,6 +11,7 @@ from specops_workflow.artifact_evidence_support import (
     EvidenceSupportProposal,
     materialize_supported_evidence,
     prepare_evidence_support_request,
+    project_evidence_catalog,
 )
 from specops_workshop.v4.schema_compiler import artifact_evidence_support_native_schema
 from v4_payload_factory import PayloadFactory
@@ -35,6 +36,20 @@ def test_foundation_computes_exact_claim_and_evidence_hashes_before_assessment()
     claim_ref = UUID(payload["requirements"][0]["id"])
     source = _source("The export includes every accepted snapshot row.\n")
     excerpt = "The export includes every accepted snapshot row."
+    proposal = EvidenceSupportProposal(
+        claim_ref=claim_ref,
+        claim_pointer="/requirements/0/behaviour",
+        source_id=source.source_id,
+        locator="line:1",
+        exact_excerpt=excerpt,
+        evidence_ref=uuid4(),
+        finding_ref=uuid4(),
+    )
+    payload, accepted, dropped = project_evidence_catalog(
+        payload=payload, sources=(source,), proposals=(proposal,)
+    )
+    assert accepted == (proposal.evidence_ref,)
+    assert dropped == ()
     request = prepare_evidence_support_request(
         evaluator_run_id=uuid4(),
         artifact_id=uuid4(),
@@ -42,15 +57,7 @@ def test_foundation_computes_exact_claim_and_evidence_hashes_before_assessment()
         record_revision=3,
         payload=payload,
         sources=(source,),
-        proposals=(
-            EvidenceSupportProposal(
-                claim_ref=claim_ref,
-                claim_pointer="/requirements/0/behaviour",
-                source_id=source.source_id,
-                locator="line:1",
-                exact_excerpt=excerpt,
-            ),
-        ),
+        proposals=(proposal,),
     )
 
     pair = request.pairs[0]
@@ -94,6 +101,18 @@ def test_foundation_computes_exact_claim_and_evidence_hashes_before_assessment()
 def test_evidence_support_fails_closed_on_non_support_or_changed_claim():
     payload = PayloadFactory().payload("spec-package-payload.schema.json")
     source = _source("Exact source statement.\n")
+    proposal = EvidenceSupportProposal(
+        claim_ref=UUID(payload["requirements"][0]["id"]),
+        claim_pointer="/requirements/0/behaviour",
+        source_id=source.source_id,
+        locator="line:1",
+        exact_excerpt="Exact source statement.",
+        evidence_ref=uuid4(),
+        finding_ref=uuid4(),
+    )
+    payload, _, _ = project_evidence_catalog(
+        payload=payload, sources=(source,), proposals=(proposal,)
+    )
     request = prepare_evidence_support_request(
         evaluator_run_id=uuid4(),
         artifact_id=uuid4(),
@@ -101,15 +120,7 @@ def test_evidence_support_fails_closed_on_non_support_or_changed_claim():
         record_revision=1,
         payload=payload,
         sources=(source,),
-        proposals=(
-            EvidenceSupportProposal(
-                claim_ref=UUID(payload["requirements"][0]["id"]),
-                claim_pointer="/requirements/0/behaviour",
-                source_id=source.source_id,
-                locator="line:1",
-                exact_excerpt="Exact source statement.",
-            ),
-        ),
+        proposals=(proposal,),
     )
     pair = request.pairs[0]
     candidate = q.ArtifactEvidenceSupportCandidate(
@@ -153,3 +164,36 @@ def test_evidence_support_fails_closed_on_non_support_or_changed_claim():
         materialize_supported_evidence(
             payload=changed, request=request, candidate=support
         )
+
+
+def test_false_exact_quote_is_pruned_without_changing_claim_or_decision_binding():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    claim = payload["requirements"][0]
+    source = _source("A different exact source sentence.\n")
+    evidence_ref = uuid4()
+    finding_ref = uuid4()
+    claim["source_evidence_refs"] = [str(evidence_ref)]
+    decision_refs = list(claim["decision_refs"])
+
+    revised, accepted, dropped = project_evidence_catalog(
+        payload=payload,
+        sources=(source,),
+        proposals=(
+            EvidenceSupportProposal(
+                claim_ref=UUID(claim["id"]),
+                claim_pointer="/requirements/0/behaviour",
+                source_id=source.source_id,
+                locator="line:1",
+                exact_excerpt="Invented source sentence.",
+                evidence_ref=evidence_ref,
+                finding_ref=finding_ref,
+            ),
+        ),
+    )
+
+    assert accepted == ()
+    assert dropped == (evidence_ref,)
+    assert revised["requirements"][0]["behaviour"] == claim["behaviour"]
+    assert revised["requirements"][0]["decision_refs"] == decision_refs
+    assert revised["requirements"][0]["source_evidence_refs"] == []
+    assert revised["evidence_catalog"] == []

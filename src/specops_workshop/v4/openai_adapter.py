@@ -13,7 +13,7 @@ import hashlib
 import json
 import logging
 import time
-from collections import deque
+from collections import Counter, deque
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,7 +40,7 @@ MAX_OUTPUT_TOKENS = {
     contracts.AnalyzerOperation.TURN_ANALYSIS: 20_000,
     contracts.AnalyzerOperation.GUIDANCE: 8_000,
     contracts.AnalyzerOperation.REVIEW_NARRATION: 8_000,
-    contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS: 24_000,
+    contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS: 40_000,
     contracts.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS: 24_000,
 }
 ARTIFACT_PAYLOAD_SCHEMAS = {
@@ -1351,6 +1351,12 @@ class StoredConversationOpenAIAdapter:
         ):
             projected["properties"].pop(field)
             projected["required"].remove(field)
+        for definition in projected.get("$defs", {}).values():
+            properties = definition.get("properties", {})
+            for field in ("evidence_refs", "source_evidence_refs"):
+                evidence_refs = properties.get(field)
+                if isinstance(evidence_refs, dict):
+                    evidence_refs["maxItems"] = 0
         return projected
 
     @staticmethod
@@ -1443,8 +1449,6 @@ class StoredConversationOpenAIAdapter:
         if not isinstance(request, contracts.SpecPackageSynthesisRequest):
             return schema
         bindings = getattr(request, "confirmed_decision_bindings", ())
-        if not bindings:
-            return schema
 
         bound = deepcopy(schema)
         properties = bound.get("properties")
@@ -1460,12 +1464,98 @@ class StoredConversationOpenAIAdapter:
         payload_properties = (
             payload_root.get("properties") if isinstance(payload_root, dict) else None
         )
+        if not isinstance(payload_properties, dict):
+            raise ValueError("Spec payload schema does not expose root fields")
+
+        slot_capacity = Counter(
+            item.entity_kind for item in request.construction_blueprint.slots
+        )
+        analyzer_capacity = Counter(
+            item.entity_kind
+            for item in request.construction_blueprint.slots
+            if item.owner == "ANALYZER"
+        )
+
+        def bound_array(field: str, *, minimum: int, maximum: int) -> None:
+            value = payload_properties.get(field)
+            if not isinstance(value, dict):
+                raise ValueError(f"Spec payload schema does not expose {field}")
+            value["minItems"] = minimum
+            value["maxItems"] = maximum
+
+        direct_bounds = {
+            "package_items": (1, analyzer_capacity["PACKAGE_ITEM"]),
+            "glossary": (min(6, analyzer_capacity["GLOSSARY_TERM"]), analyzer_capacity["GLOSSARY_TERM"]),
+            "outcomes": (1, analyzer_capacity["OUTCOME"]),
+            "journeys": (1, analyzer_capacity["JOURNEY"]),
+            "requirements": (analyzer_capacity["REQUIREMENT"], analyzer_capacity["REQUIREMENT"]),
+            "data_rules": (min(6, analyzer_capacity["DATA_RULE"]), analyzer_capacity["DATA_RULE"]),
+            "experience_states": (analyzer_capacity["EXPERIENCE_STATE"], analyzer_capacity["EXPERIENCE_STATE"]),
+            "scenarios": (analyzer_capacity["SCENARIO"], analyzer_capacity["SCENARIO"]),
+            "quality_attributes": (0, analyzer_capacity["QUALITY_ATTRIBUTE"]),
+            "constraints": (min(2, analyzer_capacity["CONSTRAINT"]), analyzer_capacity["CONSTRAINT"]),
+            "dependencies": (0, analyzer_capacity["DEPENDENCY"]),
+            "risks": (0, analyzer_capacity["RISK"]),
+            "open_items": (0, analyzer_capacity["OPEN_ITEM"]),
+            "acceptance_checks": (analyzer_capacity["ACCEPTANCE_CHECK"], analyzer_capacity["ACCEPTANCE_CHECK"]),
+        }
+        for field, (minimum, maximum) in direct_bounds.items():
+            if maximum:
+                bound_array(field, minimum=minimum, maximum=maximum)
+
+        proposal_schema = properties.get("evidence_support_proposals")
+        if not isinstance(proposal_schema, dict):
+            raise ValueError("Spec candidate schema does not expose evidence proposals")
+        proposal_schema["minItems"] = min(8, slot_capacity["EVIDENCE"])
+        proposal_schema["maxItems"] = slot_capacity["EVIDENCE"]
+
+        def referenced_object(field: str) -> dict[str, Any]:
+            value = payload_properties.get(field)
+            reference = value.get("$ref") if isinstance(value, dict) else None
+            target = (
+                definitions.get(reference.removeprefix("#/$defs/"))
+                if isinstance(reference, str)
+                else None
+            )
+            if not isinstance(target, dict):
+                raise ValueError(f"Spec payload schema does not expose {field} object")
+            return target
+
+        scope_properties = referenced_object("scope").get("properties")
+        if not isinstance(scope_properties, dict):
+            raise ValueError("Spec payload scope schema is malformed")
+        for field in ("in_scope", "non_goals", "boundaries"):
+            value = scope_properties.get(field)
+            if not isinstance(value, dict):
+                raise ValueError("Spec payload scope collection is malformed")
+            maximum = (
+                analyzer_capacity["SCOPE_BOUNDARY"]
+                if field == "boundaries"
+                else analyzer_capacity["SCOPE_ITEM"]
+            )
+            if maximum:
+                value["minItems"] = 1
+                value["maxItems"] = maximum
+
+        behaviour_properties = referenced_object("behaviour_contract").get("properties")
+        if not isinstance(behaviour_properties, dict):
+            raise ValueError("Spec behavior schema is malformed")
+        for field in ("always", "ask_first", "never"):
+            value = behaviour_properties.get(field)
+            if not isinstance(value, dict):
+                raise ValueError("Spec behavior collection is malformed")
+            maximum = analyzer_capacity["BEHAVIOUR_RULE"]
+            if maximum:
+                value["minItems"] = 1
+                value["maxItems"] = maximum
+
         decisions = (
             payload_properties.get("decisions")
             if isinstance(payload_properties, dict)
             else None
         )
         if decisions is None:
+            validate_openai_strict_schema(bound)
             return bound
         if not isinstance(decisions, dict):
             raise ValueError("Spec payload decision projection is malformed")
@@ -1705,6 +1795,8 @@ class StoredConversationOpenAIAdapter:
                 "semantic_evidence_findings. Instead, propose exact claim/evidence pairs only in "
                 "evidence_support_proposals; use ANALYZER-owned claim pointers plus Foundation-owned "
                 "EVIDENCE and SEMANTIC_EVIDENCE_FINDING identities, and copy an exact source excerpt. "
+                "Keep every evidence_refs and source_evidence_refs array in the provider-owned payload "
+                "empty; Foundation alone materializes evidence identities after exact-quote validation. "
                 "Foundation computes every hash before a separate SUPPORTS assessment. Use "
                 "foundation_owned_record_refs only when other "
                 "artifact items need to reference those canonical identities. Construct the draft "

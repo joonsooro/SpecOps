@@ -5350,7 +5350,7 @@
             "type": "string"
           },
           "payload_schema_version": {
-            "const": "4.0.0",
+            "const": "4.0.1",
             "title": "Payload Schema Version",
             "type": "string"
           },

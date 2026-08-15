@@ -1,4 +1,58 @@
 {
+  "$defs": {
+    "SourceRole": {
+      "enum": [
+        "PM_SPEC",
+        "TECHNICAL_CONTRACT"
+      ],
+      "type": "string"
+    },
+    "SpecEvidenceSupportProposalCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_pointer": {
+          "maxLength": 2048,
+          "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
+          "type": "string"
+        },
+        "claim_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "exact_excerpt": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "finding_ref": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "locator": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_role": {
+          "$ref": "#/$defs/SourceRole"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "finding_ref",
+        "claim_ref",
+        "claim_pointer",
+        "source_role",
+        "locator",
+        "exact_excerpt"
+      ],
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "analyzer_run_id": {
@@ -18,6 +72,13 @@
     "context_id": {
       "format": "uuid",
       "type": "string"
+    },
+    "evidence_support_proposals": {
+      "items": {
+        "$ref": "#/$defs/SpecEvidenceSupportProposalCandidate"
+      },
+      "maxItems": 1000,
+      "type": "array"
     },
     "foundation_artifact_id": {
       "format": "uuid",
@@ -41,7 +102,7 @@
       "type": "string"
     },
     "payload_schema_version": {
-      "const": "4.0.0",
+      "const": "4.0.1",
       "type": "string"
     },
     "request_hash": {
@@ -70,7 +131,8 @@
     "candidate_payload_json",
     "output_type",
     "payload_schema_id",
-    "payload_schema_version"
+    "payload_schema_version",
+    "evidence_support_proposals"
   ],
   "type": "object"
 }

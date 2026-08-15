@@ -650,7 +650,7 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
             omitted_payload, separators=(",", ":"), sort_keys=True
         ),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.0",
+        payload_schema_version="4.0.1",
     )
     admission_values = _base(9)
     admission_values.update(
@@ -1052,7 +1052,9 @@ def test_full_spec_then_technical_contract_validation_projection_and_exact_linea
             identity_plan_version=plan.identity_plan_version,
             semantic_state_hash=plan.semantic_state_hash,
             candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
-            payload_schema_version="4.0.0",
+            payload_schema_version=(
+                "4.0.1" if artifact_type == "SPEC_PACKAGE" else "4.0.0"
+            ),
         )
         if artifact_type == "SPEC_PACKAGE":
             candidate = c.SpecPackageSynthesisCandidate(
@@ -1514,7 +1516,7 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.0",
+        payload_schema_version="4.0.1",
     )
     values = _base(4)
     values.update(
@@ -1572,7 +1574,7 @@ def test_artifact_admission_accepts_unused_bounded_identity_capacity(tmp_path):
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.0",
+        payload_schema_version="4.0.1",
     )
     values = _base(4)
     values.update(
@@ -1612,6 +1614,18 @@ def test_foundation_materializes_only_exact_supported_evidence_revision(tmp_path
         },
     )
     payload.update(foundation._server_owned_spec_records((), plan))
+    evidence_id = plan.planned_identities[-2].foundation_id
+    finding_id = plan.planned_identities[-1].foundation_id
+    payload["evidence_catalog"] = [
+        {
+            "id": str(evidence_id),
+            "source_id": "10000000-0000-4000-8000-000000000005",
+            "source_hash": PM_SOURCE_HASH,
+            "locator": "PM source line 1",
+            "excerpt_hash": "sha256:86dae90de48c8838e01cc421488dc5b5001a4533638b25e6bc1a945c7f3aeab9",
+            "claim_refs": [str(payload["requirements"][0]["id"])],
+        }
+    ]
     candidate = c.SpecPackageSynthesisCandidate(
         output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
         analyzer_run_id=uuid4(),
@@ -1625,7 +1639,7 @@ def test_foundation_materializes_only_exact_supported_evidence_revision(tmp_path
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.0",
+        payload_schema_version="4.0.1",
     )
     values = _base(4)
     values.update(
@@ -1638,8 +1652,6 @@ def test_foundation_materializes_only_exact_supported_evidence_revision(tmp_path
     foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
     record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
     assert record is not None
-    evidence_id = plan.planned_identities[-2].foundation_id
-    finding_id = plan.planned_identities[-1].foundation_id
     source = q.AuditSourceDocument(
         source_id=UUID("10000000-0000-4000-8000-000000000005"),
         role=q.SourceRole.PM_SPEC,
@@ -1745,7 +1757,7 @@ def test_artifact_admission_rejects_reference_to_unused_planned_identity(tmp_pat
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.0",
+        payload_schema_version="4.0.1",
     )
     values = _base(4)
     values.update(
@@ -1855,7 +1867,33 @@ def test_rule_derived_blueprint_projects_cross_domain_authority_deterministicall
         for kind, _, _ in policy
     }
     assert counts["DECISION"] == 4
-    assert counts["REQUIREMENT"] >= 14
-    assert counts["SCENARIO"] >= 12
+    assert counts["REQUIREMENT"] == 14
+    assert counts["SCENARIO"] == 12
     assert counts["EXPERIENCE_STATE"] == 9
-    assert counts["ACCEPTANCE_CHECK"] >= 18
+    assert counts["ACCEPTANCE_CHECK"] == 14
+
+
+def test_provider_evidence_refs_are_cleared_before_server_records_are_projected():
+    provider_payload = {
+        "requirements": [
+            {
+                "source_evidence_refs": [
+                    "10000000-0000-4000-8000-000000000010"
+                ]
+            }
+        ],
+        "behaviour_contract": {
+            "always": [
+                {
+                    "evidence_refs": [
+                        "10000000-0000-4000-8000-000000000011"
+                    ]
+                }
+            ]
+        },
+    }
+
+    WorkshopFoundationService._clear_provider_owned_evidence_refs(provider_payload)
+
+    assert provider_payload["requirements"][0]["source_evidence_refs"] == []
+    assert provider_payload["behaviour_contract"]["always"][0]["evidence_refs"] == []

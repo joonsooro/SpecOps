@@ -26,6 +26,7 @@ from specops_workflow.workshop_protocol import (
 from specops_workflow.artifact_evidence_support import (
     EvidenceSupportProposal,
     prepare_evidence_support_request,
+    project_evidence_catalog,
 )
 from specops_workflow.workshop_completion import (
     CompletionUtterance,
@@ -1158,6 +1159,7 @@ class V4ProductionOrchestrator:
                 ),
                 identity_plan=request.identity_plan,
             )
+            candidate = self._project_spec_evidence_catalog(candidate)
             common["candidate"] = candidate
             common.update(
                 target=request.target,
@@ -1184,6 +1186,51 @@ class V4ProductionOrchestrator:
         values.update(command_type=command_type, **common)
         receipt = self.foundation.execute(model(**values))
         return ProviderOperationAdmission(candidate=candidate, receipt=receipt)
+
+    def _exact_spec_evidence_proposals(
+        self, candidate: c.SpecPackageSynthesisCandidate
+    ) -> tuple[tuple[q.AuditSourceDocument, ...], tuple[EvidenceSupportProposal, ...]]:
+        sources = build_audit_sources(self.sources)
+        source_by_role = {item.role: item.source_id for item in sources}
+        proposals = tuple(
+            EvidenceSupportProposal(
+                claim_ref=item.claim_ref,
+                claim_pointer=item.claim_pointer,
+                source_id=source_by_role[q.SourceRole(item.source_role.value)],
+                locator=item.locator,
+                exact_excerpt=item.exact_excerpt,
+                evidence_ref=item.evidence_ref,
+                finding_ref=item.finding_ref,
+            )
+            for item in candidate.evidence_support_proposals
+        )
+        return sources, proposals
+
+    def _project_spec_evidence_catalog(
+        self, candidate: c.SpecPackageSynthesisCandidate
+    ) -> c.SpecPackageSynthesisCandidate:
+        if not candidate.evidence_support_proposals:
+            return candidate
+        payload = json.loads(candidate.candidate_payload_json)
+        sources, proposals = self._exact_spec_evidence_proposals(candidate)
+        projected, accepted, _dropped = project_evidence_catalog(
+            payload=payload,
+            sources=sources,
+            proposals=proposals,
+        )
+        accepted_set = set(accepted)
+        return candidate.model_copy(
+            update={
+                "candidate_payload_json": json.dumps(
+                    projected, sort_keys=True, separators=(",", ":")
+                ),
+                "evidence_support_proposals": tuple(
+                    item
+                    for item in candidate.evidence_support_proposals
+                    if item.evidence_ref in accepted_set
+                ),
+            }
+        )
 
     async def _execute_provider(
         self,
@@ -1553,7 +1600,7 @@ class V4ProductionOrchestrator:
                     ),
                     confirmed_decision_bindings=confirmed_decisions,
                     payload_schema_id="spec-package-payload",
-                    payload_schema_version="4.0.0",
+                    payload_schema_version="4.0.1",
                     requested_output="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
                 ),
             )
@@ -1619,20 +1666,7 @@ class V4ProductionOrchestrator:
         record = self.foundation.latest_artifact_record(self.case_id, "SPEC_PACKAGE")
         if record is None:
             raise ValueError("Spec evidence support requires an admitted artifact")
-        sources = build_audit_sources(self.sources)
-        source_by_role = {item.role: item.source_id for item in sources}
-        exact_proposals = tuple(
-            EvidenceSupportProposal(
-                claim_ref=item.claim_ref,
-                claim_pointer=item.claim_pointer,
-                source_id=source_by_role[q.SourceRole(item.source_role.value)],
-                locator=item.locator,
-                exact_excerpt=item.exact_excerpt,
-                evidence_ref=item.evidence_ref,
-                finding_ref=item.finding_ref,
-            )
-            for item in proposals
-        )
+        sources, exact_proposals = self._exact_spec_evidence_proposals(candidate)
         evaluator_run_id = _stable_id(
             self.case_id,
             "artifact-evidence-support-evaluator",

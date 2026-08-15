@@ -6,7 +6,7 @@ import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import httpx
@@ -29,6 +29,7 @@ from specops_workshop.v4.schema_compiler import (
     native_schema_for,
     validate_openai_strict_schema,
 )
+from specops_workflow.workshop_protocol import WorkshopFoundationService
 
 
 NOW = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
@@ -166,7 +167,7 @@ def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
         ),
         "confirmed_decision_bindings": (),
         "payload_schema_id": "spec-package-payload",
-        "payload_schema_version": "4.0.0",
+        "payload_schema_version": "4.0.1",
         "requested_output": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
     }
     data["request_hash"] = _request_hash(data)
@@ -629,6 +630,12 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "decisions" not in payload_schema["properties"]
     assert "evidence_catalog" not in payload_schema["properties"]
     assert "semantic_evidence_findings" not in payload_schema["properties"]
+    assert payload_schema["$defs"]["requirement"]["properties"][
+        "source_evidence_refs"
+    ]["maxItems"] == 0
+    assert payload_schema["$defs"]["behaviourRule"]["properties"][
+        "evidence_refs"
+    ]["maxItems"] == 0
     assert json.loads(content[1]["text"])["request_type"] == "SPEC_PACKAGE_SYNTHESIS"
     provider_request = json.loads(content[1]["text"])
     assert "canonical_semantic_state_json" not in provider_request
@@ -690,6 +697,7 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "quality_rule_manifest as the exact construction checklist" in instructions
     assert "Do not emit actors or decisions" in instructions
     assert "Foundation deterministically projects" in instructions
+    assert "Keep every evidence_refs and source_evidence_refs array" in instructions
     assert len(json.loads(content[1]["text"])["quality_rule_manifest"]) == 26
     assert "create no other payload-owned identity" in instructions
 
@@ -706,7 +714,7 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
         "candidate_payload_json": {"wire_object": True},
         "output_type": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
         "payload_schema_id": "spec-package-payload",
-        "payload_schema_version": "4.0.0",
+        "payload_schema_version": "4.0.1",
     }
     candidate = adapter._candidate_from_provider_output(
         c.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS,
@@ -732,6 +740,68 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
             adapter._validate_candidate_echo(
                 request, candidate.model_copy(update={field: wrong_value})
             )
+
+
+def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
+    adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
+    sources = (
+        _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+        _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical.md", b"Technical"),
+    )
+    prepared = adapter.prepared_from_ids(
+        sources, ("file_pm", "file_technical"), "conv_blueprint_schema"
+    )
+    request = _spec_synthesis_request(prepared)
+    policy = WorkshopFoundationService.artifact_construction_policy(
+        "SPEC_PACKAGE",
+        confirmed_decision_count=12,
+        quality_rule_ids=tuple(f"SPEC-Q-{index:03d}" for index in range(1, 27)),
+    )
+    identities = tuple(
+        c.PlannedArtifactIdentity(
+            foundation_id=uuid4(), foundation_version=1, entity_kind=kind
+        )
+        for kind, _, _ in policy
+    )
+    plan = c.ArtifactSynthesisIdentityPlan(
+        identity_plan_id=uuid4(),
+        identity_plan_version=1,
+        target=request.target,
+        based_on_case_revision=request.based_on_case_revision,
+        semantic_state_hash=request.identity_plan.semantic_state_hash,
+        source_entity_refs=(),
+        planned_identities=identities,
+    )
+    request = request.model_copy(
+        update={
+            "identity_plan": plan,
+            "construction_blueprint": WorkshopFoundationService.artifact_construction_blueprint(
+                plan, policy
+            ),
+        }
+    )
+
+    _, schema, _ = native_schema_for(c.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS)
+    schema = adapter._bind_candidate_echo_schema(request, schema)
+    schema = adapter._bind_artifact_payload_output_schema(
+        c.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS, schema
+    )
+    request = request.model_copy(update={"confirmed_decision_bindings": (object(),)})
+    schema = adapter._bind_artifact_request_constraints(request, schema)
+    payload_ref = schema["properties"]["candidate_payload_json"]["$ref"]
+    payload = schema["$defs"][payload_ref.removeprefix("#/$defs/")]
+    properties = payload["properties"]
+
+    assert properties["requirements"]["minItems"] == 22
+    assert properties["requirements"]["maxItems"] == 22
+    assert properties["acceptance_checks"]["minItems"] == 22
+    assert properties["acceptance_checks"]["maxItems"] == 22
+    assert properties["scenarios"]["minItems"] == 12
+    assert properties["experience_states"]["minItems"] == 9
+    assert properties["data_rules"]["minItems"] == 6
+    assert properties["glossary"]["minItems"] == 6
+    assert schema["properties"]["evidence_support_proposals"]["minItems"] == 8
+    assert schema["properties"]["evidence_support_proposals"]["maxItems"] == 12
 
 
 def test_terminal_spec_schema_excludes_foundation_owned_decision_records():

@@ -1760,13 +1760,45 @@ class StoredConversationOpenAIAdapter:
             if not isinstance(value, dict):
                 return
             if key in reference_keys or key.endswith("_ref") or key.endswith("_refs"):
-                target = value.get("items") if value.get("type") == "array" else value
-                if isinstance(target, dict):
-                    target.pop("format", None)
-                    target.pop("enum", None)
-                    target.pop("const", None)
-                    target["type"] = "string"
-                    target["pattern"] = local_or_uuid_pattern
+                reference = value.get("$ref")
+                referenced = (
+                    definitions.get(reference.removeprefix("#/$defs/"))
+                    if isinstance(reference, str)
+                    else None
+                )
+                shape = referenced if isinstance(referenced, dict) else value
+                if shape.get("type") == "array":
+                    retained_bounds = {
+                        name: shape[name]
+                        for name in ("minItems", "maxItems")
+                        if name in shape
+                    }
+                    value.clear()
+                    value.update(
+                        {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "pattern": local_or_uuid_pattern,
+                            },
+                            **retained_bounds,
+                        }
+                    )
+                    return
+                nullable = any(
+                    isinstance(branch, dict) and branch.get("type") == "null"
+                    for branch in shape.get("anyOf", [])
+                )
+                localized_string = {
+                    "type": "string",
+                    "pattern": local_or_uuid_pattern,
+                }
+                value.clear()
+                value.update(
+                    {"anyOf": [localized_string, {"type": "null"}]}
+                    if nullable
+                    else localized_string
+                )
                 return
             properties_value = value.get("properties")
             if isinstance(properties_value, dict):
@@ -1801,11 +1833,13 @@ class StoredConversationOpenAIAdapter:
             planned_by_kind.setdefault(slot.entity_kind, []).append(
                 slot.slot_key
             )
-        evidence_claim_ids = [
-            identity
-            for path in _SPEC_EVIDENCE_OWNER_PATHS
-            for identity in assignments[path]
-        ]
+        evidence_claim_ids = list(
+            dict.fromkeys(
+                identity
+                for path in _SPEC_EVIDENCE_OWNER_PATHS
+                for identity in assignments[path]
+            )
+        )
         proposal_properties["claim_ref"]["enum"] = evidence_claim_ids
         proposal_properties["evidence_ref"]["enum"] = planned_by_kind.get(
             "EVIDENCE", []

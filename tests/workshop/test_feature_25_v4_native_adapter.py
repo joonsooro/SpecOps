@@ -882,6 +882,34 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
     collect_max_items(schema)
     assert max_items == [1_000]
 
+    illegal_reference_compositions = []
+
+    def collect_illegal_reference_compositions(value, path=()):
+        if isinstance(value, dict):
+            if "type" in value and ("$ref" in value or "anyOf" in value):
+                illegal_reference_compositions.append(path)
+            for key, child in value.items():
+                collect_illegal_reference_compositions(child, (*path, key))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                collect_illegal_reference_compositions(child, (*path, str(index)))
+
+    collect_illegal_reference_compositions(schema)
+    assert illegal_reference_compositions == []
+    open_item_body = schema["$defs"]["SpecPackageFoundationAssigned_open_items"]
+    related_refs = open_item_body["properties"]["related_refs"]
+    assert related_refs["type"] == "array"
+    assert related_refs["items"]["type"] == "string"
+    assert "pattern" in related_refs["items"]
+    assert "$ref" not in related_refs
+    proposals = schema["$defs"]["SpecEvidenceSupportProposalCandidate"][
+        "properties"
+    ]
+    assert "anyOf" not in proposals["claim_ref"]
+    assert len(proposals["claim_ref"]["enum"]) == len(
+        set(proposals["claim_ref"]["enum"])
+    )
+
 
 def test_provider_parser_preserves_local_handles_for_foundation_materialization():
     adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())

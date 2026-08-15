@@ -1475,7 +1475,7 @@ class V4ProductionOrchestrator:
         *,
         operation_key: str,
     ) -> ProviderOperationAdmission:
-        if self.foundation.runway_projection(self.case_id)["depth"] < 3:
+        if self._shallow_runway_blocks_synthesis():
             raise ValueError("active interview runway is endangered")
         context = await self.ensure_context()
         snapshot = self.foundation.semantic_snapshot(self.case_id)
@@ -1551,6 +1551,18 @@ class V4ProductionOrchestrator:
             candidate=admission.candidate,
             receipt=admission.receipt,
             quality_audit=audit,
+        )
+
+    def _shallow_runway_blocks_synthesis(self) -> bool:
+        if self.foundation.runway_projection(self.case_id)["depth"] >= 3:
+            return False
+        snapshot = self.foundation.semantic_snapshot(self.case_id)
+        return any(
+            item.status is c.SemanticRecordStatus.OPEN
+            for item in snapshot.problems
+        ) or any(
+            item.status is c.SemanticRecordStatus.PENDING_CONFIRMATION
+            for item in snapshot.decisions
         )
 
     def apply_voice_selection(

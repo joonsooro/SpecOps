@@ -10,7 +10,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from specops_contracts import workshop_v1 as c
@@ -1819,6 +1819,40 @@ def test_endangered_runway_blocks_spec_synthesis(tmp_path):
     )
     with pytest.raises(ValueError, match="runway is endangered"):
         asyncio.run(orchestrator.synthesize_artifact("SPEC_PACKAGE", operation_key="blocked"))
+
+
+def test_shallow_runway_allows_synthesis_only_after_every_problem_is_resolved(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _admit_brief(foundation)
+    for sequence in range(1, 3):
+        foundation.execute(
+            _transcript_command(
+                foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."
+            )
+        )
+    context = foundation.active_analyzer_context(CASE_ID)
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=SimpleNamespace(source_set_hash=lambda sources: SOURCE_SET_HASH),
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    assert foundation.runway_projection(CASE_ID)["depth"] == 2
+    assert orchestrator._shallow_runway_blocks_synthesis() is True
+
+    records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            update(records)
+            .where(records.c.entity_kind == "PROBLEM")
+            .values(status=c.SemanticRecordStatus.RESOLVED.value)
+        )
+
+    assert orchestrator._shallow_runway_blocks_synthesis() is False
 
 
 def test_voice_provider_is_not_created_before_ready():

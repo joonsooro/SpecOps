@@ -426,6 +426,24 @@ def test_post_bootstrap_response_identity_is_durable_idempotent_and_clearable(tm
         )
     foundation.clear_provider_response(CASE_ID, "resp_turn_durable")
     assert foundation.pending_provider_responses(CASE_ID) == ()
+    foundation.checkpoint_provider_response(
+        CASE_ID,
+        client_request_id=values["client_request_id"],
+        operation=values["operation"],
+        provider_response_id="resp_turn_after_confirmed_cleanup",
+    )
+    rebound = foundation.pending_provider_responses(CASE_ID)
+    assert len(rebound) == 1
+    assert rebound[0]["client_request_id"] == values["client_request_id"]
+    assert rebound[0]["operation"] == values["operation"]
+    assert rebound[0]["provider_response_id"] == "resp_turn_after_confirmed_cleanup"
+    with pytest.raises(RuntimeError, match="identity conflict"):
+        foundation.checkpoint_provider_response(
+            CASE_ID,
+            client_request_id=values["client_request_id"],
+            operation=values["operation"],
+            provider_response_id="resp_second_live_conflict",
+        )
 
 
 def test_analyzer_worker_checkpoints_stored_response_before_admission(tmp_path):

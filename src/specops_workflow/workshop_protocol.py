@@ -584,12 +584,28 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 )
             ).mappings().one_or_none()
             if existing is not None:
-                if (
-                    existing["operation"] != operation
-                    or existing["provider_response_id"] != provider_response_id
-                ):
+                if existing["operation"] != operation:
                     raise RuntimeError("provider Response identity conflict")
-                return
+                if existing["provider_response_id"] == provider_response_id:
+                    return
+                if existing["provider_response_id"] is None:
+                    rebound = connection.execute(
+                        update(table)
+                        .where(
+                            table.c.case_id == str(case_id),
+                            table.c.client_request_id == client_request_id,
+                            table.c.provider_response_id.is_(None),
+                        )
+                        .values(
+                            provider_response_id=provider_response_id,
+                            recorded_at=now,
+                            cleared_at=None,
+                        )
+                    )
+                    if rebound.rowcount != 1:
+                        raise RuntimeError("provider Response rebind conflict")
+                    return
+                raise RuntimeError("provider Response identity conflict")
             connection.execute(
                 insert(table).values(
                     case_id=str(case_id),

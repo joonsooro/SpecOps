@@ -1093,6 +1093,26 @@ async def _stored_conversation_bootstrap_case():
         )
     assert invalid_checkpoints == ["resp_4"]
 
+    fake.outputs.append(turn_candidate.model_dump_json())
+
+    def reject_local_checkpoint(_response_id: str) -> None:
+        raise RuntimeError("local checkpoint unavailable")
+
+    with pytest.raises(RuntimeError, match="local checkpoint unavailable"):
+        await adapter.execute_with_response_checkpoint(
+            turn_request,
+            context=result.context,
+            checkpoint=reject_local_checkpoint,
+        )
+    assert [item.event for item in adapter.lifecycle_events[-2:]] == [
+        "provider_request.started",
+        "provider_request.accepted",
+    ]
+    assert adapter.lifecycle_events[-1].response_id == "resp_5"
+    assert adapter.lifecycle_events[-1].client_request_id == (
+        turn_request.client_request_id
+    )
+
 
 def test_background_bootstrap_polls_one_stored_response_past_60_second_slow_observation():
     async def scenario():

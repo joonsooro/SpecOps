@@ -1107,8 +1107,10 @@ class StoredConversationOpenAIAdapter:
         response_id = _safe_provider_identifier(getattr(response, "id", None))
         if response_id is None:
             raise self._output_error(request.client_request_id, ValueError("unsafe response ID"))
-        if response_checkpoint is not None:
-            response_checkpoint(response_id)
+        # Provider acceptance is an external fact even if the following durable
+        # local checkpoint fails. Emit the content-free identity first so an
+        # operator can retrieve the exact Response instead of blindly recreating
+        # the logical request after an uncertain local failure.
         self._emit_lifecycle(
             event="provider_request.accepted",
             operation=operation,
@@ -1116,6 +1118,8 @@ class StoredConversationOpenAIAdapter:
             started_at=started_at,
             response=response,
         )
+        if response_checkpoint is not None:
+            response_checkpoint(response_id)
         status = getattr(response, "status", None) or "completed"
         slow_observed = False
         try:

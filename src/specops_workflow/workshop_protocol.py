@@ -3164,6 +3164,30 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 )
                 .values(status=status.value)
             )
+            if outcome is c.DecisionItemOutcome.COMMITTED:
+                for link in decision_payload["problem_links"]:
+                    if link["resolution_kind"] != c.ProblemResolutionKind.FULL.value:
+                        continue
+                    problem = self._semantic_record_for_ref(
+                        connection,
+                        command.case_id,
+                        link["problem_ref"],
+                    )
+                    if problem["entity_kind"] != "PROBLEM":
+                        raise FoundationProtocolError(
+                            c.FoundationRejectionCode.UNKNOWN_REFERENCE
+                        )
+                    if problem["status"] == c.SemanticRecordStatus.OPEN.value:
+                        connection.execute(
+                            update(records)
+                            .where(
+                                records.c.foundation_id == problem["foundation_id"],
+                                records.c.record_version == problem["record_version"],
+                                records.c.status
+                                == c.SemanticRecordStatus.OPEN.value,
+                            )
+                            .values(status=c.SemanticRecordStatus.RESOLVED.value)
+                        )
             revision_request_id = None
             if outcome is c.DecisionItemOutcome.REVISION_REQUESTED:
                 revision_request_id = self.new_id()

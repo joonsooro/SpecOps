@@ -576,6 +576,8 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
     receipt = foundation.execute(command)
     assert [item.outcome for item in receipt.item_results] == ["COMMITTED", "REVISION_REQUESTED"]
     assert foundation.execute(command) == receipt
+    problem = next(item for item in foundation.semantic_snapshot(CASE_ID).problems)
+    assert problem.status is c.SemanticRecordStatus.RESOLVED
 
     engine = engine_for(url)
     with engine.connect() as connection:

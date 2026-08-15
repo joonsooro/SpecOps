@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 from uuid import UUID, uuid4
 
 from specops_contracts import artifact_quality_v1 as q
 from specops_contracts.canonical import domain_hash, payload_hash
 from specops_workshop.v4.artifact_quality import resolve_payload_pointer
+
+from .spec_identity_materialization import SPEC_EVIDENCE_CLAIM_TEXT_FIELDS
 
 
 @dataclass(frozen=True)
@@ -22,6 +24,44 @@ class EvidenceSupportProposal:
     exact_excerpt: str
     evidence_ref: UUID | None = None
     finding_ref: UUID | None = None
+
+
+def normalize_evidence_claim_pointers(
+    *,
+    payload: dict,
+    proposals: tuple[EvidenceSupportProposal, ...],
+) -> tuple[EvidenceSupportProposal, ...]:
+    """Resolve an exact owner pointer only when its primary text leaf is unique."""
+
+    normalized: list[EvidenceSupportProposal] = []
+    for proposal in proposals:
+        value = resolve_payload_pointer(payload, proposal.claim_pointer)
+        if isinstance(value, str) and value.strip():
+            normalized.append(proposal)
+            continue
+        if not isinstance(value, dict) or value.get("id") != str(proposal.claim_ref):
+            raise ValueError("evidence-support claim pointer must resolve to exact text")
+        pointer_parts = tuple(
+            part.replace("~1", "/").replace("~0", "~")
+            for part in proposal.claim_pointer.split("/")[1:]
+        )
+        collection_path = pointer_parts[:-1]
+        fields = SPEC_EVIDENCE_CLAIM_TEXT_FIELDS.get(collection_path)
+        if fields is None or len(fields) != 1:
+            raise ValueError(
+                "evidence-support object pointer has no unambiguous primary text field"
+            )
+        field = fields[0]
+        exact_claim = value.get(field)
+        if not isinstance(exact_claim, str) or not exact_claim.strip():
+            raise ValueError("evidence-support claim pointer must resolve to exact text")
+        normalized.append(
+            replace(
+                proposal,
+                claim_pointer=f"{proposal.claim_pointer}/{field}",
+            )
+        )
+    return tuple(normalized)
 
 
 def _resolve_claim_owner(
@@ -54,6 +94,10 @@ def project_evidence_catalog(
     """
 
     revised = json.loads(json.dumps(payload))
+    proposals = normalize_evidence_claim_pointers(
+        payload=revised,
+        proposals=proposals,
+    )
     if revised.get("evidence_catalog") or revised.get("semantic_evidence_findings"):
         raise ValueError("evidence catalog projection requires empty server-owned fields")
     evidence_ids = [item.evidence_ref for item in proposals]
@@ -124,6 +168,10 @@ def prepare_evidence_support_request(
 ) -> q.ArtifactEvidenceSupportRequest:
     """Compute every identity and hash before an evaluator sees the request."""
 
+    proposals = normalize_evidence_claim_pointers(
+        payload=payload,
+        proposals=proposals,
+    )
     source_by_id = {item.source_id: item for item in sources}
     pairs = []
     for proposal in proposals:

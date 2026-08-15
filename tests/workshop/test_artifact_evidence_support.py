@@ -10,6 +10,7 @@ from specops_contracts.canonical import domain_hash, payload_hash
 from specops_workflow.artifact_evidence_support import (
     EvidenceSupportProposal,
     materialize_supported_evidence,
+    normalize_evidence_claim_pointers,
     prepare_evidence_support_request,
     project_evidence_catalog,
 )
@@ -283,6 +284,88 @@ def test_nested_text_pointer_rejects_a_different_record_identity():
                     source_id=source.source_id,
                     locator="line:1",
                     exact_excerpt="Pagination is a display concern only.",
+                    evidence_ref=uuid4(),
+                    finding_ref=uuid4(),
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("collection_path", "claim_field"),
+    (
+        (("requirements", "0"), "behaviour"),
+        (("behaviour_contract", "never", "0"), "obligation"),
+        (("scope", "non_goals", "0"), "statement"),
+    ),
+)
+def test_exact_owner_pointer_uses_only_its_schema_owned_primary_text_field(
+    collection_path, claim_field
+):
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    value = payload
+    for part in collection_path:
+        value = value[int(part)] if isinstance(value, list) else value[part]
+    pointer = "/" + "/".join(collection_path)
+    proposal = EvidenceSupportProposal(
+        claim_ref=UUID(value["id"]),
+        claim_pointer=pointer,
+        source_id=uuid4(),
+        locator="line:1",
+        exact_excerpt="Exact source statement.",
+        evidence_ref=uuid4(),
+        finding_ref=uuid4(),
+    )
+
+    normalized = normalize_evidence_claim_pointers(
+        payload=payload,
+        proposals=(proposal,),
+    )
+
+    assert normalized[0].claim_pointer == f"{pointer}/{claim_field}"
+
+
+def test_object_pointer_fails_closed_when_primary_text_field_is_ambiguous():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    boundary = {
+        "id": str(uuid4()),
+        "dimension": "release boundary",
+        "inside": "CSV export",
+        "outside": "other formats",
+        "evidence_refs": [],
+    }
+    payload["scope"]["boundaries"] = [boundary]
+
+    with pytest.raises(ValueError, match="no unambiguous primary text field"):
+        normalize_evidence_claim_pointers(
+            payload=payload,
+            proposals=(
+                EvidenceSupportProposal(
+                    claim_ref=UUID(boundary["id"]),
+                    claim_pointer="/scope/boundaries/0",
+                    source_id=uuid4(),
+                    locator="line:1",
+                    exact_excerpt="Exact source statement.",
+                    evidence_ref=uuid4(),
+                    finding_ref=uuid4(),
+                ),
+            ),
+        )
+
+
+def test_object_pointer_fails_closed_when_claim_ref_does_not_own_it():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+
+    with pytest.raises(ValueError, match="must resolve to exact text"):
+        normalize_evidence_claim_pointers(
+            payload=payload,
+            proposals=(
+                EvidenceSupportProposal(
+                    claim_ref=uuid4(),
+                    claim_pointer="/requirements/0",
+                    source_id=uuid4(),
+                    locator="line:1",
+                    exact_excerpt="Exact source statement.",
                     evidence_ref=uuid4(),
                     finding_ref=uuid4(),
                 ),

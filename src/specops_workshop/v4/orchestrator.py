@@ -25,6 +25,7 @@ from specops_workflow.workshop_protocol import (
 )
 from specops_workflow.artifact_evidence_support import (
     EvidenceSupportProposal,
+    normalize_evidence_claim_pointers,
     prepare_evidence_support_request,
     project_evidence_catalog,
 )
@@ -1213,6 +1214,10 @@ class V4ProductionOrchestrator:
             return candidate
         payload = json.loads(candidate.candidate_payload_json)
         sources, proposals = self._exact_spec_evidence_proposals(candidate)
+        proposals = normalize_evidence_claim_pointers(
+            payload=payload,
+            proposals=proposals,
+        )
         projected, accepted, _dropped = project_evidence_catalog(
             payload=payload,
             sources=sources,
@@ -1225,7 +1230,15 @@ class V4ProductionOrchestrator:
                     projected, sort_keys=True, separators=(",", ":")
                 ),
                 "evidence_support_proposals": tuple(
-                    item
+                    item.model_copy(
+                        update={
+                            "claim_pointer": next(
+                                proposal.claim_pointer
+                                for proposal in proposals
+                                if proposal.evidence_ref == item.evidence_ref
+                            )
+                        }
+                    )
                     for item in candidate.evidence_support_proposals
                     if item.evidence_ref in accepted_set
                 ),

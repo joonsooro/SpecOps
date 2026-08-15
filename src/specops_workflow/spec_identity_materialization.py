@@ -43,24 +43,27 @@ SPEC_ANALYZER_PATH_ORDINAL_RANGES: dict[tuple[str, ...], range] = {
     ("behaviour_contract", "never"): range(11, 17),
 }
 
-SPEC_EVIDENCE_OWNER_PATHS = frozenset(
-    {
-        ("glossary",),
-        ("outcomes",),
-        ("scope", "in_scope"),
-        ("scope", "non_goals"),
-        ("scope", "boundaries"),
-        ("behaviour_contract", "always"),
-        ("behaviour_contract", "ask_first"),
-        ("behaviour_contract", "never"),
-        ("requirements",),
-        ("data_rules",),
-        ("quality_attributes",),
-        ("constraints",),
-        ("dependencies",),
-        ("risks",),
-    }
-)
+# Exact direct text leaves that may be proposed as evidence-backed claims.  The
+# provider schema and Foundation normalization both consume this one map.  A
+# collection with more than one field has no safe object-level default.
+SPEC_EVIDENCE_CLAIM_TEXT_FIELDS: dict[tuple[str, ...], tuple[str, ...]] = {
+    ("glossary",): ("definition",),
+    ("outcomes",): ("statement",),
+    ("scope", "in_scope"): ("statement",),
+    ("scope", "non_goals"): ("statement",),
+    ("scope", "boundaries"): ("inside", "outside"),
+    ("behaviour_contract", "always"): ("obligation",),
+    ("behaviour_contract", "ask_first"): ("obligation",),
+    ("behaviour_contract", "never"): ("obligation",),
+    ("requirements",): ("behaviour",),
+    ("data_rules",): ("semantic_rule",),
+    ("quality_attributes",): ("target",),
+    ("constraints",): ("statement",),
+    ("dependencies",): ("purpose",),
+    ("risks",): ("statement",),
+}
+
+SPEC_EVIDENCE_OWNER_PATHS = frozenset(SPEC_EVIDENCE_CLAIM_TEXT_FIELDS)
 
 _REFERENCE_KEYS = {
     "primary_customer",

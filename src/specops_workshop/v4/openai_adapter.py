@@ -25,6 +25,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 from specops_workflow.spec_identity_materialization import (
     SPEC_ANALYZER_COLLECTIONS,
+    SPEC_EVIDENCE_CLAIM_TEXT_FIELDS,
     spec_collection_slot_assignments,
 )
 
@@ -57,26 +58,6 @@ ARTIFACT_PAYLOAD_SCHEMAS = {
         "https://example.local/schemas/technical-contract-payload.schema.json",
     ),
 }
-
-_SPEC_EVIDENCE_OWNER_PATHS = frozenset(
-    {
-        ("glossary",),
-        ("outcomes",),
-        ("scope", "in_scope"),
-        ("scope", "non_goals"),
-        ("scope", "boundaries"),
-        ("behaviour_contract", "always"),
-        ("behaviour_contract", "ask_first"),
-        ("behaviour_contract", "never"),
-        ("requirements",),
-        ("data_rules",),
-        ("quality_attributes",),
-        ("constraints",),
-        ("dependencies",),
-        ("risks",),
-    }
-)
-
 
 @dataclass(frozen=True)
 class ProviderSourceUpload:
@@ -1806,11 +1787,20 @@ class StoredConversationOpenAIAdapter:
         evidence_claim_ids = list(
             dict.fromkeys(
                 identity
-                for path in _SPEC_EVIDENCE_OWNER_PATHS
+                for path in SPEC_EVIDENCE_CLAIM_TEXT_FIELDS
                 for identity in assignments[path]
             )
         )
+        evidence_claim_pointers = list(
+            dict.fromkeys(
+                "/" + "/".join((*path, identity, field))
+                for path, fields in SPEC_EVIDENCE_CLAIM_TEXT_FIELDS.items()
+                for identity in assignments[path]
+                for field in fields
+            )
+        )
         proposal_properties["claim_ref"]["enum"] = evidence_claim_ids
+        proposal_properties["claim_pointer"]["enum"] = evidence_claim_pointers
         proposal_properties["evidence_ref"]["enum"] = planned_by_kind.get(
             "EVIDENCE", []
         )
@@ -2058,7 +2048,9 @@ class StoredConversationOpenAIAdapter:
                     "item or null when that capacity is unused; never emit an id field inside a value. "
                     "Use only those local handles for references to new items. In "
                     "evidence_support_proposals.claim_pointer, use the local handle property segment "
-                    "rather than a numeric array index. Foundation alone assigns canonical UUIDs, "
+                    "rather than a numeric array index and terminate at one exact nonempty text "
+                    "field allowed by the bound schema; never point at the identity-bearing object. "
+                    "Foundation alone assigns canonical UUIDs, "
                     "rehydrates arrays in slot ordinal order, rewrites local references, and validates "
                     "the final graph. Never copy or infer a foundation_id for a NEW_ENTITY slot."
                 )

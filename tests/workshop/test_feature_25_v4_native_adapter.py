@@ -30,7 +30,10 @@ from specops_workshop.v4.schema_compiler import (
     native_schema_for,
     validate_openai_strict_schema,
 )
-from specops_workflow.spec_identity_materialization import SPEC_ANALYZER_COLLECTIONS
+from specops_workflow.spec_identity_materialization import (
+    SPEC_ANALYZER_COLLECTIONS,
+    SPEC_EVIDENCE_CLAIM_TEXT_FIELDS,
+)
 from specops_workflow.workshop_protocol import WorkshopFoundationService
 
 
@@ -964,6 +967,23 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
         for slot in collection_properties(path)
     }
     assert set(proposals["claim_ref"]["enum"]) == expected_evidence_claim_handles
+    expected_evidence_claim_pointers = {
+        "/" + "/".join((*path, slot, field))
+        for path, fields in SPEC_EVIDENCE_CLAIM_TEXT_FIELDS.items()
+        for slot in collection_properties(path)
+        for field in fields
+    }
+    assert set(proposals["claim_pointer"]["enum"]) == (
+        expected_evidence_claim_pointers
+    )
+    evidence_owner_pointers = {
+        "/" + "/".join((*path, slot))
+        for path in SPEC_EVIDENCE_CLAIM_TEXT_FIELDS
+        for slot in collection_properties(path)
+    }
+    assert set(proposals["claim_pointer"]["enum"]).isdisjoint(
+        evidence_owner_pointers
+    )
     validate_openai_strict_schema(schema)
 
 

@@ -30,6 +30,7 @@ from specops_workshop.v4.schema_compiler import (
     native_schema_for,
     validate_openai_strict_schema,
 )
+from specops_workflow.spec_identity_materialization import SPEC_ANALYZER_COLLECTIONS
 from specops_workflow.workshop_protocol import WorkshopFoundationService
 
 
@@ -856,15 +857,48 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
         assert "items" not in properties[field]
     scope_ref = properties["scope"]["$ref"].removeprefix("#/$defs/")
     scope = schema["$defs"][scope_ref]["properties"]
-    assert len(scope["in_scope"]["properties"]) == 10
-    assert len(scope["non_goals"]["properties"]) == 10
+    assert list(scope["in_scope"]["properties"]) == [
+        f"SCOPE_ITEM:{ordinal:04d}" for ordinal in range(1, 9)
+    ]
+    assert list(scope["non_goals"]["properties"]) == [
+        f"SCOPE_ITEM:{ordinal:04d}" for ordinal in range(9, 17)
+    ]
     behavior_ref = properties["behaviour_contract"]["$ref"].removeprefix(
         "#/$defs/"
     )
     behavior = schema["$defs"][behavior_ref]["properties"]
-    assert len(behavior["always"]["properties"]) == 12
-    assert len(behavior["ask_first"]["properties"]) == 12
-    assert len(behavior["never"]["properties"]) == 12
+    assert list(behavior["always"]["properties"]) == [
+        f"BEHAVIOUR_RULE:{ordinal:04d}" for ordinal in range(1, 9)
+    ]
+    assert list(behavior["ask_first"]["properties"]) == [
+        f"BEHAVIOUR_RULE:{ordinal:04d}" for ordinal in range(9, 11)
+    ]
+    assert list(behavior["never"]["properties"]) == [
+        f"BEHAVIOUR_RULE:{ordinal:04d}" for ordinal in range(11, 17)
+    ]
+
+    def collection_properties(path):
+        current = payload
+        for index, field in enumerate(path):
+            value = current["properties"][field]
+            if index == len(path) - 1:
+                return tuple(value["properties"])
+            current = schema["$defs"][value["$ref"].removeprefix("#/$defs/")]
+        raise AssertionError("empty collection path")
+
+    exposed_slots = [
+        slot
+        for path, _kind in SPEC_ANALYZER_COLLECTIONS
+        for slot in collection_properties(path)
+    ]
+    assert len(exposed_slots) == len(set(exposed_slots))
+    assert len(exposed_slots) == (
+        sum(expected_capacity.values())
+        - expected_capacity["EVIDENCE"]
+        - expected_capacity["SEMANTIC_EVIDENCE_FINDING"]
+        - expected_capacity["ACTOR"]
+        - expected_capacity["DECISION"]
+    )
     assert schema["properties"]["evidence_support_proposals"]["minItems"] == 8
     assert schema["properties"]["evidence_support_proposals"]["maxItems"] == 1_000
     max_items = []
@@ -909,6 +943,28 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
     assert len(proposals["claim_ref"]["enum"]) == len(
         set(proposals["claim_ref"]["enum"])
     )
+    expected_evidence_claim_handles = {
+        slot
+        for path in (
+            ("glossary",),
+            ("outcomes",),
+            ("scope", "in_scope"),
+            ("scope", "non_goals"),
+            ("scope", "boundaries"),
+            ("behaviour_contract", "always"),
+            ("behaviour_contract", "ask_first"),
+            ("behaviour_contract", "never"),
+            ("requirements",),
+            ("data_rules",),
+            ("quality_attributes",),
+            ("constraints",),
+            ("dependencies",),
+            ("risks",),
+        )
+        for slot in collection_properties(path)
+    }
+    assert set(proposals["claim_ref"]["enum"]) == expected_evidence_claim_handles
+    validate_openai_strict_schema(schema)
 
 
 def test_provider_parser_preserves_local_handles_for_foundation_materialization():

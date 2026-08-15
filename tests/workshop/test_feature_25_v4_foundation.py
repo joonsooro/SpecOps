@@ -1891,6 +1891,8 @@ def test_rule_derived_blueprint_projects_cross_domain_authority_deterministicall
     }
     assert counts["DECISION"] == 4
     assert counts["REQUIREMENT"] == 14
+    assert counts["SCOPE_ITEM"] == 16
+    assert counts["BEHAVIOUR_RULE"] == 16
     assert counts["SCENARIO"] == 12
     assert counts["EXPERIENCE_STATE"] == 9
     assert counts["ACCEPTANCE_CHECK"] == 14

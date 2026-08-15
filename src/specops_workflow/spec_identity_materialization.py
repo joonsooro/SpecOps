@@ -33,6 +33,16 @@ SPEC_ANALYZER_COLLECTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("acceptance_checks",), "ACCEPTANCE_CHECK"),
 )
 
+# Kinds with sibling semantic collections own one disjoint ordinal partition.
+# Single-path kinds implicitly own their complete Analyzer slot set.
+SPEC_ANALYZER_PATH_ORDINAL_RANGES: dict[tuple[str, ...], range] = {
+    ("scope", "in_scope"): range(1, 9),
+    ("scope", "non_goals"): range(9, 17),
+    ("behaviour_contract", "always"): range(1, 9),
+    ("behaviour_contract", "ask_first"): range(9, 11),
+    ("behaviour_contract", "never"): range(11, 17),
+}
+
 SPEC_EVIDENCE_OWNER_PATHS = frozenset(
     {
         ("glossary",),
@@ -77,23 +87,63 @@ class SpecIdentityMaterializationError(ValueError):
 def spec_collection_slot_assignments(
     slots: Iterable[c.ArtifactIdentitySlot | c.ArtifactConstructionSlot],
 ) -> dict[tuple[str, ...], tuple[c.ArtifactIdentitySlot | c.ArtifactConstructionSlot, ...]]:
-    """Expose ordered matching-kind slots at every eligible collection path."""
+    """Assign every Analyzer slot to exactly one ordered canonical collection path."""
 
     by_kind: dict[str, list[c.ArtifactIdentitySlot | c.ArtifactConstructionSlot]] = (
         defaultdict(list)
     )
     for slot in slots:
         if slot.owner == "ANALYZER" and slot.allocation_mode == "NEW_ENTITY":
+            if slot.slot_key != f"{slot.entity_kind}:{slot.ordinal:04d}":
+                raise SpecIdentityMaterializationError(
+                    "Analyzer slot key does not match its kind and ordinal"
+                )
             by_kind[slot.entity_kind].append(slot)
     for values in by_kind.values():
         values.sort(key=lambda item: item.ordinal)
+        ordinals = [item.ordinal for item in values]
+        if len(ordinals) != len(set(ordinals)):
+            raise SpecIdentityMaterializationError(
+                "Analyzer kind contains duplicate slot ordinals"
+            )
+
+    paths_by_kind: dict[str, list[tuple[str, ...]]] = defaultdict(list)
+    for path, kind in SPEC_ANALYZER_COLLECTIONS:
+        paths_by_kind[kind].append(path)
 
     result: dict[
         tuple[str, ...],
         tuple[c.ArtifactIdentitySlot | c.ArtifactConstructionSlot, ...],
     ] = {}
     for path, kind in SPEC_ANALYZER_COLLECTIONS:
-        result[path] = tuple(by_kind.get(kind, []))
+        values = by_kind.get(kind, [])
+        ordinal_range = SPEC_ANALYZER_PATH_ORDINAL_RANGES.get(path)
+        if len(paths_by_kind[kind]) > 1 and ordinal_range is None:
+            raise SpecIdentityMaterializationError(
+                "Analyzer sibling collection lacks an explicit slot partition",
+                (_pointer(path),),
+            )
+        result[path] = tuple(
+            item
+            for item in values
+            if ordinal_range is None or item.ordinal in ordinal_range
+        )
+
+    for kind, values in by_kind.items():
+        complete = {item.slot_key for item in values}
+        assigned: set[str] = set()
+        for path in paths_by_kind.get(kind, []):
+            path_keys = {item.slot_key for item in result[path]}
+            if assigned.intersection(path_keys):
+                raise SpecIdentityMaterializationError(
+                    "Analyzer sibling slot partitions overlap",
+                    (_pointer(path),),
+                )
+            assigned.update(path_keys)
+        if assigned != complete:
+            raise SpecIdentityMaterializationError(
+                "Analyzer slot partition does not exactly cover its kind"
+            )
     return result
 
 

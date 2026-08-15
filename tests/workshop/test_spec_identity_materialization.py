@@ -4,9 +4,12 @@ from uuid import UUID
 import pytest
 
 from specops_contracts import workshop_v1 as c
+from specops_workflow import spec_identity_materialization as identity_materialization
 from specops_workflow.spec_identity_materialization import (
+    SPEC_ANALYZER_PATH_ORDINAL_RANGES,
     SpecIdentityMaterializationError,
     materialize_spec_identities,
+    spec_collection_slot_assignments,
     validate_materialized_assignment,
 )
 
@@ -77,6 +80,69 @@ def _payload() -> dict:
         "open_items": {},
         "acceptance_checks": {},
     }
+
+
+def _kind_slots(kind: str, count: int, identity_offset: int):
+    return tuple(
+        _slot(
+            kind,
+            ordinal,
+            f"00000000-0000-4000-8000-{identity_offset + ordinal:012d}",
+        )
+        for ordinal in range(1, count + 1)
+    )
+
+
+def test_shared_layout_partitions_sibling_kinds_exactly_once():
+    scope = _kind_slots("SCOPE_ITEM", 16, 200)
+    behaviour = _kind_slots("BEHAVIOUR_RULE", 16, 300)
+
+    assignments = spec_collection_slot_assignments((*scope, *behaviour))
+
+    assert SPEC_ANALYZER_PATH_ORDINAL_RANGES == {
+        ("scope", "in_scope"): range(1, 9),
+        ("scope", "non_goals"): range(9, 17),
+        ("behaviour_contract", "always"): range(1, 9),
+        ("behaviour_contract", "ask_first"): range(9, 11),
+        ("behaviour_contract", "never"): range(11, 17),
+    }
+    assert tuple(item.slot_key for item in assignments[("scope", "in_scope")]) == tuple(
+        f"SCOPE_ITEM:{ordinal:04d}" for ordinal in range(1, 9)
+    )
+    assert tuple(item.slot_key for item in assignments[("scope", "non_goals")]) == tuple(
+        f"SCOPE_ITEM:{ordinal:04d}" for ordinal in range(9, 17)
+    )
+    assert tuple(
+        item.slot_key for item in assignments[("behaviour_contract", "always")]
+    ) == tuple(f"BEHAVIOUR_RULE:{ordinal:04d}" for ordinal in range(1, 9))
+    assert tuple(
+        item.slot_key for item in assignments[("behaviour_contract", "ask_first")]
+    ) == tuple(f"BEHAVIOUR_RULE:{ordinal:04d}" for ordinal in range(9, 11))
+    assert tuple(
+        item.slot_key for item in assignments[("behaviour_contract", "never")]
+    ) == tuple(f"BEHAVIOUR_RULE:{ordinal:04d}" for ordinal in range(11, 17))
+
+    for paths, expected in (
+        (
+            (("scope", "in_scope"), ("scope", "non_goals")),
+            {item.slot_key for item in scope},
+        ),
+        (
+            (
+                ("behaviour_contract", "always"),
+                ("behaviour_contract", "ask_first"),
+                ("behaviour_contract", "never"),
+            ),
+            {item.slot_key for item in behaviour},
+        ),
+    ):
+        path_sets = [{item.slot_key for item in assignments[path]} for path in paths]
+        assert all(
+            left.isdisjoint(right)
+            for index, left in enumerate(path_sets)
+            for right in path_sets[index + 1 :]
+        )
+        assert set().union(*path_sets) == expected
 
 
 def test_foundation_assigns_distinct_typed_ids_and_rewrites_local_graph():
@@ -161,21 +227,57 @@ def test_foundation_assigns_distinct_typed_ids_and_rewrites_local_graph():
     assert replay_map == assignment_map
 
 
-def test_foundation_fails_closed_on_slot_reuse_and_capacity_change():
-    scope = _slot("SCOPE_ITEM", 1, "00000000-0000-4000-8000-000000000120")
+def test_foundation_fails_closed_on_wrong_path_missing_and_over_capacity():
+    scope = _kind_slots("SCOPE_ITEM", 16, 400)
+    plan = _plan(*scope)
+    in_scope = {item.slot_key: None for item in scope[:8]}
+    non_goals = {item.slot_key: None for item in scope[8:]}
+
+    payload = _payload()
+    payload["scope"]["in_scope"] = deepcopy(in_scope)
+    payload["scope"]["non_goals"] = deepcopy(non_goals)
+    payload["scope"]["non_goals"][scope[0].slot_key] = {"statement": "Wrong path"}
+    with pytest.raises(SpecIdentityMaterializationError, match="typed slot capacity"):
+        materialize_spec_identities(payload=payload, proposals=(), identity_plan=plan)
+
+    payload = _payload()
+    payload["scope"]["in_scope"] = deepcopy(in_scope)
+    payload["scope"]["non_goals"] = deepcopy(non_goals)
+    payload["scope"]["non_goals"].pop(scope[-1].slot_key)
+    with pytest.raises(SpecIdentityMaterializationError, match="typed slot capacity"):
+        materialize_spec_identities(payload=payload, proposals=(), identity_plan=plan)
+
+    payload = _payload()
+    payload["scope"]["in_scope"] = deepcopy(in_scope)
+    payload["scope"]["non_goals"] = deepcopy(non_goals)
+    payload["scope"]["non_goals"]["SCOPE_ITEM:0017"] = None
+    with pytest.raises(SpecIdentityMaterializationError, match="typed slot capacity"):
+        materialize_spec_identities(payload=payload, proposals=(), identity_plan=plan)
+
+
+def test_global_consumed_slot_guard_remains_defense_in_depth(monkeypatch):
+    scope = _slot("SCOPE_ITEM", 1, "00000000-0000-4000-8000-000000000500")
     plan = _plan(scope)
     payload = _payload()
     payload["scope"]["in_scope"] = {scope.slot_key: {"statement": "Included"}}
     payload["scope"]["non_goals"] = {scope.slot_key: {"statement": "Excluded"}}
+    monkeypatch.setattr(
+        identity_materialization,
+        "spec_collection_slot_assignments",
+        lambda _slots: {
+            ("scope", "in_scope"): (scope,),
+            ("scope", "non_goals"): (scope,),
+        },
+    )
 
     with pytest.raises(SpecIdentityMaterializationError, match="reused"):
         materialize_spec_identities(payload=payload, proposals=(), identity_plan=plan)
 
-    payload = _payload()
-    payload["scope"]["in_scope"] = {}
-    payload["scope"]["non_goals"] = {scope.slot_key: None}
-    with pytest.raises(SpecIdentityMaterializationError, match="typed slot capacity"):
-        materialize_spec_identities(payload=payload, proposals=(), identity_plan=plan)
+
+def test_shared_layout_rejects_slot_outside_owned_capacity():
+    scope = _kind_slots("SCOPE_ITEM", 17, 600)
+    with pytest.raises(SpecIdentityMaterializationError, match="exactly cover"):
+        spec_collection_slot_assignments(scope)
 
 
 def test_foundation_rejects_direct_new_entity_uuid_reference_bypass():

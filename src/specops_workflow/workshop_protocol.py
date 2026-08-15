@@ -1459,10 +1459,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ("ACTOR", 1, "FOUNDATION", "Q004 project canonical actor authority."),
             ("GLOSSARY_TERM", 8, "ANALYZER", "Q005 bound one material term."),
             ("OUTCOME", 2, "ANALYZER", "Define one measurable outcome."),
-            ("SCOPE_ITEM", 10, "ANALYZER", "Define one atomic scope inclusion or non-goal."),
+            ("SCOPE_ITEM", 16, "ANALYZER", "Define one atomic scope inclusion or non-goal."),
             ("SCOPE_BOUNDARY", 2, "ANALYZER", "Define one explicit scope boundary."),
             ("JOURNEY", 3, "ANALYZER", "Trace one complete actor journey."),
-            ("BEHAVIOUR_RULE", 12, "ANALYZER", "Define one atomic behavior obligation."),
+            ("BEHAVIOUR_RULE", 16, "ANALYZER", "Define one atomic behavior obligation."),
             ("REQUIREMENT", requirement_count, "ANALYZER", "Q007 define one atomic requirement."),
             ("DATA_RULE", 8, "ANALYZER", "Q015 fully define one exported data element."),
             (

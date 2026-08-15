@@ -23,6 +23,10 @@ from uuid import UUID
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
+from specops_workflow.spec_identity_materialization import (
+    SPEC_ANALYZER_COLLECTIONS,
+    spec_collection_slot_assignments,
+)
 
 from . import contracts
 from .schema_compiler import (
@@ -54,28 +58,6 @@ ARTIFACT_PAYLOAD_SCHEMAS = {
     ),
 }
 
-_SPEC_FOUNDATION_ASSIGNED_COLLECTIONS = (
-    (("package_items",), "PACKAGE_ITEM"),
-    (("glossary",), "GLOSSARY_TERM"),
-    (("outcomes",), "OUTCOME"),
-    (("scope", "in_scope"), "SCOPE_ITEM"),
-    (("scope", "non_goals"), "SCOPE_ITEM"),
-    (("scope", "boundaries"), "SCOPE_BOUNDARY"),
-    (("journeys",), "JOURNEY"),
-    (("behaviour_contract", "always"), "BEHAVIOUR_RULE"),
-    (("behaviour_contract", "ask_first"), "BEHAVIOUR_RULE"),
-    (("behaviour_contract", "never"), "BEHAVIOUR_RULE"),
-    (("requirements",), "REQUIREMENT"),
-    (("data_rules",), "DATA_RULE"),
-    (("experience_states",), "EXPERIENCE_STATE"),
-    (("scenarios",), "SCENARIO"),
-    (("quality_attributes",), "QUALITY_ATTRIBUTE"),
-    (("constraints",), "CONSTRAINT"),
-    (("dependencies",), "DEPENDENCY"),
-    (("risks",), "RISK"),
-    (("open_items",), "OPEN_ITEM"),
-    (("acceptance_checks",), "ACCEPTANCE_CHECK"),
-)
 _SPEC_EVIDENCE_OWNER_PATHS = frozenset(
     {
         ("glossary",),
@@ -94,23 +76,6 @@ _SPEC_EVIDENCE_OWNER_PATHS = frozenset(
         ("risks",),
     }
 )
-
-
-def _spec_collection_identity_assignments(
-    request: contracts.SpecPackageSynthesisRequest,
-) -> dict[tuple[str, ...], tuple[str, ...]]:
-    """Partition local Analyzer handles across canonical collection paths."""
-
-    identities_by_kind: dict[str, list[str]] = {}
-    for slot in request.construction_blueprint.slots:
-        if slot.owner == "ANALYZER" and slot.allocation_mode == "NEW_ENTITY":
-            identities_by_kind.setdefault(slot.entity_kind, []).append(
-                slot.slot_key
-            )
-    assignments: dict[tuple[str, ...], tuple[str, ...]] = {}
-    for path, kind in _SPEC_FOUNDATION_ASSIGNED_COLLECTIONS:
-        assignments[path] = tuple(identities_by_kind.get(kind, []))
-    return assignments
 
 
 @dataclass(frozen=True)
@@ -1669,7 +1634,12 @@ class StoredConversationOpenAIAdapter:
             if maximum:
                 value["minItems"] = 1
 
-        assignments = _spec_collection_identity_assignments(request)
+        assignments = {
+            path: tuple(item.slot_key for item in slots)
+            for path, slots in spec_collection_slot_assignments(
+                request.construction_blueprint.slots
+            ).items()
+        }
 
         def collection_schema(path: tuple[str, ...]) -> dict[str, Any]:
             current = payload_root
@@ -1692,7 +1662,7 @@ class StoredConversationOpenAIAdapter:
                 )
             raise AssertionError("empty Spec collection path")
 
-        for path, _kind in _SPEC_FOUNDATION_ASSIGNED_COLLECTIONS:
+        for path, _kind in SPEC_ANALYZER_COLLECTIONS:
             identities = assignments[path]
             if not identities:
                 continue

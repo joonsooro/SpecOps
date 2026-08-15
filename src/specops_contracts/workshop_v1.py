@@ -1319,6 +1319,133 @@ class ArtifactSynthesisQualityRule(ContractModel):
     ]
 
 
+TECHNICAL_CLOSURE_RULE_LAYOUT = (
+    (
+        "ARCHITECTURE_CLOSURE",
+        "ARCHITECTURE",
+        "Represent every component and substrate dependency exactly once as an architecture node, and define every interaction purpose, data or signal, and trust-boundary crossing.",
+    ),
+    (
+        "RESPONSIBILITY_CLOSURE",
+        "RESPONSIBILITY",
+        "Assign every technical responsibility to exactly one owned component and connect build units, interfaces, data contracts, failures, and dependencies to those components.",
+    ),
+    (
+        "INTERFACE_CLOSURE",
+        "INTERFACE",
+        "For every independently executable operation define producer, consumers, input, output, preconditions, postconditions, errors, authorization, idempotency, timeout, and versioning.",
+    ),
+    (
+        "DATA_CLOSURE",
+        "DATA",
+        "Map every material Spec data rule to field-level source, representation, null and invalid behavior, classification, retention, consistency, and temporal or numeric boundaries.",
+    ),
+    (
+        "WORKFLOW_CLOSURE",
+        "WORKFLOW",
+        "For every workflow define exactly one initial state, transitions for every nonterminal state, failure behavior, concurrency behavior, and invalid-transition behavior.",
+    ),
+    (
+        "DELIVERY_GOVERNANCE_CLOSURE",
+        "DELIVERY_GOVERNANCE",
+        "Assign rollout ownership; keep only concrete evidence-backed choices in engineering decisions and place unresolved choices in review obligations with an owner, required evidence, and downstream effect.",
+    ),
+)
+
+TECHNICAL_CLOSURE_OBLIGATION_PATHS = (
+    ("requirements", "requirement"),
+    ("data_rules", "data_rule"),
+    ("acceptance_checks", "acceptance_check"),
+    ("quality_attributes", "quality_attribute"),
+)
+
+
+def technical_closure_obligations_from_spec_payload(
+    payload: dict[str, Any],
+) -> tuple[tuple[str, UUID, str], ...]:
+    """Return the exact ordered Spec identities that Technical must cover."""
+
+    result: list[tuple[str, UUID, str]] = []
+    for collection, source_kind in TECHNICAL_CLOSURE_OBLIGATION_PATHS:
+        values = payload.get(collection, [])
+        if not isinstance(values, list):
+            raise ValueError("confirmed Spec closure collection is invalid")
+        for index, item in enumerate(values):
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                raise ValueError("confirmed Spec closure item has no identity")
+            result.append((source_kind, UUID(item["id"]), f"/{collection}/{index}"))
+    behaviour = payload.get("behaviour_contract", {})
+    if not isinstance(behaviour, dict):
+        raise ValueError("confirmed Spec behavior contract is invalid")
+    for collection in ("always", "ask_first", "never"):
+        values = behaviour.get(collection, [])
+        if not isinstance(values, list):
+            raise ValueError("confirmed Spec behavior collection is invalid")
+        for index, item in enumerate(values):
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                raise ValueError("confirmed Spec behavior item has no identity")
+            result.append(
+                (
+                    "behaviour_rule",
+                    UUID(item["id"]),
+                    f"/behaviour_contract/{collection}/{index}",
+                )
+            )
+    return tuple(result)
+
+
+class TechnicalClosureRule(ContractModel):
+    rule_key: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    section: Literal[
+        "ARCHITECTURE",
+        "RESPONSIBILITY",
+        "INTERFACE",
+        "DATA",
+        "WORKFLOW",
+        "DELIVERY_GOVERNANCE",
+    ]
+    requirement: Statement
+
+
+class TechnicalClosureObligation(ContractModel):
+    source_kind: Literal[
+        "requirement",
+        "data_rule",
+        "acceptance_check",
+        "quality_attribute",
+        "behaviour_rule",
+    ]
+    source_ref: UUID
+    source_pointer: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^/(?:[a-z][a-z0-9_]*|[0-9]+)(?:/(?:[a-z][a-z0-9_]*|[0-9]+))*$"),
+    ]
+
+
+class TechnicalClosureManifest(ContractModel):
+    manifest_version: Literal["1.0.0"]
+    rules: Annotated[tuple[TechnicalClosureRule, ...], Field(min_length=6, max_length=6)]
+    obligations: Annotated[
+        tuple[TechnicalClosureObligation, ...], Field(min_length=1, max_length=1_000)
+    ]
+
+    @model_validator(mode="after")
+    def exact_rules_and_unique_obligations(self) -> TechnicalClosureManifest:
+        supplied_rules = tuple(
+            (item.rule_key, item.section, item.requirement) for item in self.rules
+        )
+        if supplied_rules != TECHNICAL_CLOSURE_RULE_LAYOUT:
+            raise ValueError("Technical closure manifest rules changed")
+        identities = [item.source_ref for item in self.obligations]
+        pointers = [item.source_pointer for item in self.obligations]
+        if len(identities) != len(set(identities)) or len(pointers) != len(set(pointers)):
+            raise ValueError("Technical closure obligations must be unique")
+        return self
+
+
 class ConfirmedSpecSynthesisBinding(ContractModel):
     foundation_artifact_id: UUID
     artifact_key: Annotated[str, StringConstraints(strict=True, pattern=r"^SPEC-[A-Z0-9][A-Z0-9-]{2,63}$")]
@@ -1414,6 +1541,8 @@ class TechnicalContractSynthesisRequest(AnalyzerRequestEnvelope):
     request_type: Literal[AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS]
     target: ArtifactDraftTarget
     identity_plan: ArtifactSynthesisIdentityPlan
+    construction_blueprint: ArtifactConstructionBlueprint
+    technical_closure_manifest: TechnicalClosureManifest
     confirmed_spec: ConfirmedSpecSynthesisBinding
     foundation_snapshot: FoundationSemanticSnapshot
     payload_schema_id: Literal["technical-contract-payload"]
@@ -1434,6 +1563,24 @@ class TechnicalContractSynthesisRequest(AnalyzerRequestEnvelope):
             raise ValueError("request and snapshot source-set hashes must match")
         if self.based_on_case_revision < self.confirmed_spec.confirmed_case_revision:
             raise ValueError("Technical synthesis cannot precede the confirmed Spec commit")
+        planned = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.identity_plan.planned_identities
+        }
+        blueprint = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.construction_blueprint.slots
+        }
+        if blueprint != planned:
+            raise ValueError("construction blueprint must bind every planned identity exactly")
+        spec_payload = json.loads(self.confirmed_spec.canonical_payload_json)
+        expected_obligations = technical_closure_obligations_from_spec_payload(spec_payload)
+        supplied_obligations = tuple(
+            (item.source_kind, item.source_ref, item.source_pointer)
+            for item in self.technical_closure_manifest.obligations
+        )
+        if supplied_obligations != expected_obligations:
+            raise ValueError("Technical closure manifest changed confirmed Spec obligations")
         return self
 
 
@@ -2687,6 +2834,12 @@ __all__ = [
     "SpecPackageSynthesisRequest",
     "TechnicalContractSynthesisCandidate",
     "TechnicalContractSynthesisRequest",
+    "TechnicalClosureManifest",
+    "TechnicalClosureObligation",
+    "TechnicalClosureRule",
+    "TECHNICAL_CLOSURE_OBLIGATION_PATHS",
+    "TECHNICAL_CLOSURE_RULE_LAYOUT",
+    "technical_closure_obligations_from_spec_payload",
     "TurnAnalysisCandidate",
     "VoiceConfirmationSelectionCandidate",
     "VoiceSessionCard",

@@ -1465,17 +1465,53 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         """Derive identity-bound construction work from the active quality manifest."""
 
         if artifact_type == "TECHNICAL_CONTRACT":
+            groups = (
+                ("EVIDENCE", 1, "Bind one exact technical evidence record."),
+                (
+                    "SEMANTIC_EVIDENCE_FINDING",
+                    1,
+                    "Bind one exact technical claim to supporting evidence.",
+                ),
+                (
+                    "ARCHITECTURE_NODE",
+                    6,
+                    "Represent one component, substrate dependency, actor, or system boundary node.",
+                ),
+                ("COMPONENT", 5, "Own one atomic technical responsibility."),
+                (
+                    "INTERFACE",
+                    6,
+                    "Define one independently executable operation and its complete contract.",
+                ),
+                ("DATA_CONTRACT", 4, "Define one owned material data contract."),
+                ("WORKFLOW", 3, "Define one complete state machine."),
+                ("FAILURE_CONTRACT", 4, "Define one detectable failure and recovery path."),
+                ("SECURITY_CONTROL", 3, "Define one enforceable security or privacy control."),
+                ("QUALITY_BUDGET", 4, "Bind one measurable Spec quality obligation."),
+                ("SUBSTRATE_DEPENDENCY", 4, "Declare one owned platform dependency."),
+                ("OBSERVABILITY_EVENT", 3, "Define one diagnostic event."),
+                ("OBSERVABILITY_METRIC", 3, "Define one measurable signal."),
+                ("OBSERVABILITY_TRACE", 2, "Define one correlation trace."),
+                ("AUDIT_RECORD", 2, "Define one durable audit record."),
+                ("OBSERVABILITY_ALERT", 2, "Define one actionable alert."),
+                ("ROLLOUT_STEP", 3, "Define one owned rollout step."),
+                ("BUILD_UNIT", 6, "Define one component-bound implementation unit."),
+                ("VERIFICATION_ITEM", 8, "Verify one independently executable obligation."),
+                (
+                    "ENGINEERING_DECISION",
+                    3,
+                    "Record one concrete, evidence-backed technical choice.",
+                ),
+                (
+                    "REVIEW_OBLIGATION",
+                    5,
+                    "Track one unresolved choice with owner, evidence requirement, and effect.",
+                ),
+            )
             return tuple(
-                (kind, "ANALYZER", f"Construct the required {kind.lower()} contract record.")
-                for kind in (
-                    "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING", "ARCHITECTURE_NODE",
-                    "COMPONENT", "INTERFACE", "DATA_CONTRACT", "WORKFLOW",
-                    "FAILURE_CONTRACT", "SECURITY_CONTROL", "QUALITY_BUDGET",
-                    "SUBSTRATE_DEPENDENCY", "OBSERVABILITY_EVENT",
-                    "OBSERVABILITY_METRIC", "OBSERVABILITY_TRACE", "AUDIT_RECORD",
-                    "OBSERVABILITY_ALERT", "ROLLOUT_STEP", "BUILD_UNIT",
-                    "VERIFICATION_ITEM", "ENGINEERING_DECISION", "REVIEW_OBLIGATION",
-                )
+                (kind, "ANALYZER", f"{purpose} Capacity slot {index + 1}.")
+                for kind, count, purpose in groups
+                for index in range(count)
             )
         if artifact_type != "SPEC_PACKAGE":
             raise ValueError("unknown artifact type")

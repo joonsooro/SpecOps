@@ -74,38 +74,61 @@ def quality_revision_pointer_closure(
     result = set(finding_pointers)
     allocated = set(allocated_identity_kinds)
     collections = {
-        "ACTOR": "actors",
-        "REQUIREMENT": "requirements",
-        "ACCEPTANCE_CHECK": "acceptance_checks",
-        "GLOSSARY_TERM": "glossary",
-        "EXPERIENCE_STATE": "experience_states",
-        "SCENARIO": "scenarios",
-        "DATA_CONTRACT": "data_contracts",
-        "QUALITY_BUDGET": "quality_budgets",
-        "VERIFICATION_ITEM": "verification_plan",
+        "ACTOR": ("actors",),
+        "REQUIREMENT": ("requirements",),
+        "ACCEPTANCE_CHECK": ("acceptance_checks",),
+        "GLOSSARY_TERM": ("glossary",),
+        "EXPERIENCE_STATE": ("experience_states",),
+        "SCENARIO": ("scenarios",),
+        "ARCHITECTURE_NODE": ("architecture_context", "nodes"),
+        "COMPONENT": ("components",),
+        "INTERFACE": ("interfaces",),
+        "DATA_CONTRACT": ("data_contracts",),
+        "WORKFLOW": ("workflows",),
+        "FAILURE_CONTRACT": ("failure_contracts",),
+        "QUALITY_BUDGET": ("quality_budgets",),
+        "SUBSTRATE_DEPENDENCY": ("substrate_dependencies",),
+        "ROLLOUT_STEP": ("rollout_migration_recovery", "rollout_steps"),
+        "BUILD_UNIT": ("build_units",),
+        "VERIFICATION_ITEM": ("verification_plan",),
+        "ENGINEERING_DECISION": ("engineering_decisions",),
+        "REVIEW_OBLIGATION": ("review_obligations",),
     }
+
+    def resolve_collection(path: tuple[str, ...]) -> list[Any]:
+        value: Any = payload
+        for token in path:
+            value = value.get(token) if isinstance(value, dict) else None
+        if not isinstance(value, list):
+            raise ValueError("quality revision split collection does not resolve")
+        return value
+
+    def collection_pointer(path: tuple[str, ...]) -> str:
+        return "/" + "/".join(_escape_pointer_token(token) for token in path)
+
     anchor_ids: set[str] = set()
     requirement_anchors: list[dict[str, Any]] = []
-    for kind, collection in collections.items():
+    for kind, collection_path in collections.items():
         if kind not in allocated:
             continue
-        values = payload.get(collection, [])
-        if not isinstance(values, list):
-            raise ValueError("quality revision split collection does not resolve")
-        result.add(f"/{_escape_pointer_token(collection)}")
+        values = resolve_collection(collection_path)
+        result.add(collection_pointer(collection_path))
         for pointer in finding_pointers:
             tokens = _pointer_tokens(pointer)
-            if len(tokens) < 2 or tokens[0] != collection:
+            if (
+                len(tokens) <= len(collection_path)
+                or tuple(tokens[: len(collection_path)]) != collection_path
+            ):
                 continue
             try:
-                item = values[int(tokens[1])]
+                item = values[int(tokens[len(collection_path)])]
             except (IndexError, TypeError, ValueError):
                 raise ValueError("quality revision split pointer does not resolve") from None
             identity = item.get("id") if isinstance(item, dict) else None
             if not isinstance(identity, str):
                 raise ValueError("quality revision split pointer has no identity")
             anchor_ids.add(identity)
-            if collection == "requirements":
+            if collection_path == ("requirements",):
                 requirement_anchors.append(item)
 
     if "ACCEPTANCE_CHECK" in allocated:

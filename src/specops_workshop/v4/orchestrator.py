@@ -29,6 +29,9 @@ from specops_workflow.artifact_evidence_support import (
     prepare_evidence_support_request,
     project_evidence_catalog,
 )
+from specops_workflow.technical_contract_preflight import (
+    build_technical_closure_manifest,
+)
 from specops_workflow.workshop_completion import (
     CompletionUtterance,
     classify_completion_utterance,
@@ -1637,6 +1640,10 @@ class V4ProductionOrchestrator:
                 c.TechnicalContractSynthesisRequest,
                 dict(
                     common,
+                    construction_blueprint=construction_blueprint,
+                    technical_closure_manifest=build_technical_closure_manifest(
+                        json.loads(confirmed.canonical_payload_json)
+                    ),
                     confirmed_spec=confirmed,
                     payload_schema_id="technical-contract-payload",
                     payload_schema_version="4.0.0",

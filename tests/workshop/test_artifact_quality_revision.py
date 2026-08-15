@@ -43,6 +43,40 @@ def test_technical_split_allocations_open_only_their_canonical_collections():
     )
 
 
+def test_technical_closure_revision_opens_nested_architecture_and_owned_records():
+    payload = {
+        "architecture_context": {
+            "nodes": [{"id": "00000000-0000-4000-8000-000000000011"}]
+        },
+        "components": [{"id": "00000000-0000-4000-8000-000000000012"}],
+        "interfaces": [{"id": "00000000-0000-4000-8000-000000000013"}],
+    }
+
+    pointers = quality_revision_pointer_closure(
+        payload=payload,
+        finding_pointers=(
+            "/architecture_context/nodes/0",
+            "/components/0",
+            "/interfaces/0",
+        ),
+        allocated_identity_kinds=(
+            "ARCHITECTURE_NODE",
+            "COMPONENT",
+            "INTERFACE",
+        ),
+    )
+
+    assert pointers == (
+        "/architecture_context",
+        "/architecture_context/nodes",
+        "/architecture_context/nodes/0",
+        "/components",
+        "/components/0",
+        "/interfaces",
+        "/interfaces/0",
+    )
+
+
 def test_technical_revision_recovers_only_hash_bound_confirmed_spec_lineage():
     spec_payload = PayloadFactory().payload("spec-package-payload.schema.json")
     binding = json.dumps(

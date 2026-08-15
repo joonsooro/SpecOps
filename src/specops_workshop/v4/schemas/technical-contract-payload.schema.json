@@ -249,6 +249,13 @@
         },
         "responsibility": {
           "$ref": "#/$defs/nonEmptyString"
+        },
+        "technical_ref": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -985,6 +992,9 @@
         "migration": {
           "$ref": "#/$defs/nonEmptyString"
         },
+        "owner": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
         "recovery_evidence": {
           "$ref": "#/$defs/nonEmptyString"
         },
@@ -1418,6 +1428,9 @@
           "minItems": 1,
           "type": "array",
           "uniqueItems": true
+        },
+        "initial_state": {
+          "$ref": "#/$defs/nonEmptyString"
         },
         "invalid_transition_behaviour": {
           "$ref": "#/$defs/nonEmptyString"

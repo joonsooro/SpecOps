@@ -2087,6 +2087,22 @@ class StoredConversationOpenAIAdapter:
                 "problem. Evidence excerpts must support the exact atomic claim that cites them; a "
                 "source question alone never supports a broader combined requirement."
             )
+        elif operation is contracts.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS:
+            instructions += (
+                " Treat construction_blueprint and technical_closure_manifest as the exact, "
+                "Foundation-owned Technical construction checklist. Cover every manifest "
+                "obligation through an implements_spec_refs, covers_acceptance_refs, or "
+                "spec_quality_ref edge; never omit an obligation merely because the payload "
+                "schema permits a smaller collection. Represent each component and substrate "
+                "dependency exactly once in architecture_context.nodes by technical_ref. "
+                "Use one interface record per independently executable operation and complete "
+                "all input, output, authorization, failure, idempotency, timeout, and versioning "
+                "semantics. Define initial_state for every workflow and owner for the rollout. "
+                "Engineering decisions contain only concrete evidence-backed choices. Put an "
+                "unresolved choice in review_obligations instead; do not invent a resolution. "
+                "Construction slots are bounded capacity and may remain unused, but every emitted "
+                "identity must retain the planned kind and Foundation identity."
+            )
         return instructions
 
     @staticmethod

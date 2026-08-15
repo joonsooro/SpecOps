@@ -803,6 +803,45 @@ def test_rule_derived_blueprint_requires_generic_material_and_approval_completen
     assert not {"csv", "order_date", "date range"}.intersection(rendered.split())
 
 
+def test_technical_closure_schema_and_capacity_are_generic_and_strict():
+    adapter = StoredConversationOpenAIAdapter(
+        api_key="unused", client=SimpleNamespace()
+    )
+    payload_schema = adapter._provider_owned_artifact_payload_schema(
+        c.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS
+    )
+    strict_schema = compile_openai_strict_payload_schema(payload_schema)
+    validate_openai_strict_schema(strict_schema)
+
+    context_node = strict_schema["$defs"]["contextNode"]
+    workflow = strict_schema["$defs"]["workflow"]
+    rollout = strict_schema["$defs"]["rolloutMigrationRecovery"]
+    assert "technical_ref" in context_node["required"]
+    assert context_node["properties"]["technical_ref"]["anyOf"][-1] == {
+        "type": "null"
+    }
+    assert "initial_state" in workflow["required"]
+    assert "owner" in rollout["required"]
+
+    policy = WorkshopFoundationService.artifact_construction_policy(
+        "TECHNICAL_CONTRACT"
+    )
+    counts = Counter(kind for kind, _owner, _purpose in policy)
+    assert counts["ARCHITECTURE_NODE"] == 6
+    assert counts["COMPONENT"] == 5
+    assert counts["INTERFACE"] == 6
+    assert counts["DATA_CONTRACT"] == 4
+    assert counts["WORKFLOW"] == 3
+    rendered = " ".join(purpose for _kind, _owner, purpose in policy).lower()
+    assert not {"csv", "order_date", "export"}.intersection(rendered.split())
+
+    instructions = adapter._instructions(
+        c.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS
+    )
+    assert "technical_closure_manifest" in instructions
+    assert "unresolved choice" in instructions
+
+
 def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
     adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
     sources = (

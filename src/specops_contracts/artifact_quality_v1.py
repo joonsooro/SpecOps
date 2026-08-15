@@ -347,7 +347,7 @@ class AuditTranscript(StrictModel):
 
 class QualityContractBinding(StrictModel):
     contract_id: Literal["SEMANTIC-QUALITY-CONTRACT"]
-    version: Literal["2.1.0"]
+    version: Literal["2.2.0"]
     content_hash: Sha256
 
 

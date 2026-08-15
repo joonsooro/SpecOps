@@ -42,7 +42,12 @@ from .openai_adapter import (
     ProviderSourceUpload,
     StoredConversationOpenAIAdapter,
 )
-from .artifact_quality import build_audit_bundle, build_audit_sources, load_quality_rules
+from .artifact_quality import (
+    build_audit_bundle,
+    build_audit_sources,
+    load_quality_rules,
+    quality_contract_hash,
+)
 from .artifact_quality_adapter import (
     ArtifactQualityEvaluator,
     PreparedArtifactQualityContext,
@@ -1352,7 +1357,11 @@ class V4ProductionOrchestrator:
         record = self.foundation.latest_artifact_record(self.case_id, artifact_type)
         if record is None:
             raise ValueError("no synthesized artifact exists for quality evaluation")
-        context = await self.ensure_context()
+        prohibited_conversation_id = (
+            self.foundation.active_analyzer_provider_conversation_id(self.case_id)
+        )
+        if prohibited_conversation_id is None:
+            raise ValueError("quality audit requires an active Analyzer provider binding")
         audit_id = _stable_id(
             self.case_id,
             "artifact-quality-audit",
@@ -1371,9 +1380,7 @@ class V4ProductionOrchestrator:
             sources=self.sources,
             transcripts=self.foundation.final_transcripts(self.case_id),
             semantic_snapshot=self.foundation.semantic_snapshot(self.case_id),
-            semantic_quality_contract_hash=(
-                self.analyzer_contract.semantic_quality_contract_hash
-            ),
+            semantic_quality_contract_hash=quality_contract_hash(),
             confirmed_spec=(
                 self.foundation.confirmed_spec_binding(self.case_id)
                 if artifact_type == "TECHNICAL_CONTRACT"
@@ -1395,7 +1402,7 @@ class V4ProductionOrchestrator:
         if provider_context is None:
             prepared = await self.quality_evaluator.prepare(
                 bundle,
-                prohibited_conversation_id=context.provider_conversation_id,
+                prohibited_conversation_id=prohibited_conversation_id,
             )
             self.foundation.bind_artifact_quality_evaluator(
                 q.BindArtifactQualityEvaluatorCommand(
@@ -1738,6 +1745,7 @@ class V4ProductionOrchestrator:
             self.case_id,
             support_request,
             evaluation.candidate,
+            evaluation.execution,
         )
 
     def _shallow_runway_blocks_synthesis(self) -> bool:

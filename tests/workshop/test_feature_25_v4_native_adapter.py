@@ -53,7 +53,7 @@ def _contract() -> c.AnalyzerContractBinding:
         instruction_set_version=1,
         instruction_set_hash=ZERO_HASH,
         semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-        semantic_quality_contract_version="2.1.0",
+        semantic_quality_contract_version="2.2.0",
         semantic_quality_contract_hash=ONE_HASH,
         provider_schema_version="1.0.0",
         model="gpt-5.6-terra",

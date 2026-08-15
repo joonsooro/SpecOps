@@ -65,7 +65,7 @@ def draft_governance(
     instant = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     quality = {
         "contract_id": "SEMANTIC-QUALITY-CONTRACT",
-        "version": "2.1.0",
+        "version": "2.2.0",
         "content_hash": quality_hash,
     }
     if artifact_type == "SPEC_PACKAGE":
@@ -73,7 +73,7 @@ def draft_governance(
             "quality_contract": quality,
             "readiness_audit": {
                 "audit_id": str(new_id()),
-                "quality_contract_version": "2.1.0",
+                "quality_contract_version": "2.2.0",
                 "based_on_artifact_version": target.next_artifact_version,
                 "run_at": instant,
                 "ambiguity_findings": [],
@@ -102,7 +102,7 @@ def draft_governance(
         "quality_contract": quality,
         "contract_readiness": {
             "audit_id": str(new_id()),
-            "quality_contract_version": "2.1.0",
+            "quality_contract_version": "2.2.0",
             "based_on_contract_version": target.next_artifact_version,
             "run_at": instant,
             "rule_results": [],

@@ -10,7 +10,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from specops_contracts import workshop_v1 as c
 from specops_contracts import artifact_quality_v1 as q
@@ -20,6 +21,7 @@ from specops_workflow.enums import SourceArtifactType
 from specops_workflow.models import CreateCaseCommand, RegisterSourceArtifactCommand, SourceArtifactIdentity
 from specops_workflow.persistence import (
     ARTIFACT_QUALITY_TABLES,
+    EVIDENCE_ASSESSMENT_TABLES,
     WORKSHOP_PROTOCOL_TABLES,
     audit_events,
     cases,
@@ -80,7 +82,7 @@ def _contract() -> c.AnalyzerContractBinding:
         instruction_set_version=1,
         instruction_set_hash="sha256:" + "3" * 64,
         semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-        semantic_quality_contract_version="2.1.0",
+        semantic_quality_contract_version="2.2.0",
         semantic_quality_contract_hash=quality_contract_hash(),
         provider_schema_version="1.0.0",
         model="gpt-5.6-terra",
@@ -1596,7 +1598,7 @@ def test_artifact_admission_accepts_unused_bounded_identity_capacity(tmp_path):
     assert foundation.case_revision(CASE_ID) == 5
 
 
-def test_foundation_materializes_only_exact_supported_evidence_revision(tmp_path):
+def test_foundation_materializes_and_retains_exact_evidence_revision_once(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     payload = PayloadFactory().payload("spec-package-payload.schema.json")
@@ -1707,8 +1709,18 @@ def test_foundation_materializes_only_exact_supported_evidence_revision(tmp_path
         ),
     )
 
+    execution = q.StandaloneEvaluatorExecutionBinding(
+        provider="OPENAI",
+        model="gpt-5.6-terra",
+        reasoning_effort="medium",
+        provider_response_id="resp_evidence_support_fixture",
+        client_request_id=f"aqa-support-{request.request_hash[7:39]}",
+        store_enabled=True,
+        started_at=NOW,
+        completed_at=NOW,
+    )
     revised = foundation.materialize_artifact_evidence_support(
-        CASE_ID, request, support
+        CASE_ID, request, support, execution
     )
 
     revised_payload = json.loads(revised["payload_json"])
@@ -1719,6 +1731,42 @@ def test_foundation_materializes_only_exact_supported_evidence_revision(tmp_path
         finding_id
     )
     assert revised_payload["semantic_evidence_findings"][0]["assessment"] == "SUPPORTS"
+    assert foundation.case_revision(CASE_ID) == 6
+    with foundation.engine.connect() as connection:
+        run = connection.execute(
+            select(
+                EVIDENCE_ASSESSMENT_TABLES[
+                    "workshop_artifact_evidence_assessment_runs"
+                ]
+            )
+        ).mappings().one()
+        assessment = connection.execute(
+            select(
+                EVIDENCE_ASSESSMENT_TABLES[
+                    "workshop_artifact_evidence_assessments"
+                ]
+            )
+        ).mappings().one()
+    assert run["canonical_count"] == 1
+    assert run["quarantined_count"] == 0
+    assert run["provider_response_id"] == execution.provider_response_id
+    assert assessment["assessment"] == "SUPPORTS"
+    assert assessment["disposition"] == "CANONICAL"
+    with pytest.raises(IntegrityError, match="EVIDENCE_ASSESSMENT_APPEND_ONLY"):
+        with foundation.engine.begin() as connection:
+            connection.execute(
+                update(
+                    EVIDENCE_ASSESSMENT_TABLES[
+                        "workshop_artifact_evidence_assessment_runs"
+                    ]
+                ).values(model="changed")
+            )
+
+    replayed = foundation.materialize_artifact_evidence_support(
+        CASE_ID, request, support, execution
+    )
+    assert replayed["payload_hash"] == revised["payload_hash"]
+    assert replayed["record_revision"] == revised["record_revision"]
     assert foundation.case_revision(CASE_ID) == 6
 
 

@@ -14,7 +14,10 @@ from specops_contracts.migrations import (
 from specops_workflow import migrate
 from specops_workflow.persistence import engine_for
 from specops_workflow.workshop_protocol_storage import V4_TABLE_NAMES
-from specops_workflow.artifact_quality_storage import ARTIFACT_QUALITY_TABLE_NAMES
+from specops_workflow.artifact_quality_storage import (
+    ARTIFACT_QUALITY_TABLE_NAMES,
+    EVIDENCE_ASSESSMENT_TABLE_NAMES,
+)
 
 
 def _alembic(url: str) -> Config:
@@ -35,8 +38,9 @@ def test_0002_database_upgrades_to_0003_with_exact_v4_tables(tmp_path):
         column["name"] for column in inspector.get_columns("workshop_artifact_confirmations")
     }
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0008"
     assert set(ARTIFACT_QUALITY_TABLE_NAMES).issubset(inspector.get_table_names())
+    assert set(EVIDENCE_ASSESSMENT_TABLE_NAMES).issubset(inspector.get_table_names())
 
 
 def test_0005_database_adds_provider_resource_lifecycle_without_rebuild(tmp_path):
@@ -61,7 +65,36 @@ def test_0005_database_adds_provider_resource_lifecycle_without_rebuild(tmp_path
         "cleanup_last_error_code",
     }.issubset(after)
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0008"
+
+
+def test_0008_adds_append_only_evidence_assessment_store(tmp_path):
+    url = f"sqlite:///{tmp_path / 'evidence-assessments.sqlite'}"
+    migrate(url)
+    command.downgrade(_alembic(url), "0007")
+    assert not set(EVIDENCE_ASSESSMENT_TABLE_NAMES).intersection(
+        inspect(engine_for(url)).get_table_names()
+    )
+
+    migrate(url)
+    inspector = inspect(engine_for(url))
+    assert set(EVIDENCE_ASSESSMENT_TABLE_NAMES).issubset(inspector.get_table_names())
+    with engine_for(url).connect() as connection:
+        triggers = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'trigger' AND name LIKE "
+                    "'workshop_artifact_evidence_assessment%_no_%'"
+                )
+            )
+        }
+    assert triggers == {
+        f"{table_name}_{operation}"
+        for table_name in EVIDENCE_ASSESSMENT_TABLE_NAMES
+        for operation in ("no_update", "no_delete")
+    }
 
 
 def test_semantic_adapters_never_guess_confirmation_or_identity_bindings():

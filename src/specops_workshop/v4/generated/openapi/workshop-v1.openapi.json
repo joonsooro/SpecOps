@@ -2335,7 +2335,7 @@
             "type": "string"
           },
           "semantic_quality_contract_version": {
-            "const": "2.1.0",
+            "const": "2.2.0",
             "title": "Semantic Quality Contract Version",
             "type": "string"
           }

@@ -73,12 +73,16 @@ audit_events = owned("audit_events", Column("event_id", UUIDText, primary_key=Tr
 # its tables on this same metadata graph so Alembic, fresh-database creation,
 # and the canonical Foundation repository cannot silently diverge.
 from .workshop_protocol_storage import define_workshop_protocol_tables
-from .artifact_quality_storage import define_artifact_quality_tables
+from .artifact_quality_storage import (
+    define_artifact_quality_tables,
+    define_evidence_assessment_tables,
+)
 
 WORKSHOP_PROTOCOL_TABLES = define_workshop_protocol_tables(metadata)
 from .workshop_protocol_storage import V0_RUNTIME_TABLE_NAMES
 V0_RUNTIME_TABLES = {name: metadata.tables[name] for name in V0_RUNTIME_TABLE_NAMES}
 ARTIFACT_QUALITY_TABLES = define_artifact_quality_tables(metadata)
+EVIDENCE_ASSESSMENT_TABLES = define_evidence_assessment_tables(metadata)
 
 # Relationally expressible references are composite and case-scoped.  Cyclic
 # root/current-version constraints are deferred so a root and version can be
@@ -148,6 +152,8 @@ for table in metadata.tables.values():
         lower = 0 if (table.name, column.name) in {
             ("audit_events", "before_case_revision"),
             ("workshop_analyzer_jobs", "attempt_count"),
+            ("workshop_artifact_evidence_assessment_runs", "canonical_count"),
+            ("workshop_artifact_evidence_assessment_runs", "quarantined_count"),
         } else 1
         bounds = f"{column.name} >= {lower} AND {column.name} <= 9223372036854775807"
         table.append_constraint(CheckConstraint(f"{column.name} IS NULL OR ({bounds})" if column.nullable else bounds))

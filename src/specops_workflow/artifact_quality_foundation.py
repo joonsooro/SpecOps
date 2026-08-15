@@ -16,19 +16,24 @@ from specops_contracts import artifact_quality_v1 as q
 from specops_contracts import workshop_v1 as c
 from specops_contracts.canonical import canonical_bytes, domain_hash, payload_hash
 from specops_workshop.v4.artifact_quality import (
+    quality_contract_hash,
     resolve_payload_pointer,
     validate_audit_bundle,
 )
 
 from .artifact_projection import draft_governance, validate_exact
 from .artifact_reference_graph import validate_artifact_reference_graph
-from .artifact_evidence_support import materialize_supported_evidence
+from .artifact_evidence_support import (
+    evidence_assessment_disposition,
+    materialize_supported_evidence,
+)
 from .artifact_quality_revision import (
     apply_quality_revision_candidate,
     prepare_quality_revision_request,
 )
 from .persistence import (
     ARTIFACT_QUALITY_TABLES,
+    EVIDENCE_ASSESSMENT_TABLES,
     WORKSHOP_PROTOCOL_TABLES,
     case_participants,
     source_artifacts,
@@ -58,6 +63,19 @@ def _instant(value) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _source_ids_from_context_json(binding_json: str) -> set[str]:
+    """Read stable source identities without upgrading a historical provider contract."""
+
+    value = json.loads(binding_json)
+    try:
+        return {
+            item["source"]["source_id"]
+            for item in value["source_set"]["ordered_sources"]
+        }
+    except (KeyError, TypeError) as exc:
+        raise ValueError("stored Analyzer context has no exact source identities") from exc
+
+
 class ArtifactQualityFoundationMixin:
     """Mixed into ``WorkshopFoundationService`` to keep one Foundation state owner."""
 
@@ -82,15 +100,58 @@ class ArtifactQualityFoundationMixin:
         case_id: UUID,
         request: q.ArtifactEvidenceSupportRequest,
         candidate: q.ArtifactEvidenceSupportCandidate,
+        execution: q.StandaloneEvaluatorExecutionBinding,
     ) -> dict[str, Any]:
-        """Commit locally hashed SUPPORTS findings as one exact record revision."""
+        """Commit canonical evidence and retain every exact assessment atomically."""
 
         from .workshop_protocol import FoundationProtocolError
 
         records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
         plans = WORKSHOP_PROTOCOL_TABLES["workshop_identity_plans"]
         semantic_records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        runs = EVIDENCE_ASSESSMENT_TABLES[
+            "workshop_artifact_evidence_assessment_runs"
+        ]
+        assessment_rows = EVIDENCE_ASSESSMENT_TABLES[
+            "workshop_artifact_evidence_assessments"
+        ]
+        request_json = _json(request)
+        candidate_json = _json(candidate)
+        execution_json = _json(execution)
         with self.engine.begin() as connection:
+            replay = connection.execute(
+                select(runs).where(runs.c.request_hash == request.request_hash)
+            ).mappings().one_or_none()
+            if replay is not None:
+                if (
+                    replay["case_id"] != str(case_id)
+                    or replay["request_json"] != request_json
+                    or replay["candidate_json"] != candidate_json
+                    or replay["execution_json"] != execution_json
+                    or connection.execute(
+                        select(func.count()).select_from(assessment_rows).where(
+                            assessment_rows.c.request_hash == request.request_hash
+                        )
+                    ).scalar_one()
+                    != len(request.pairs)
+                ):
+                    raise FoundationProtocolError(
+                        c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED
+                    )
+                replayed_record = connection.execute(
+                    select(records).where(
+                        records.c.case_id == str(case_id),
+                        records.c.artifact_type == "SPEC_PACKAGE",
+                        records.c.artifact_id == replay["artifact_id"],
+                        records.c.artifact_version == replay["artifact_version"],
+                        records.c.record_revision == replay["resulting_record_revision"],
+                        records.c.payload_hash == replay["resulting_payload_hash"],
+                    )
+                ).mappings().one_or_none()
+                if replayed_record is None:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+                return dict(replayed_record)
+
             prior_revision = self._case_revision(connection, case_id)
             row = connection.execute(
                 select(records).where(
@@ -160,10 +221,7 @@ class ArtifactQualityFoundationMixin:
                     == c.ContextStatus.ACTIVE.value,
                 )
             ).mappings().one()
-            context = c.AnalyzerContextBinding.model_validate_json(active["binding_json"])
-            allowed.update(
-                str(item.source.source_id) for item in context.source_set.ordered_sources
-            )
+            allowed.update(_source_ids_from_context_json(active["binding_json"]))
             allowed.update(
                 connection.execute(
                     select(case_participants.c.actor_id).where(
@@ -181,7 +239,7 @@ class ArtifactQualityFoundationMixin:
                 )
             revised_hash = payload_hash(revised)
             next_record_revision = request.record_revision + 1
-            connection.execute(
+            updated = connection.execute(
                 update(records)
                 .where(
                     records.c.case_id == str(case_id),
@@ -195,6 +253,73 @@ class ArtifactQualityFoundationMixin:
                     payload_hash=revised_hash,
                     payload_json=_json(revised),
                 )
+            )
+            if updated.rowcount != 1:
+                raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+            expected_client_request_id = f"aqa-support-{request.request_hash[7:39]}"
+            if execution.client_request_id != expected_client_request_id:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED
+                )
+            assessments = {item.pair_id: item for item in candidate.assessments}
+            dispositions = {
+                pair.pair_id: evidence_assessment_disposition(
+                    assessments[pair.pair_id].assessment
+                )
+                for pair in request.pairs
+            }
+            canonical_count = sum(
+                disposition == "CANONICAL" for disposition in dispositions.values()
+            )
+            created_at = _instant(execution.completed_at)
+            connection.execute(
+                insert(runs).values(
+                    request_hash=request.request_hash,
+                    request_id=str(request.request_id),
+                    evaluator_run_id=str(request.evaluator_run_id),
+                    case_id=str(case_id),
+                    artifact_id=str(request.artifact_id),
+                    artifact_version=request.artifact_version,
+                    assessed_record_revision=request.record_revision,
+                    assessed_payload_hash=request.payload_hash,
+                    resulting_record_revision=next_record_revision,
+                    resulting_payload_hash=revised_hash,
+                    policy_version="1.0.0",
+                    provider=execution.provider,
+                    model=execution.model,
+                    reasoning_effort=execution.reasoning_effort,
+                    provider_response_id=execution.provider_response_id,
+                    client_request_id=execution.client_request_id,
+                    canonical_count=canonical_count,
+                    quarantined_count=len(request.pairs) - canonical_count,
+                    request_json=request_json,
+                    candidate_json=candidate_json,
+                    execution_json=execution_json,
+                    created_at=created_at,
+                )
+            )
+            connection.execute(
+                insert(assessment_rows),
+                [
+                    {
+                        "request_hash": request.request_hash,
+                        "pair_id": str(pair.pair_id),
+                        "claim_ref": str(pair.claim_ref),
+                        "claim_pointer": pair.claim_pointer,
+                        "claim_hash": pair.claim_hash,
+                        "evidence_ref": str(pair.evidence_ref),
+                        "source_id": str(pair.source_id),
+                        "source_hash": pair.source_hash,
+                        "excerpt_hash": pair.excerpt_hash,
+                        "assessment": assessments[pair.pair_id].assessment.value,
+                        "confidence": assessments[pair.pair_id].confidence,
+                        "disposition": dispositions[pair.pair_id],
+                        "pair_json": _json(pair),
+                        "assessment_json": _json(assessments[pair.pair_id]),
+                        "created_at": created_at,
+                    }
+                    for pair in request.pairs
+                ],
             )
             self._advance_revision(connection, case_id, prior_revision)
         result = self.latest_artifact_record(case_id, "SPEC_PACKAGE")
@@ -379,10 +504,7 @@ class ArtifactQualityFoundationMixin:
                     == c.ContextStatus.ACTIVE.value,
                 )
             ).mappings().one()
-            context = c.AnalyzerContextBinding.model_validate_json(active["binding_json"])
-            allowed.update(
-                str(item.source.source_id) for item in context.source_set.ordered_sources
-            )
+            allowed.update(_source_ids_from_context_json(active["binding_json"]))
             allowed.update(
                 connection.execute(
                     select(case_participants.c.actor_id).where(
@@ -838,11 +960,10 @@ class ArtifactQualityFoundationMixin:
         ).mappings().one_or_none()
         if active is None:
             raise FoundationProtocolError(c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED)
-        context = c.AnalyzerContextBinding.model_validate_json(active["binding_json"])
         try:
             validate_audit_bundle(
                 bundle,
-                expected_quality_hash=context.analyzer_contract.semantic_quality_contract_hash,
+                expected_quality_hash=quality_contract_hash(),
             )
         except (ValueError, json.JSONDecodeError) as exc:
             raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED) from exc

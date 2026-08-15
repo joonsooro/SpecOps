@@ -21,7 +21,7 @@ from pathlib import Path
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 GENERATED_PACKAGE = BACKEND_ROOT / "src" / "specops_workshop" / "v4"
 SHARED_PACKAGE = BACKEND_ROOT / "src" / "specops_contracts"
-SCHEMA_DESTINATION = SHARED_PACKAGE / "schemas"
+SCHEMA_DESTINATIONS = (SHARED_PACKAGE / "schemas", GENERATED_PACKAGE / "schemas")
 NATIVE_DESTINATION = GENERATED_PACKAGE / "generated" / "openai"
 CONTRACT_FILENAMES = (
     "artifact-envelope.schema.json",
@@ -79,7 +79,8 @@ def generate(*, check: bool) -> None:
             ensure_ascii=False,
             sort_keys=True,
         ).encode("utf-8") + b"\n"
-        write_or_check(SCHEMA_DESTINATION / filename, payload, check=check)
+        for destination in SCHEMA_DESTINATIONS:
+            write_or_check(destination / filename, payload, check=check)
 
     sys.path.insert(0, str(BACKEND_ROOT / "src"))
     importlib.invalidate_caches()
@@ -106,7 +107,7 @@ def generate(*, check: bool) -> None:
         "artifact_quality_audit_protocol_version": "1.0.0",
         "artifact_quality_contract_source": "artifact_quality_audit_v1.py",
         "artifact_quality_contract_sha256": hashlib.sha256(audit_contract_source).hexdigest(),
-        "semantic_quality_contract_version": "2.1.0",
+        "semantic_quality_contract_version": "2.2.0",
         "semantic_quality_contract_sha256": hashlib.sha256(quality_contract_source).hexdigest(),
         "artifact_schema_versions": {
             "envelope": "2.0.0",

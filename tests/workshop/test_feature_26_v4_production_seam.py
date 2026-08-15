@@ -234,8 +234,10 @@ def test_spec_evidence_support_is_checkpointed_then_materialized_before_audit():
         def checkpoint_provider_response(self, _case_id, **values):
             events.append(("checkpoint", values))
 
-        def materialize_artifact_evidence_support(self, _case_id, request, candidate):
-            events.append(("materialize", request, candidate))
+        def materialize_artifact_evidence_support(
+            self, _case_id, request, candidate, execution
+        ):
+            events.append(("materialize", request, candidate, execution))
 
     class Evaluator:
         async def evaluate_evidence_support(
@@ -459,7 +461,7 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
             instruction_set_version=1,
             instruction_set_hash="sha256:" + "4" * 64,
             semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-            semantic_quality_contract_version="2.1.0",
+            semantic_quality_contract_version="2.2.0",
             semantic_quality_contract_hash="sha256:" + "5" * 64,
             provider_schema_version="1.0.0",
             model="gpt-5.6-terra",

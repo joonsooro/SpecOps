@@ -67,7 +67,7 @@ def _analyzer_contract() -> c.AnalyzerContractBinding:
         instruction_set_version=1,
         instruction_set_hash="sha256:" + hashlib.sha256(instruction).hexdigest(),
         semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-        semantic_quality_contract_version="2.1.0",
+        semantic_quality_contract_version="2.2.0",
         semantic_quality_contract_hash=_sha256(QUALITY_CONTRACT_PATH),
         provider_schema_version="1.0.0",
         model="gpt-5.6-terra",

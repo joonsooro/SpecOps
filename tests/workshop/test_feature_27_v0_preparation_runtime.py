@@ -373,7 +373,7 @@ def _seed_invalid_turn_correction(foundation):
     return context, correction
 
 
-def test_real_0004_database_upgrades_additively_to_0007(tmp_path):
+def test_real_0004_database_upgrades_additively_to_0008(tmp_path):
     url, original = _runtime(tmp_path)
     original_case = original.get_case(CASE_ID)
     config = Config("alembic.ini")
@@ -386,7 +386,7 @@ def test_real_0004_database_upgrades_additively_to_0007(tmp_path):
         assert "workshop_preparations" not in engine_for(url).dialect.get_table_names(connection)
     migrate(url)
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0007"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0008"
         tables = set(engine_for(url).dialect.get_table_names(connection))
     assert {
         "workshop_preparations",

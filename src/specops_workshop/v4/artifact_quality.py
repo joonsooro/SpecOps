@@ -263,7 +263,7 @@ def build_audit_bundle(
         ),
         "quality_contract": q.QualityContractBinding(
             contract_id="SEMANTIC-QUALITY-CONTRACT",
-            version="2.1.0",
+            version="2.2.0",
             content_hash=semantic_quality_contract_hash,
         ),
         "source_set_hash": source_set_hash(audit_sources),

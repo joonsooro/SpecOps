@@ -106,7 +106,7 @@ def _bundle() -> q.ArtifactQualityAuditBundle:
         ),
         quality_contract=q.QualityContractBinding(
             contract_id="SEMANTIC-QUALITY-CONTRACT",
-            version="2.1.0",
+            version="2.2.0",
             content_hash=HASH,
         ),
         source_set_hash=HASH,

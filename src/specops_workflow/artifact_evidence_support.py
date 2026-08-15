@@ -219,6 +219,31 @@ def prepare_evidence_support_request(
     return q.ArtifactEvidenceSupportRequest(**base)
 
 
+CANONICAL_EVIDENCE_RESULTS = frozenset(
+    (q.EvidenceSupportResult.SUPPORTS, q.EvidenceSupportResult.SUGGESTS)
+)
+
+
+def evidence_assessment_disposition(
+    result: q.EvidenceSupportResult,
+) -> str:
+    """Map an exact assessment to its V0 canonical or quarantine disposition."""
+
+    return "CANONICAL" if result in CANONICAL_EVIDENCE_RESULTS else "QUARANTINED"
+
+
+def _remove_quarantined_evidence_refs(value, quarantined: set[str]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"evidence_refs", "source_evidence_refs"} and isinstance(item, list):
+                value[key] = [reference for reference in item if reference not in quarantined]
+            else:
+                _remove_quarantined_evidence_refs(item, quarantined)
+    elif isinstance(value, list):
+        for item in value:
+            _remove_quarantined_evidence_refs(item, quarantined)
+
+
 def materialize_supported_evidence(
     *,
     payload: dict,
@@ -226,7 +251,7 @@ def materialize_supported_evidence(
     candidate: q.ArtifactEvidenceSupportCandidate,
     new_id: Callable[[], UUID] = uuid4,
 ) -> dict:
-    """Materialize only exact SUPPORTS results; never accept provider hashes."""
+    """Materialize relevant exact pairs; quarantine all other assessment results."""
 
     echoes = (
         candidate.request_id == request.request_id,
@@ -242,12 +267,6 @@ def materialize_supported_evidence(
     assessments = {item.pair_id: item for item in candidate.assessments}
     if set(assessments) != {item.pair_id for item in request.pairs}:
         raise ValueError("evidence-support candidate must assess every exact pair once")
-    if any(
-        item.assessment is not q.EvidenceSupportResult.SUPPORTS
-        for item in assessments.values()
-    ):
-        raise ValueError("only exact SUPPORTS assessments may be materialized")
-
     revised = json.loads(json.dumps(payload))
     if revised.get("semantic_evidence_findings"):
         raise ValueError("evidence support may be materialized only once per exact revision")
@@ -271,7 +290,21 @@ def materialize_supported_evidence(
             or domain_hash("SPECOPS:ARTIFACT_CLAIM:v1", exact_claim) != pair.claim_hash
         ):
             raise ValueError("artifact claim changed after evidence assessment began")
+    quarantined = {
+        str(pair.evidence_ref)
+        for pair in request.pairs
+        if evidence_assessment_disposition(assessments[pair.pair_id].assessment)
+        == "QUARANTINED"
+    }
+    revised["evidence_catalog"] = [
+        item for item in revised["evidence_catalog"] if item["id"] not in quarantined
+    ]
+    _remove_quarantined_evidence_refs(revised, quarantined)
+
+    for pair in request.pairs:
         assessment = assessments[pair.pair_id]
+        if evidence_assessment_disposition(assessment.assessment) == "QUARANTINED":
+            continue
         revised["semantic_evidence_findings"].append(
             {
                 "finding_id": str(pair.finding_id),

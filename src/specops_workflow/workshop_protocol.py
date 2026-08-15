@@ -401,6 +401,24 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ).scalar_one_or_none()
         return None if row is None else c.AnalyzerContextBinding.model_validate_json(row)
 
+    def active_analyzer_provider_conversation_id(self, case_id: UUID) -> str | None:
+        """Return only the stable provider identity from a historical active context."""
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.binding_json).where(
+                    table.c.case_id == str(case_id),
+                    table.c.status == c.ContextStatus.ACTIVE.value,
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        value = json.loads(row).get("provider_conversation_id")
+        if not isinstance(value, str) or not value:
+            raise ValueError("stored Analyzer context has no provider Conversation identity")
+        return value
+
     def latest_final_transcript(self, case_id: UUID) -> c.TranscriptFinalizedEvent | None:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"]
         with self.engine.connect() as connection:

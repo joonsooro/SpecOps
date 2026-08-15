@@ -1338,7 +1338,7 @@ export interface components {
              * Semantic Quality Contract Version
              * @constant
              */
-            semantic_quality_contract_version: "2.1.0";
+            semantic_quality_contract_version: "2.2.0";
         };
         /** ApplyDecisionBatchResponseCommand */
         V4_ApplyDecisionBatchResponseCommand: {

@@ -103,7 +103,17 @@ def test_foundation_computes_exact_claim_and_evidence_hashes_before_assessment()
     assert "claim_hash" not in schema["properties"]
 
 
-def test_evidence_support_fails_closed_on_non_support_or_changed_claim():
+@pytest.mark.parametrize(
+    "quarantined_result",
+    (
+        q.EvidenceSupportResult.INSUFFICIENT,
+        q.EvidenceSupportResult.CONTRADICTS,
+        q.EvidenceSupportResult.AMBIGUOUS,
+    ),
+)
+def test_evidence_policy_keeps_suggestions_quarantines_negative_results_and_rejects_changed_claim(
+    quarantined_result,
+):
     payload = PayloadFactory().payload("spec-package-payload.schema.json")
     payload["requirements"][0]["source_evidence_refs"] = []
     source = _source("Exact source statement.\n")
@@ -142,15 +152,37 @@ def test_evidence_support_fails_closed_on_non_support_or_changed_claim():
         assessments=(
             q.EvidenceSupportAssessment(
                 pair_id=pair.pair_id,
-                assessment=q.EvidenceSupportResult.INSUFFICIENT,
+                assessment=quarantined_result,
                 confidence=0.8,
             ),
         ),
     )
-    with pytest.raises(ValueError, match="only exact SUPPORTS"):
-        materialize_supported_evidence(
-            payload=payload, request=request, candidate=candidate
-        )
+    insufficient = materialize_supported_evidence(
+        payload=payload, request=request, candidate=candidate
+    )
+    assert insufficient["evidence_catalog"] == []
+    assert insufficient["semantic_evidence_findings"] == []
+    assert insufficient["requirements"][0]["source_evidence_refs"] == []
+
+    suggestion = candidate.model_copy(
+        update={
+            "assessments": (
+                q.EvidenceSupportAssessment(
+                    pair_id=pair.pair_id,
+                    assessment=q.EvidenceSupportResult.SUGGESTS,
+                    confidence=0.81,
+                ),
+            )
+        }
+    )
+    suggested = materialize_supported_evidence(
+        payload=payload, request=request, candidate=suggestion
+    )
+    assert suggested["evidence_catalog"][0]["id"] == str(pair.evidence_ref)
+    assert suggested["semantic_evidence_findings"][0]["assessment"] == "SUGGESTS"
+    assert suggested["requirements"][0]["source_evidence_refs"] == [
+        str(pair.evidence_ref)
+    ]
 
     changed = {**payload}
     changed["requirements"] = [dict(item) for item in payload["requirements"]]

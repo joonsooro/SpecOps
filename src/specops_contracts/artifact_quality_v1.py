@@ -252,7 +252,9 @@ class ArtifactQualityRevisionRequest(StrictModel):
     artifact_id: UUID
     artifact_version: int = Field(strict=True, ge=1)
     record_revision: int = Field(strict=True, ge=1)
+    based_on_case_revision: int = Field(strict=True, ge=0)
     payload_hash: Sha256
+    canonical_payload_json: CompleteText
     audit_id: UUID
     finding_ids: tuple[UUID, ...] = Field(min_length=1, max_length=1_000)
     failed_rule_ids: tuple[
@@ -279,6 +281,22 @@ class ArtifactQualityRevisionRequest(StrictModel):
         if len(identities) != len(set(identities)):
             raise ValueError("allocated revision identities must be unique")
         return self
+
+
+class ArtifactQualityRevisionReceipt(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    revision_request_id: UUID
+    revision_request_version: Literal[1]
+    request_hash: Sha256
+    artifact_id: UUID
+    artifact_version: int = Field(strict=True, ge=1)
+    prior_record_revision: int = Field(strict=True, ge=1)
+    resulting_record_revision: int = Field(strict=True, ge=2)
+    prior_payload_hash: Sha256
+    resulting_payload_hash: Sha256
+    audit_id: UUID
+    resulting_case_revision: int = Field(strict=True, ge=1)
+    replayed: bool
 
 
 class ArtifactRevisionPatch(StrictModel):

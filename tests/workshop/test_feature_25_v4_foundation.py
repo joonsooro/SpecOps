@@ -1292,6 +1292,85 @@ def test_quality_abstention_is_reviewable_but_cannot_enter_confirmation_gate(tmp
     assert caught.value.code is c.FoundationRejectionCode.INVALID_TRANSITION
 
 
+def test_failed_audit_can_apply_exactly_one_durable_bounded_revision(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    candidate = all_pass_candidate(bundle)
+    failed = candidate.assessments[0].model_copy(
+        update={
+            "result": q.SemanticAssessmentResult.FAIL,
+            "artifact_pointers": ("/requirements",),
+            "explanation": "The requirement combines two independently testable duties.",
+            "findings": (
+                q.QualityFindingCandidate(
+                    candidate_key="split-atomic-requirement",
+                    severity="HIGH",
+                    category="ATOMICITY",
+                    message="Split the two duties into independent requirements.",
+                    artifact_pointers=("/requirements",),
+                    evidence_ids=(),
+                    transcript_event_ids=(),
+                ),
+            ),
+        }
+    )
+    candidate = candidate.model_copy(
+        update={"assessments": (failed, *candidate.assessments[1:])}
+    )
+    rejected = _admit_quality_candidate(foundation, bundle, candidate)
+    assert rejected.outcome is not q.AuditOutcome.PASS
+
+    request = foundation.prepare_artifact_quality_revision(
+        CASE_ID,
+        "SPEC_PACKAGE",
+        allocated_identity_kinds=("REQUIREMENT",),
+    )
+    payload = json.loads(request.canonical_payload_json)
+    replacement = [dict(item) for item in payload["requirements"]]
+    added = dict(replacement[0])
+    added["id"] = str(request.allocated_identities[0].foundation_id)
+    added["title"] = "One independently testable duty"
+    replacement.append(added)
+    revision_candidate = q.ArtifactQualityRevisionCandidate(
+        protocol_version=q.PROTOCOL_VERSION,
+        output_type="ARTIFACT_QUALITY_REVISION_CANDIDATE",
+        revision_request_id=request.revision_request_id,
+        revision_request_version=1,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        attempt=1,
+        patches=(
+            q.ArtifactRevisionPatch(
+                pointer="/requirements",
+                replacement_value_json=json.dumps(replacement),
+            ),
+        ),
+    )
+
+    applied = foundation.apply_artifact_quality_revision(
+        CASE_ID, request, revision_candidate
+    )
+    replay = foundation.apply_artifact_quality_revision(
+        CASE_ID, request, revision_candidate
+    )
+
+    assert applied.replayed is False
+    assert replay.model_copy(update={"replayed": False}) == applied
+    assert applied.prior_record_revision == rejected.resulting_record_revision
+    assert applied.resulting_record_revision == rejected.resulting_record_revision + 1
+    record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    assert record is not None
+    assert record["payload_hash"] == applied.resulting_payload_hash
+    assert len(json.loads(record["payload_json"])["requirements"]) == 2
+    assert foundation.case_revision(CASE_ID) == request.based_on_case_revision + 1
+
+
 def test_quality_provider_mapping_and_admitted_receipt_survive_restart(tmp_path):
     url, foundation = _runtime(tmp_path)
     _activate(foundation)

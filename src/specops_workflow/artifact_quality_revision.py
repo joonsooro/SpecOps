@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 from specops_contracts import artifact_quality_v1 as q
 from specops_contracts.canonical import domain_hash, payload_hash
+from specops_contracts.canonical import canonical_bytes
 
 
 def prepare_quality_revision_request(
@@ -16,6 +17,7 @@ def prepare_quality_revision_request(
     artifact_id: UUID,
     artifact_version: int,
     record_revision: int,
+    based_on_case_revision: int,
     payload: dict,
     audit_id: UUID,
     finding_ids: tuple[UUID, ...],
@@ -38,7 +40,9 @@ def prepare_quality_revision_request(
         "artifact_id": artifact_id,
         "artifact_version": artifact_version,
         "record_revision": record_revision,
+        "based_on_case_revision": based_on_case_revision,
         "payload_hash": payload_hash(payload),
+        "canonical_payload_json": canonical_bytes(payload).decode("utf-8"),
         "audit_id": audit_id,
         "finding_ids": finding_ids,
         "failed_rule_ids": failed_rule_ids,
@@ -82,6 +86,7 @@ def apply_quality_revision_candidate(
         candidate.payload_hash == request.payload_hash,
         candidate.attempt <= request.max_revision_attempts,
         payload_hash(payload) == request.payload_hash,
+        canonical_bytes(payload).decode("utf-8") == request.canonical_payload_json,
     )
     if not all(echoes):
         raise ValueError("quality revision candidate binding changed")

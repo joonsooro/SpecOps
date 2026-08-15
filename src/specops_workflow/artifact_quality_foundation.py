@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from sqlalchemy import and_, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
@@ -19,9 +20,13 @@ from specops_workshop.v4.artifact_quality import (
     validate_audit_bundle,
 )
 
-from .artifact_projection import validate_exact
+from .artifact_projection import draft_governance, validate_exact
 from .artifact_reference_graph import validate_artifact_reference_graph
 from .artifact_evidence_support import materialize_supported_evidence
+from .artifact_quality_revision import (
+    apply_quality_revision_candidate,
+    prepare_quality_revision_request,
+)
 from .persistence import (
     ARTIFACT_QUALITY_TABLES,
     WORKSHOP_PROTOCOL_TABLES,
@@ -190,6 +195,294 @@ class ArtifactQualityFoundationMixin:
         result = self.latest_artifact_record(case_id, "SPEC_PACKAGE")
         assert result is not None
         return result
+
+    def prepare_artifact_quality_revision(
+        self,
+        case_id: UUID,
+        artifact_type: str,
+        *,
+        allocated_identity_kinds: tuple[str, ...],
+    ) -> q.ArtifactQualityRevisionRequest:
+        """Create the one deterministic revision request for the latest failed audit."""
+
+        from .workshop_protocol import FoundationProtocolError
+
+        record = self.latest_artifact_record(case_id, artifact_type)
+        if record is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+        audits = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_audits"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(audits).where(
+                    audits.c.case_id == str(case_id),
+                    audits.c.artifact_id == record["artifact_id"],
+                    audits.c.artifact_version == record["artifact_version"],
+                    audits.c.resulting_record_revision == record["record_revision"],
+                    audits.c.payload_hash == record["payload_hash"],
+                    audits.c.state == q.AuditState.ADMITTED.value,
+                    audits.c.outcome != q.AuditOutcome.PASS.value,
+                )
+            ).mappings().one_or_none()
+            based_on_case_revision = self._case_revision(connection, case_id)
+        if row is None or row["receipt_json"] is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+        receipt = q.ArtifactQualityAuditReceipt.model_validate_json(row["receipt_json"])
+        finding_ids = tuple(item.finding_id for item in receipt.findings)
+        failed_rule_ids = tuple(
+            item.rule_id
+            for item in receipt.combined_rule_results
+            if item.result is q.ComponentResult.FAIL
+        )
+        pointers = tuple(
+            sorted(
+                {
+                    pointer
+                    for finding in receipt.findings
+                    for pointer in finding.artifact_pointers
+                    if pointer
+                }
+            )
+        )
+        if not finding_ids or not failed_rule_ids or not pointers:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+        request_id = uuid5(receipt.audit_id, "artifact-quality-revision-request-v1")
+        allocated_ids = tuple(
+            uuid5(request_id, f"allocated:{index}:{kind}")
+            for index, kind in enumerate(allocated_identity_kinds)
+        )
+        generated_ids = iter((request_id, *allocated_ids))
+        return prepare_quality_revision_request(
+            artifact_id=UUID(record["artifact_id"]),
+            artifact_version=record["artifact_version"],
+            record_revision=record["record_revision"],
+            based_on_case_revision=based_on_case_revision,
+            payload=json.loads(record["payload_json"]),
+            audit_id=receipt.audit_id,
+            finding_ids=finding_ids,
+            failed_rule_ids=failed_rule_ids,
+            canonical_artifact_pointers=pointers,
+            allocated_identity_kinds=allocated_identity_kinds,
+            new_id=lambda: next(generated_ids),
+        )
+
+    def apply_artifact_quality_revision(
+        self,
+        case_id: UUID,
+        request: q.ArtifactQualityRevisionRequest,
+        candidate: q.ArtifactQualityRevisionCandidate,
+    ) -> q.ArtifactQualityRevisionReceipt:
+        """Atomically apply or replay the one exact pointer-bounded revision."""
+
+        from .workshop_protocol import FoundationProtocolError
+
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+        audits = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_audits"]
+        semantic_records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        with self.engine.begin() as connection:
+            audit = connection.execute(
+                select(audits).where(
+                    audits.c.audit_id == str(request.audit_id),
+                    audits.c.case_id == str(case_id),
+                    audits.c.artifact_id == str(request.artifact_id),
+                    audits.c.artifact_version == request.artifact_version,
+                    audits.c.resulting_record_revision == request.record_revision,
+                    audits.c.payload_hash == request.payload_hash,
+                    audits.c.state == q.AuditState.ADMITTED.value,
+                    audits.c.outcome != q.AuditOutcome.PASS.value,
+                )
+            ).mappings().one_or_none()
+            if audit is None or audit["receipt_json"] is None:
+                raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+            prior_receipt = q.ArtifactQualityAuditReceipt.model_validate_json(
+                audit["receipt_json"]
+            )
+            expected_findings = tuple(item.finding_id for item in prior_receipt.findings)
+            expected_rules = tuple(
+                item.rule_id
+                for item in prior_receipt.combined_rule_results
+                if item.result is q.ComponentResult.FAIL
+            )
+            expected_pointers = tuple(
+                sorted(
+                    {
+                        pointer
+                        for finding in prior_receipt.findings
+                        for pointer in finding.artifact_pointers
+                        if pointer
+                    }
+                )
+            )
+            if (
+                request.finding_ids != expected_findings
+                or request.failed_rule_ids != expected_rules
+                or request.canonical_artifact_pointers != expected_pointers
+            ):
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED
+                )
+            expected_request_id = uuid5(
+                request.audit_id, "artifact-quality-revision-request-v1"
+            )
+            expected_allocated = tuple(
+                uuid5(expected_request_id, f"allocated:{index}:{item.entity_kind}")
+                for index, item in enumerate(request.allocated_identities)
+            )
+            if request.revision_request_id != expected_request_id or tuple(
+                item.foundation_id for item in request.allocated_identities
+            ) != expected_allocated:
+                raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+            try:
+                base_payload = json.loads(request.canonical_payload_json)
+                revised = apply_quality_revision_candidate(
+                    payload=base_payload,
+                    request=request,
+                    candidate=candidate,
+                    identity_kinds=self._artifact_identity_kinds,
+                )
+                artifact_type = connection.execute(
+                    select(records.c.artifact_type).where(
+                        records.c.case_id == str(case_id),
+                        records.c.artifact_id == str(request.artifact_id),
+                        records.c.artifact_version == request.artifact_version,
+                    )
+                ).scalar_one()
+                validate_exact(
+                    "spec-package-payload.schema.json"
+                    if artifact_type == "SPEC_PACKAGE"
+                    else "technical-contract-payload.schema.json",
+                    revised,
+                )
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+                ) from exc
+
+            allowed = set(self._artifact_identity_kinds(revised))
+            allowed.update(
+                connection.execute(
+                    select(semantic_records.c.foundation_id).where(
+                        semantic_records.c.case_id == str(case_id),
+                        semantic_records.c.status != c.SemanticRecordStatus.STALE.value,
+                    )
+                ).scalars()
+            )
+            active = connection.execute(
+                select(WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]).where(
+                    WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"].c.case_id
+                    == str(case_id),
+                    WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"].c.status
+                    == c.ContextStatus.ACTIVE.value,
+                )
+            ).mappings().one()
+            context = c.AnalyzerContextBinding.model_validate_json(active["binding_json"])
+            allowed.update(
+                str(item.source.source_id) for item in context.source_set.ordered_sources
+            )
+            allowed.update(
+                connection.execute(
+                    select(case_participants.c.actor_id).where(
+                        case_participants.c.case_id == str(case_id)
+                    )
+                ).scalars()
+            )
+            issues = validate_artifact_reference_graph(
+                revised, allowed_reference_ids=allowed
+            )
+            if issues:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.UNKNOWN_REFERENCE,
+                    safe_diagnostic_pointers=tuple(item.pointer for item in issues),
+                )
+            resulting_hash = payload_hash(revised)
+            resulting_record_revision = request.record_revision + 1
+            current = connection.execute(
+                select(records).where(
+                    records.c.case_id == str(case_id),
+                    records.c.artifact_id == str(request.artifact_id),
+                    records.c.artifact_version == request.artifact_version,
+                )
+            ).mappings().one()
+            if (
+                current["record_revision"] == resulting_record_revision
+                and current["payload_hash"] == resulting_hash
+                and current["payload_json"] == _json(revised)
+            ):
+                return q.ArtifactQualityRevisionReceipt(
+                    protocol_version=q.PROTOCOL_VERSION,
+                    revision_request_id=request.revision_request_id,
+                    revision_request_version=1,
+                    request_hash=request.request_hash,
+                    artifact_id=request.artifact_id,
+                    artifact_version=request.artifact_version,
+                    prior_record_revision=request.record_revision,
+                    resulting_record_revision=resulting_record_revision,
+                    prior_payload_hash=request.payload_hash,
+                    resulting_payload_hash=resulting_hash,
+                    audit_id=request.audit_id,
+                    resulting_case_revision=request.based_on_case_revision + 1,
+                    replayed=True,
+                )
+            if (
+                current["record_revision"] != request.record_revision
+                or current["payload_hash"] != request.payload_hash
+                or current["payload_json"] != request.canonical_payload_json
+                or self._case_revision(connection, case_id)
+                != request.based_on_case_revision
+            ):
+                raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+            quality_hash = json.loads(current["governance_json"])["quality_contract"][
+                "content_hash"
+            ]
+            governance = draft_governance(
+                artifact_type=artifact_type,
+                payload=revised,
+                target=SimpleNamespace(next_artifact_version=request.artifact_version),
+                quality_hash=quality_hash,
+                now=self.now(),
+                new_id=self.new_id,
+            )
+            result = connection.execute(
+                update(records)
+                .where(
+                    records.c.case_id == str(case_id),
+                    records.c.artifact_id == str(request.artifact_id),
+                    records.c.artifact_version == request.artifact_version,
+                    records.c.record_revision == request.record_revision,
+                    records.c.payload_hash == request.payload_hash,
+                )
+                .values(
+                    record_revision=resulting_record_revision,
+                    payload_hash=resulting_hash,
+                    payload_json=_json(revised),
+                    governance_json=_json(governance),
+                )
+            )
+            if result.rowcount != 1:
+                raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+            self._set_case_quality_state(
+                connection,
+                case_id,
+                q.AuditOutcome.NEEDS_CLARIFICATION,
+                awaiting_confirmation=False,
+            )
+            self._advance_revision(
+                connection, case_id, request.based_on_case_revision
+            )
+        return q.ArtifactQualityRevisionReceipt(
+            protocol_version=q.PROTOCOL_VERSION,
+            revision_request_id=request.revision_request_id,
+            revision_request_version=1,
+            request_hash=request.request_hash,
+            artifact_id=request.artifact_id,
+            artifact_version=request.artifact_version,
+            prior_record_revision=request.record_revision,
+            resulting_record_revision=resulting_record_revision,
+            prior_payload_hash=request.payload_hash,
+            resulting_payload_hash=resulting_hash,
+            audit_id=request.audit_id,
+            resulting_case_revision=request.based_on_case_revision + 1,
+            replayed=False,
+        )
 
     def prepare_artifact_quality_audit(
         self, command: q.PrepareArtifactQualityAuditCommand

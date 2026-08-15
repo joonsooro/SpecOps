@@ -71,6 +71,7 @@ from .artifact_projection import (
     validate_exact,
 )
 from .artifact_quality_foundation import ArtifactQualityFoundationMixin
+from .artifact_reference_graph import validate_artifact_reference_graph
 from .workshop_completion import CompletionUtterance, classify_completion_utterance
 
 
@@ -93,9 +94,15 @@ TURN_ENTITY_KINDS = (
 
 
 class FoundationProtocolError(RuntimeError):
-    def __init__(self, code: c.FoundationRejectionCode) -> None:
+    def __init__(
+        self,
+        code: c.FoundationRejectionCode,
+        *,
+        safe_diagnostic_pointers: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(code.value)
         self.code = code
+        self.safe_diagnostic_pointers = safe_diagnostic_pointers
 
 
 class _GuidanceBranchUnavailable(RuntimeError):
@@ -1322,12 +1329,12 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             semantic_state_hash=domain_hash(
                 "SPECOPS:SEMANTIC_STATE:v1", snapshot.model_dump(mode="json")
             ),
+            source_entity_refs=source_refs,
             planned_identities=tuple(
                 c.PlannedArtifactIdentity(
                     foundation_id=identity,
                     foundation_version=version,
                     entity_kind=kind,
-                    source_entity_refs=source_refs,
                 )
                 for kind in entity_kinds
                 for identity, version in (planned_identity(kind),)
@@ -1367,54 +1374,128 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
 
     @staticmethod
+    def artifact_construction_policy(
+        artifact_type: str,
+        *,
+        confirmed_decision_count: int = 0,
+        quality_rule_ids: tuple[str, ...] = (),
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Derive identity-bound construction work from the active quality manifest."""
+
+        if artifact_type == "TECHNICAL_CONTRACT":
+            return tuple(
+                (kind, "ANALYZER", f"Construct the required {kind.lower()} contract record.")
+                for kind in (
+                    "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING", "ARCHITECTURE_NODE",
+                    "COMPONENT", "INTERFACE", "DATA_CONTRACT", "WORKFLOW",
+                    "FAILURE_CONTRACT", "SECURITY_CONTROL", "QUALITY_BUDGET",
+                    "SUBSTRATE_DEPENDENCY", "OBSERVABILITY_EVENT",
+                    "OBSERVABILITY_METRIC", "OBSERVABILITY_TRACE", "AUDIT_RECORD",
+                    "OBSERVABILITY_ALERT", "ROLLOUT_STEP", "BUILD_UNIT",
+                    "VERIFICATION_ITEM", "ENGINEERING_DECISION", "REVIEW_OBLIGATION",
+                )
+            )
+        if artifact_type != "SPEC_PACKAGE":
+            raise ValueError("unknown artifact type")
+        expected_rules = tuple(f"SPEC-Q-{index:03d}" for index in range(1, 27))
+        if quality_rule_ids and quality_rule_ids != expected_rules:
+            raise ValueError("Spec construction requires the exact ordered quality manifest")
+
+        requirement_count = max(14, confirmed_decision_count * 3)
+        evidence_count = max(8, confirmed_decision_count * 2)
+        groups = (
+            ("PACKAGE_ITEM", 1, "ANALYZER", "Q020 complete package membership."),
+            ("EVIDENCE", evidence_count, "FOUNDATION", "Source-ground one atomic semantic claim."),
+            (
+                "SEMANTIC_EVIDENCE_FINDING",
+                evidence_count,
+                "FOUNDATION",
+                "Q026 locally bind one exact claim to supporting evidence.",
+            ),
+            ("ACTOR", 1, "FOUNDATION", "Q004 project canonical actor authority."),
+            ("GLOSSARY_TERM", 8, "ANALYZER", "Q005 bound one material term."),
+            ("OUTCOME", 2, "ANALYZER", "Define one measurable outcome."),
+            ("SCOPE_ITEM", 6, "ANALYZER", "Define one atomic scope inclusion or non-goal."),
+            ("SCOPE_BOUNDARY", 2, "ANALYZER", "Define one explicit scope boundary."),
+            ("JOURNEY", 3, "ANALYZER", "Trace one complete actor journey."),
+            ("BEHAVIOUR_RULE", 12, "ANALYZER", "Define one atomic behavior obligation."),
+            ("REQUIREMENT", requirement_count, "ANALYZER", "Q007 define one atomic requirement."),
+            ("DATA_RULE", 8, "ANALYZER", "Q015 fully define one exported data element."),
+            (
+                "EXPERIENCE_STATE",
+                9,
+                "ANALYZER",
+                "Q014 define one distinct lifecycle or failure state.",
+            ),
+            (
+                "SCENARIO",
+                12,
+                "ANALYZER",
+                "Q012-Q013 cover one success, boundary, negative, or recovery path.",
+            ),
+            ("QUALITY_ATTRIBUTE", 4, "ANALYZER", "Define one measurable quality threshold."),
+            ("CONSTRAINT", 4, "ANALYZER", "Define one explicit delivery constraint."),
+            ("DEPENDENCY", 3, "ANALYZER", "Define one owned external dependency."),
+            ("RISK", 4, "ANALYZER", "Define one risk, trigger, mitigation, and owner."),
+            (
+                "DECISION",
+                confirmed_decision_count,
+                "FOUNDATION",
+                "Project one exact confirmed decision and ceremony.",
+            ),
+            ("OPEN_ITEM", 2, "ANALYZER", "Represent one genuine non-blocking open item."),
+            (
+                "ACCEPTANCE_CHECK",
+                max(18, requirement_count + 4),
+                "ANALYZER",
+                "Q017 verify one independently executable obligation.",
+            ),
+        )
+        return tuple(
+            (kind, owner, f"{purpose} Slot {index + 1}.")
+            for kind, count, owner, purpose in groups
+            for index in range(count)
+        )
+
+    @staticmethod
+    def artifact_construction_blueprint(
+        plan: c.ArtifactSynthesisIdentityPlan,
+        policy: tuple[tuple[str, str, str], ...],
+    ) -> c.ArtifactConstructionBlueprint:
+        if len(policy) != len(plan.planned_identities):
+            raise ValueError("construction policy and identity plan lengths differ")
+        slots = []
+        for identity, (kind, owner, purpose) in zip(
+            plan.planned_identities, policy, strict=True
+        ):
+            if identity.entity_kind != kind:
+                raise ValueError("construction policy and identity kind differ")
+            slots.append(
+                c.ArtifactConstructionSlot(
+                    foundation_id=identity.foundation_id,
+                    foundation_version=identity.foundation_version,
+                    entity_kind=kind,
+                    owner=owner,
+                    purpose=purpose,
+                )
+            )
+        return c.ArtifactConstructionBlueprint(
+            blueprint_version="1.0.0", slots=tuple(slots)
+        )
+
+    @staticmethod
     def artifact_identity_allocation_policy(
         artifact_type: str, *, confirmed_decision_count: int = 0
     ) -> tuple[str, ...]:
-        """Server-owned bounded identity capacity derived from V4 payload paths."""
+        """Compatibility projection of the rule-derived construction policy."""
 
-        policies = {
-            "SPEC_PACKAGE": tuple(
-                kind
-                for kind, count in (
-                    ("PACKAGE_ITEM", 1),
-                    ("EVIDENCE", 8),
-                    ("SEMANTIC_EVIDENCE_FINDING", 8),
-                    ("ACTOR", 1),
-                    ("GLOSSARY_TERM", 4),
-                    ("OUTCOME", 1),
-                    ("SCOPE_ITEM", 3),
-                    ("SCOPE_BOUNDARY", 1),
-                    ("JOURNEY", 2),
-                    ("BEHAVIOUR_RULE", 8),
-                    ("REQUIREMENT", 7),
-                    ("DATA_RULE", 7),
-                    ("EXPERIENCE_STATE", 7),
-                    ("SCENARIO", 7),
-                    ("QUALITY_ATTRIBUTE", 3),
-                    ("CONSTRAINT", 3),
-                    ("DEPENDENCY", 2),
-                    ("RISK", 3),
-                    ("DECISION", min(26, max(4, confirmed_decision_count + 2))),
-                    ("OPEN_ITEM", 2),
-                    ("ACCEPTANCE_CHECK", 10),
-                )
-                for _ in range(count)
-            ),
-            "TECHNICAL_CONTRACT": (
-                "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING", "ARCHITECTURE_NODE",
-                "COMPONENT", "INTERFACE", "DATA_CONTRACT",
-                "WORKFLOW", "FAILURE_CONTRACT", "SECURITY_CONTROL", "QUALITY_BUDGET",
-                "SUBSTRATE_DEPENDENCY",
-                "OBSERVABILITY_EVENT", "OBSERVABILITY_METRIC", "OBSERVABILITY_TRACE",
-                "AUDIT_RECORD", "OBSERVABILITY_ALERT",
-                "ROLLOUT_STEP", "BUILD_UNIT", "VERIFICATION_ITEM",
-                "ENGINEERING_DECISION", "REVIEW_OBLIGATION",
-            ),
-        }
-        try:
-            return policies[artifact_type]
-        except KeyError as exc:
-            raise ValueError("unknown artifact type") from exc
+        return tuple(
+            kind
+            for kind, _, _ in WorkshopFoundationService.artifact_construction_policy(
+                artifact_type,
+                confirmed_decision_count=confirmed_decision_count,
+            )
+        )
 
     def execute(self, command: c.FoundationCommand) -> c.FoundationReceipt:
         case = self.get_case(command.case_id)
@@ -3276,8 +3357,6 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         errors = list(_payload_validator(schema_name).iter_errors(payload))
         if errors:
             raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED)
-        if artifact_type == "SPEC_PACKAGE":
-            self._validate_confirmed_decision_projection(command, payload)
         if artifact_type == "TECHNICAL_CONTRACT":
             self._validate_confirmed_spec_lineage(connection, command, prior_revision)
         planned = {str(item.foundation_id): item.entity_kind for item in command.identity_plan.planned_identities}
@@ -3286,9 +3365,45 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             planned[identity] != kind for identity, kind in identifier_kinds.items()
         ):
             raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
-        for item in command.identity_plan.planned_identities:
-            for ref in item.source_entity_refs:
-                self._semantic_record_for_ref(connection, command.case_id, ref)
+        if artifact_type == "SPEC_PACKAGE":
+            self._validate_confirmed_decision_projection(command, payload)
+        for ref in command.identity_plan.source_entity_refs:
+            self._semantic_record_for_ref(connection, command.case_id, ref)
+        allowed_reference_ids = set(identifier_kinds)
+        semantic_records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        allowed_reference_ids.update(
+            connection.execute(
+                select(semantic_records.c.foundation_id).where(
+                    semantic_records.c.case_id == str(command.case_id),
+                    semantic_records.c.status != c.SemanticRecordStatus.STALE.value,
+                )
+            ).scalars()
+        )
+        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
+        allowed_reference_ids.update(
+            str(item.source.source_id) for item in context.source_set.ordered_sources
+        )
+        allowed_reference_ids.update(
+            connection.execute(
+                select(case_participants.c.actor_id).where(
+                    case_participants.c.case_id == str(command.case_id)
+                )
+            ).scalars()
+        )
+        if artifact_type == "TECHNICAL_CONTRACT":
+            allowed_reference_ids.update(
+                self._artifact_identity_kinds(
+                    json.loads(command.confirmed_spec.canonical_payload_json)
+                )
+            )
+        reference_issues = validate_artifact_reference_graph(
+            payload, allowed_reference_ids=allowed_reference_ids
+        )
+        if reference_issues:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.UNKNOWN_REFERENCE,
+                safe_diagnostic_pointers=tuple(item.pointer for item in reference_issues),
+            )
         records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
         prior_artifact = connection.execute(
             select(records).where(
@@ -3322,7 +3437,6 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         except IntegrityError as exc:
             raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED) from exc
         digest = payload_hash(payload)
-        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
         governance = draft_governance(
             artifact_type=artifact_type,
             payload=payload,
@@ -3391,6 +3505,15 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
             )
 
+        expected_projection = self._server_owned_spec_records(
+            command.confirmed_decision_bindings,
+            command.identity_plan,
+        )
+        if payload["actors"] != expected_projection["actors"]:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+
         decisions = payload["decisions"]
         decision_ids = [item["id"] for item in decisions]
         if len(decision_ids) != len(set(decision_ids)):
@@ -3404,9 +3527,120 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
             )
 
+        expected_decisions = {
+            item["id"]: item for item in expected_projection["decisions"]
+        }
         for binding in canonical:
-            decision = confirmed[str(binding.decision_id)]
-            exact_confirmation = {
+            if confirmed[str(binding.decision_id)] != expected_decisions[
+                str(binding.decision_id)
+            ]:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+                )
+
+    def project_spec_server_owned_records(
+        self,
+        candidate: c.SpecPackageSynthesisCandidate,
+        *,
+        confirmed_decision_bindings: tuple[c.ConfirmedDecisionSynthesisBinding, ...],
+        identity_plan: c.ArtifactSynthesisIdentityPlan,
+    ) -> c.SpecPackageSynthesisCandidate:
+        """Merge canonical actors and decision ceremonies into a provider-owned draft."""
+
+        try:
+            payload = json.loads(
+                candidate.candidate_payload_json,
+                object_pairs_hook=self._reject_duplicate_keys,
+            )
+        except ValueError as exc:
+            raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED) from exc
+        if any(
+            field in payload
+            for field in (
+                "actors",
+                "decisions",
+                "evidence_catalog",
+                "semantic_evidence_findings",
+            )
+        ):
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+        payload.update(
+            self._server_owned_spec_records(
+                confirmed_decision_bindings,
+                identity_plan,
+            )
+        )
+        payload["evidence_catalog"] = []
+        payload["semantic_evidence_findings"] = []
+        return candidate.model_copy(
+            update={
+                "candidate_payload_json": json.dumps(
+                    payload, sort_keys=True, separators=(",", ":")
+                )
+            }
+        )
+
+    @staticmethod
+    def _server_owned_spec_records(
+        bindings: tuple[c.ConfirmedDecisionSynthesisBinding, ...],
+        identity_plan: c.ArtifactSynthesisIdentityPlan,
+    ) -> dict[str, list[dict[str, Any]]]:
+        actor_ids = [
+            item.foundation_id
+            for item in identity_plan.planned_identities
+            if item.entity_kind == "ACTOR"
+        ]
+        bound_actor_ids = {item.actor_ref for item in bindings}
+        if len(actor_ids) != 1 or not bound_actor_ids.issubset(set(actor_ids)):
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+
+        domain_map = {
+            c.Domain.PRODUCT: "product",
+            c.Domain.TECHNICAL: "technical",
+            c.Domain.CROSS_DOMAIN: "cross_domain",
+            c.Domain.POLICY: "compliance",
+            c.Domain.SECURITY: "security",
+            c.Domain.PRIVACY: "privacy",
+            c.Domain.DATA: "data",
+            c.Domain.ACCEPTANCE: "business",
+        }
+        classification_map = {
+            c.Domain.PRODUCT: "product",
+            c.Domain.TECHNICAL: "technical",
+            c.Domain.CROSS_DOMAIN: "cross_domain",
+            c.Domain.POLICY: "policy",
+            c.Domain.SECURITY: "cross_domain",
+            c.Domain.PRIVACY: "cross_domain",
+            c.Domain.DATA: "cross_domain",
+            c.Domain.ACCEPTANCE: "cross_domain",
+        }
+        authority_domains = sorted(
+            {domain_map[item.classification] for item in bindings} or {"product"}
+        )
+        evidence_refs = sorted(
+            {str(evidence_id) for item in bindings for evidence_id in item.evidence_ids}
+        )
+        actors = [
+            {
+                "id": str(actor_ids[0]),
+                "name": "Workshop decision authority",
+                "description": "Canonical human authority for confirmed workshop decisions.",
+                "responsibilities": [
+                    "Own confirmed decisions within the listed authority domains."
+                ],
+                "permissions": [
+                    "Confirm, revise, reject, or defer workshop decisions."
+                ],
+                "authority_domains": authority_domains,
+                "evidence_refs": evidence_refs,
+            }
+        ]
+        decisions = []
+        for binding in bindings:
+            classification = classification_map[binding.classification]
+            confirmation = {
                 "confirmation_id": str(binding.confirmation_id),
                 "confirmed_decision_id": str(binding.decision_id),
                 "confirmed_decision_version": binding.decision_version,
@@ -3421,21 +3655,29 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 .isoformat()
                 .replace("+00:00", "Z"),
             }
-            if (
-                decision["decision_version"] != binding.decision_version
-                or decision["decision"] != binding.statement
-                or decision["rationale"] != binding.rationale
-                or decision["alternatives_considered"]
-                != list(binding.alternatives_considered)
-                or decision["evidence_refs"] != [str(item) for item in binding.evidence_ids]
-                or decision["confirmation_binding"] != exact_confirmation
-                or decision["authority"]["actor_ref"] != str(binding.actor_ref)
-                or decision["authority"]["foundation_validation_id"]
-                != str(binding.authority_validation_id)
-            ):
-                raise FoundationProtocolError(
-                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
-                )
+            decisions.append(
+                {
+                    "id": str(binding.decision_id),
+                    "decision_version": binding.decision_version,
+                    "question": f"Should the workshop adopt this decision: {binding.statement}",
+                    "decision": binding.statement,
+                    "classification": classification,
+                    "domains": [domain_map[binding.classification]],
+                    "rationale": binding.rationale,
+                    "alternatives_considered": list(binding.alternatives_considered),
+                    "status": "confirmed",
+                    "authority": {
+                        "actor_ref": str(binding.actor_ref),
+                        "domain": domain_map[binding.classification],
+                        "delegation_ref": None,
+                        "foundation_validation_id": str(binding.authority_validation_id),
+                    },
+                    "confirmation_binding": confirmation,
+                    "affected_refs": [str(item) for item in binding.problem_ids],
+                    "evidence_refs": [str(item) for item in binding.evidence_ids],
+                }
+            )
+        return {"actors": actors, "decisions": decisions}
 
     def _validate_confirmed_spec_lineage(self, connection, command, prior_revision):
         binding = command.confirmed_spec

@@ -123,12 +123,12 @@ def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
         target=target,
         based_on_case_revision=0,
         semantic_state_hash=ONE_HASH,
+        source_entity_refs=(),
         planned_identities=(
             c.PlannedArtifactIdentity(
                 foundation_id=UUID("00000000-0000-4000-8000-000000000022"),
                 foundation_version=1,
                 entity_kind="PACKAGE_ITEM",
-                source_entity_refs=(),
             ),
         ),
     )
@@ -145,10 +145,19 @@ def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
         "based_on_case_revision": 0,
         "target": target,
         "identity_plan": plan,
-        "foundation_snapshot": snapshot,
-        "canonical_semantic_state_json": json.dumps(
-            snapshot.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        "construction_blueprint": c.ArtifactConstructionBlueprint(
+            blueprint_version="1.0.0",
+            slots=(
+                c.ArtifactConstructionSlot(
+                    foundation_id=plan.planned_identities[0].foundation_id,
+                    foundation_version=1,
+                    entity_kind="PACKAGE_ITEM",
+                    owner="ANALYZER",
+                    purpose="Construct the package membership record.",
+                ),
+            ),
         ),
+        "foundation_snapshot": snapshot,
         "quality_rule_manifest": tuple(
             c.ArtifactSynthesisQualityRule.model_validate(
                 item.model_dump()
@@ -609,14 +618,29 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     arguments = adapter._response_arguments(request, bootstrap=False)
     content = arguments["input"][0]["content"]
     assert [item["type"] for item in content] == ["input_text", "input_text"]
-    prefix = "Normative Foundation artifact payload JSON Schema: "
+    prefix = "Provider-owned artifact payload JSON Schema: "
     assert content[0]["text"].startswith(prefix)
     payload_schema = json.loads(content[0]["text"].removeprefix(prefix))
     assert payload_schema["$id"].endswith("/spec-package-payload.schema.json")
     assert payload_schema["type"] == "object"
     assert payload_schema["additionalProperties"] is False
     assert "product_thesis" in payload_schema["required"]
+    assert "actors" not in payload_schema["properties"]
+    assert "decisions" not in payload_schema["properties"]
+    assert "evidence_catalog" not in payload_schema["properties"]
+    assert "semantic_evidence_findings" not in payload_schema["properties"]
     assert json.loads(content[1]["text"])["request_type"] == "SPEC_PACKAGE_SYNTHESIS"
+    provider_request = json.loads(content[1]["text"])
+    assert "canonical_semantic_state_json" not in provider_request
+    assert "confirmed_decision_bindings" not in provider_request
+    assert provider_request["identity_plan"].keys() >= {
+        "planned_identities",
+        "source_entity_refs",
+    }
+    assert all(
+        "source_entity_refs" not in item
+        for item in provider_request["identity_plan"]["planned_identities"]
+    )
 
     output_schema = arguments["text"]["format"]["schema"]
     assert output_schema["properties"]["foundation_artifact_id"]["const"] == str(
@@ -664,9 +688,8 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "use each selected identity at most once" in instructions
     assert "unused capacity identities are allowed" in instructions
     assert "quality_rule_manifest as the exact construction checklist" in instructions
-    assert "every confirmed_decision_bindings entry" in instructions
-    assert "decisions[].id and confirmation_binding.confirmed_decision_id" in instructions
-    assert "binding actor_ref as the matching actors[].id" in instructions
+    assert "Do not emit actors or decisions" in instructions
+    assert "Foundation deterministically projects" in instructions
     assert len(json.loads(content[1]["text"])["quality_rule_manifest"]) == 26
     assert "create no other payload-owned identity" in instructions
 
@@ -711,7 +734,7 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
             )
 
 
-def test_terminal_spec_schema_requires_confirmed_decision_slots():
+def test_terminal_spec_schema_excludes_foundation_owned_decision_records():
     adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
     sources = (
         _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
@@ -745,18 +768,22 @@ def test_terminal_spec_schema_requires_confirmed_decision_slots():
         update={"confirmed_decision_bindings": (binding,)}
     )
 
-    schema = adapter._response_arguments(request, bootstrap=False)["text"]["format"][
-        "schema"
-    ]
+    arguments = adapter._response_arguments(request, bootstrap=False)
+    schema = arguments["text"]["format"]["schema"]
     payload_ref = schema["properties"]["candidate_payload_json"]["$ref"]
     payload = schema["$defs"][payload_ref.removeprefix("#/$defs/")]
-    decisions = payload["properties"]["decisions"]
-    assert decisions["minItems"] == 1
-    assert decisions["maxItems"] == 1
-    decision_ref = decisions["items"]["$ref"]
-    decision = schema["$defs"][decision_ref.removeprefix("#/$defs/")]
-    assert decision["properties"]["id"]["enum"] == [str(decision_id)]
-    assert decision["properties"]["status"]["const"] == "confirmed"
+    assert "actors" not in payload["properties"]
+    assert "decisions" not in payload["properties"]
+    provider_request = json.loads(arguments["input"][0]["content"][1]["text"])
+    assert "confirmed_decision_bindings" not in provider_request
+    assert provider_request["foundation_owned_record_refs"]["decisions"] == [
+        {
+            "decision_id": str(decision_id),
+            "decision_version": 1,
+            "actor_ref": str(binding.actor_ref),
+        }
+    ]
+    assert str(binding.confirmation_id) not in arguments["input"][0]["content"][1]["text"]
 
 
 def test_quote_search_grounding_requires_one_exact_terra_quote():

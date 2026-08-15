@@ -14,7 +14,10 @@ from specops_workshop.v4.artifact_quality_adapter import (
     FreshConversationTerraQualityEvaluator,
     PreparedArtifactQualityContext,
 )
-from specops_workshop.v4.schema_compiler import artifact_quality_native_schema
+from specops_workshop.v4.schema_compiler import (
+    artifact_evidence_support_native_schema,
+    artifact_quality_native_schema,
+)
 from v4_quality_factory import all_pass_candidate
 
 
@@ -201,6 +204,56 @@ def _client(bundle, *, conversation_id="conv_quality_isolated", output_text=None
     return SimpleNamespace(conversations=conversations, responses=responses)
 
 
+def _evidence_request() -> q.ArtifactEvidenceSupportRequest:
+    return q.ArtifactEvidenceSupportRequest(
+        protocol_version=q.PROTOCOL_VERSION,
+        request_id=UUID("60000000-0000-4000-8000-000000000001"),
+        evaluator_run_id=UUID("60000000-0000-4000-8000-000000000002"),
+        request_hash=HASH,
+        artifact_id=UUID("60000000-0000-4000-8000-000000000003"),
+        artifact_version=1,
+        record_revision=1,
+        payload_hash=HASH,
+        pairs=(
+            q.ExactEvidenceSupportPair(
+                pair_id=UUID("60000000-0000-4000-8000-000000000004"),
+                finding_id=UUID("60000000-0000-4000-8000-000000000005"),
+                claim_ref=UUID("60000000-0000-4000-8000-000000000006"),
+                claim_pointer="/requirements/0/statement",
+                claim_hash=HASH,
+                exact_claim="The export is authorized.",
+                evidence_ref=UUID("60000000-0000-4000-8000-000000000007"),
+                source_id=UUID("60000000-0000-4000-8000-000000000008"),
+                source_hash=HASH,
+                locator="Approved source, authorization section.",
+                exact_excerpt="Only authorized users may export.",
+                excerpt_hash=HASH,
+            ),
+        ),
+    )
+
+
+def _evidence_candidate(request: q.ArtifactEvidenceSupportRequest) -> str:
+    return q.ArtifactEvidenceSupportCandidate(
+        protocol_version=q.PROTOCOL_VERSION,
+        output_type="ARTIFACT_EVIDENCE_SUPPORT_CANDIDATE",
+        request_id=request.request_id,
+        evaluator_run_id=request.evaluator_run_id,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        assessments=(
+            q.EvidenceSupportAssessment(
+                pair_id=request.pairs[0].pair_id,
+                assessment=q.EvidenceSupportResult.SUPPORTS,
+                confidence=0.99,
+            ),
+        ),
+    ).model_dump_json()
+
+
 def test_fresh_terra_audit_serializes_the_closed_universe_without_network():
     bundle = _bundle()
     client = _client(bundle)
@@ -231,6 +284,109 @@ def test_fresh_terra_audit_serializes_the_closed_universe_without_network():
     assert result.execution.store_enabled is True
     assert result.candidate.request_hash == bundle.request_hash
     assert client.conversations.deleted[0][0] == "conv_quality_isolated"
+
+
+def test_evidence_support_is_one_stored_standalone_response_with_stable_identity():
+    request = _evidence_request()
+    responses = _Endpoint(
+        SimpleNamespace(
+            id="resp_evidence_1",
+            _request_id="req_evidence_1",
+            status="completed",
+            usage=None,
+            output_text=_evidence_candidate(request),
+        )
+    )
+    evaluator = FreshConversationTerraQualityEvaluator(
+        api_key="not-called",
+        client=SimpleNamespace(
+            conversations=_Conversations(SimpleNamespace(id="unused")),
+            responses=responses,
+        ),
+        now=lambda: NOW,
+    )
+    checkpoints: list[tuple[str, str]] = []
+
+    result = asyncio.run(
+        evaluator.evaluate_evidence_support(
+            request,
+            response_checkpoint=lambda response_id, client_request_id: checkpoints.append(
+                (response_id, client_request_id)
+            ),
+        )
+    )
+
+    provider_request = responses.calls[0]
+    assert "conversation" not in provider_request
+    assert provider_request["store"] is True
+    assert provider_request["background"] is True
+    assert provider_request["extra_headers"] == {
+        "X-Client-Request-Id": f"aqa-support-{request.request_hash[7:39]}",
+        "Idempotency-Key": request.request_hash,
+    }
+    assert (
+        provider_request["text"]["format"]["schema"]
+        == artifact_evidence_support_native_schema()
+    )
+    assert provider_request["input"][0]["content"][0]["text"] == (
+        request.model_dump_json(exclude_none=False)
+    )
+    assert checkpoints == [
+        ("resp_evidence_1", f"aqa-support-{request.request_hash[7:39]}")
+    ]
+    assert result.execution.provider_response_id == "resp_evidence_1"
+    assert not hasattr(result.execution, "provider_conversation_id")
+    assert result.candidate.evaluator_run_id == request.evaluator_run_id
+
+
+def test_evidence_support_resumes_known_response_without_recreate():
+    request = _evidence_request()
+
+    class Responses:
+        def __init__(self):
+            self.create_calls = 0
+            self.retrieve_calls = 0
+
+        async def create(self, **_values):
+            self.create_calls += 1
+            raise AssertionError("known Response must not be recreated")
+
+        async def retrieve(self, response_id, **_values):
+            self.retrieve_calls += 1
+            return SimpleNamespace(
+                id=response_id,
+                _request_id="req_evidence_resume",
+                status="completed",
+                usage=None,
+                output_text=_evidence_candidate(request),
+            )
+
+    responses = Responses()
+    evaluator = FreshConversationTerraQualityEvaluator(
+        api_key="not-called",
+        client=SimpleNamespace(
+            conversations=_Conversations(SimpleNamespace(id="unused")),
+            responses=responses,
+        ),
+        now=lambda: NOW,
+        sleep=lambda _seconds: asyncio.sleep(0),
+    )
+
+    result = asyncio.run(
+        evaluator.evaluate_evidence_support(
+            request,
+            known_response_id="resp_evidence_known",
+        )
+    )
+
+    assert responses.create_calls == 0
+    assert responses.retrieve_calls == 1
+    assert result.execution.provider_response_id == "resp_evidence_known"
+    assert [item.event for item in evaluator.lifecycle_events] == [
+        "provider_request.started",
+        "provider_request.resumed",
+        "provider_request.completed",
+    ]
 
 
 def test_quality_response_crosses_slow_observation_without_recreate_or_hard_stop():

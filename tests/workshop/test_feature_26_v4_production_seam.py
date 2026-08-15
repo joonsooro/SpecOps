@@ -6,17 +6,28 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
+import json
+import hashlib
 
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from specops_contracts import workshop_v1 as c
-from specops_contracts.canonical import analyzer_request_hash
+from specops_contracts import artifact_quality_v1 as q
+from specops_contracts.canonical import analyzer_request_hash, payload_hash
 from specops_workshop.api import create_app
 from specops_workshop.config import Settings
 from specops_workshop.sources import SourceCatalog
-from specops_workshop.v4.openai_adapter import BootstrapResult, PreparedProviderContext
-from specops_workshop.v4.orchestrator import V4ProductionOrchestrator
+from specops_workshop.v4.openai_adapter import (
+    BootstrapResult,
+    PreparedProviderContext,
+    ProviderSourceUpload,
+)
+from specops_workshop.v4.artifact_quality_adapter import ArtifactEvidenceSupportEvaluation
+from specops_workshop.v4.orchestrator import (
+    ProviderOperationAdmission,
+    V4ProductionOrchestrator,
+)
 
 
 ROOT = next(
@@ -174,6 +185,178 @@ def configured(tmp_path):
     )
 
 
+def test_spec_evidence_support_is_checkpointed_then_materialized_before_audit():
+    case_id = UUID("70000000-0000-4000-8000-000000000001")
+    session_id = UUID("70000000-0000-4000-8000-000000000002")
+    artifact_id = UUID("70000000-0000-4000-8000-000000000003")
+    claim_id = UUID("70000000-0000-4000-8000-000000000004")
+    evidence_id = UUID("70000000-0000-4000-8000-000000000005")
+    finding_id = UUID("70000000-0000-4000-8000-000000000006")
+    source_id = UUID("70000000-0000-4000-8000-000000000007")
+    source_text = "Only authorized users may export."
+    source_hash = "sha256:" + hashlib.sha256(source_text.encode()).hexdigest()
+    payload = {
+        "requirements": [
+            {
+                "id": str(claim_id),
+                "behaviour": "Only authorized users may export.",
+            }
+        ],
+        "evidence_catalog": [],
+        "semantic_evidence_findings": [],
+    }
+    record = {
+        "artifact_id": str(artifact_id),
+        "artifact_version": 1,
+        "record_revision": 1,
+        "payload_hash": payload_hash(payload),
+        "payload_json": json.dumps(payload),
+    }
+    events = []
+
+    class Foundation:
+        def latest_artifact_record(self, _case_id, _artifact_type):
+            return record
+
+        def pending_provider_responses(self, _case_id):
+            return ()
+
+        def checkpoint_provider_response(self, _case_id, **values):
+            events.append(("checkpoint", values))
+
+        def materialize_artifact_evidence_support(self, _case_id, request, candidate):
+            events.append(("materialize", request, candidate))
+
+    class Evaluator:
+        async def evaluate_evidence_support(
+            self, request, *, known_response_id=None, response_checkpoint=None
+        ):
+            assert known_response_id is None
+            response_checkpoint("resp_support_exact", f"aqa-support-{request.request_hash[7:39]}")
+            candidate = q.ArtifactEvidenceSupportCandidate(
+                protocol_version=q.PROTOCOL_VERSION,
+                output_type="ARTIFACT_EVIDENCE_SUPPORT_CANDIDATE",
+                request_id=request.request_id,
+                evaluator_run_id=request.evaluator_run_id,
+                request_hash=request.request_hash,
+                artifact_id=request.artifact_id,
+                artifact_version=request.artifact_version,
+                record_revision=request.record_revision,
+                payload_hash=request.payload_hash,
+                assessments=(
+                    q.EvidenceSupportAssessment(
+                        pair_id=request.pairs[0].pair_id,
+                        assessment=q.EvidenceSupportResult.SUPPORTS,
+                        confidence=0.97,
+                    ),
+                ),
+            )
+            return ArtifactEvidenceSupportEvaluation(
+                execution=q.StandaloneEvaluatorExecutionBinding(
+                    provider="OPENAI",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="medium",
+                    provider_response_id="resp_support_exact",
+                    client_request_id=f"aqa-support-{request.request_hash[7:39]}",
+                    store_enabled=True,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                ),
+                candidate=candidate,
+            )
+
+    source = ProviderSourceUpload(
+        source=c.SourceIdentity(
+            source_id=source_id,
+            role=c.SourceRole.PM_SPEC,
+            version=1,
+            payload_hash=source_hash,
+            canonical_locator="/sources/pm.md",
+            filename="pm.md",
+            media_type="text/markdown",
+        ),
+        content=source_text.encode(),
+    )
+    technical = ProviderSourceUpload(
+        source=c.SourceIdentity(
+            source_id=UUID("70000000-0000-4000-8000-000000000008"),
+            role=c.SourceRole.TECHNICAL_CONTRACT,
+            version=1,
+            payload_hash=source_hash,
+            canonical_locator="/sources/technical.md",
+            filename="technical.md",
+            media_type="text/markdown",
+        ),
+        content=source_text.encode(),
+    )
+    plan = c.ArtifactSynthesisIdentityPlan(
+        identity_plan_id=UUID("70000000-0000-4000-8000-000000000009"),
+        identity_plan_version=1,
+        target=c.ArtifactDraftTarget(
+            artifact_type="SPEC_PACKAGE",
+            foundation_artifact_id=artifact_id,
+            artifact_key="SPEC-EVIDENCE",
+            next_artifact_version=1,
+        ),
+        based_on_case_revision=1,
+        semantic_state_hash="sha256:" + "a" * 64,
+        source_entity_refs=(),
+        planned_identities=(
+            c.PlannedArtifactIdentity(
+                foundation_id=evidence_id,
+                foundation_version=1,
+                entity_kind="EVIDENCE",
+            ),
+            c.PlannedArtifactIdentity(
+                foundation_id=finding_id,
+                foundation_version=1,
+                entity_kind="SEMANTIC_EVIDENCE_FINDING",
+            ),
+        ),
+    )
+    request = c.SpecPackageSynthesisRequest.model_construct(identity_plan=plan)
+    candidate = c.SpecPackageSynthesisCandidate.model_construct(
+        evidence_support_proposals=(
+            c.SpecEvidenceSupportProposalCandidate(
+                evidence_ref=evidence_id,
+                finding_ref=finding_id,
+                claim_ref=claim_id,
+                claim_pointer="/requirements/0/behaviour",
+                source_role=c.SourceRole.PM_SPEC,
+                locator="PM source line 1",
+                exact_excerpt=source_text,
+            ),
+        )
+    )
+    orchestrator = V4ProductionOrchestrator(
+        foundation=Foundation(),
+        adapter=SimpleNamespace(source_set_hash=lambda _sources: source_hash),
+        case_id=case_id,
+        session_id=session_id,
+        sources=(source, technical),
+        analyzer_contract=SimpleNamespace(),
+        quality_evaluator=Evaluator(),
+    )
+
+    asyncio.run(
+        orchestrator._materialize_spec_evidence_support(
+            request=request,
+            admission=ProviderOperationAdmission(
+                candidate=candidate,
+                receipt=SimpleNamespace(),
+            ),
+        )
+    )
+
+    assert [item[0] for item in events] == ["checkpoint", "materialize"]
+    assert events[0][1]["operation"] == "ARTIFACT_EVIDENCE_SUPPORT"
+    support_request = events[1][1]
+    assert support_request.pairs[0].claim_hash.startswith("sha256:")
+    assert support_request.pairs[0].excerpt_hash.startswith("sha256:")
+    assert support_request.pairs[0].evidence_ref == evidence_id
+    assert support_request.pairs[0].finding_id == finding_id
+
+
 def test_production_factory_uses_stored_conversation_v4_path_and_replays_duplicates(tmp_path):
     adapter = DeterministicAdapter()
     app = create_app(
@@ -294,6 +477,8 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
         class Foundation:
             def __init__(self): self.commands = []
             def active_analyzer_context(self, case_id): return context
+            def project_spec_server_owned_records(self, candidate, **kwargs):
+                return candidate
             def execute(self, command):
                 self.commands.append(command)
                 return SimpleNamespace(receipt_type=command.command_type)
@@ -332,12 +517,14 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
             "spec": c.ArtifactSynthesisIdentityPlan(
                 identity_plan_id=UUID("20000000-0000-4000-8000-000000000022"), identity_plan_version=1,
                 target=target_spec, based_on_case_revision=8, semantic_state_hash="sha256:" + "6" * 64,
-                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000023"), foundation_version=1, entity_kind="REQUIREMENT", source_entity_refs=()),),
+                source_entity_refs=(),
+                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000023"), foundation_version=1, entity_kind="REQUIREMENT"),),
             ),
             "tech": c.ArtifactSynthesisIdentityPlan(
                 identity_plan_id=UUID("20000000-0000-4000-8000-000000000024"), identity_plan_version=1,
                 target=target_tech, based_on_case_revision=8, semantic_state_hash="sha256:" + "7" * 64,
-                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000025"), foundation_version=1, entity_kind="COMPONENT", source_entity_refs=()),),
+                source_entity_refs=(),
+                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000025"), foundation_version=1, entity_kind="COMPONENT"),),
             ),
         }
         common = dict(

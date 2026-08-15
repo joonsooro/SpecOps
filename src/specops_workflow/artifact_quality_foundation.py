@@ -13,13 +13,15 @@ from sqlalchemy.exc import IntegrityError
 
 from specops_contracts import artifact_quality_v1 as q
 from specops_contracts import workshop_v1 as c
-from specops_contracts.canonical import canonical_bytes, domain_hash
+from specops_contracts.canonical import canonical_bytes, domain_hash, payload_hash
 from specops_workshop.v4.artifact_quality import (
     resolve_payload_pointer,
     validate_audit_bundle,
 )
 
 from .artifact_projection import validate_exact
+from .artifact_reference_graph import validate_artifact_reference_graph
+from .artifact_evidence_support import materialize_supported_evidence
 from .persistence import (
     ARTIFACT_QUALITY_TABLES,
     WORKSHOP_PROTOCOL_TABLES,
@@ -69,6 +71,125 @@ class ArtifactQualityFoundationMixin:
                 .limit(1)
             ).mappings().one_or_none()
         return None if row is None else dict(row)
+
+    def materialize_artifact_evidence_support(
+        self,
+        case_id: UUID,
+        request: q.ArtifactEvidenceSupportRequest,
+        candidate: q.ArtifactEvidenceSupportCandidate,
+    ) -> dict[str, Any]:
+        """Commit locally hashed SUPPORTS findings as one exact record revision."""
+
+        from .workshop_protocol import FoundationProtocolError
+
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+        plans = WORKSHOP_PROTOCOL_TABLES["workshop_identity_plans"]
+        semantic_records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        with self.engine.begin() as connection:
+            prior_revision = self._case_revision(connection, case_id)
+            row = connection.execute(
+                select(records).where(
+                    records.c.case_id == str(case_id),
+                    records.c.artifact_type == "SPEC_PACKAGE",
+                    records.c.artifact_id == str(request.artifact_id),
+                    records.c.artifact_version == request.artifact_version,
+                    records.c.record_revision == request.record_revision,
+                    records.c.payload_hash == request.payload_hash,
+                )
+            ).mappings().one_or_none()
+            if row is None:
+                raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+            payload = json.loads(row["payload_json"])
+            try:
+                revised = materialize_supported_evidence(
+                    payload=payload,
+                    request=request,
+                    candidate=candidate,
+                    new_id=self.new_id,
+                )
+                validate_exact("spec-package-payload.schema.json", revised)
+            except ValueError as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED
+                ) from exc
+            plan_json = connection.execute(
+                select(plans.c.plan_json).where(
+                    plans.c.case_id == str(case_id),
+                    plans.c.artifact_id == str(request.artifact_id),
+                    plans.c.artifact_version == request.artifact_version,
+                    plans.c.status == "CONSUMED",
+                )
+            ).scalar_one_or_none()
+            if plan_json is None:
+                raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+            plan = c.ArtifactSynthesisIdentityPlan.model_validate_json(plan_json)
+            planned = {
+                str(item.foundation_id): item.entity_kind
+                for item in plan.planned_identities
+            }
+            identity_kinds = self._artifact_identity_kinds(revised)
+            if not set(identity_kinds).issubset(planned) or any(
+                planned[identity] != kind for identity, kind in identity_kinds.items()
+            ):
+                raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+
+            allowed = set(identity_kinds)
+            allowed.update(
+                connection.execute(
+                    select(semantic_records.c.foundation_id).where(
+                        semantic_records.c.case_id == str(case_id),
+                        semantic_records.c.status != c.SemanticRecordStatus.STALE.value,
+                    )
+                ).scalars()
+            )
+            active = connection.execute(
+                select(WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]).where(
+                    WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"].c.case_id
+                    == str(case_id),
+                    WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"].c.status
+                    == c.ContextStatus.ACTIVE.value,
+                )
+            ).mappings().one()
+            context = c.AnalyzerContextBinding.model_validate_json(active["binding_json"])
+            allowed.update(
+                str(item.source.source_id) for item in context.source_set.ordered_sources
+            )
+            allowed.update(
+                connection.execute(
+                    select(case_participants.c.actor_id).where(
+                        case_participants.c.case_id == str(case_id)
+                    )
+                ).scalars()
+            )
+            issues = validate_artifact_reference_graph(
+                revised, allowed_reference_ids=allowed
+            )
+            if issues:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.UNKNOWN_REFERENCE,
+                    safe_diagnostic_pointers=tuple(item.pointer for item in issues),
+                )
+            revised_hash = payload_hash(revised)
+            next_record_revision = request.record_revision + 1
+            connection.execute(
+                update(records)
+                .where(
+                    records.c.case_id == str(case_id),
+                    records.c.artifact_id == str(request.artifact_id),
+                    records.c.artifact_version == request.artifact_version,
+                    records.c.record_revision == request.record_revision,
+                    records.c.payload_hash == request.payload_hash,
+                )
+                .values(
+                    record_revision=next_record_revision,
+                    payload_hash=revised_hash,
+                    payload_json=_json(revised),
+                )
+            )
+            self._advance_revision(connection, case_id, prior_revision)
+        result = self.latest_artifact_record(case_id, "SPEC_PACKAGE")
+        assert result is not None
+        return result
 
     def prepare_artifact_quality_audit(
         self, command: q.PrepareArtifactQualityAuditCommand
@@ -724,39 +845,9 @@ class ArtifactQualityFoundationMixin:
                     json.loads(bundle.confirmed_spec.canonical_payload_json)
                 )
             )
-        ignored_binding_keys = {
-            "confirmation_id", "decision_batch_view_id", "review_item_id",
-            "authority_validation_id", "foundation_validation_id", "delegation_ref",
-            "transcript_event_id",
-        }
-        reference_keys = {
-            "primary_customer", "beneficiary_actor_ref", "actor_ref", "from_ref", "to_ref",
-            "source_id", "trigger_interface_ref", "failure_ref", "component_ref",
-        }
-        valid = True
-
-        def walk(value, key=""):
-            nonlocal valid
-            if isinstance(value, dict):
-                for child_key, child in value.items():
-                    if child_key == "id" or child_key in ignored_binding_keys:
-                        continue
-                    walk(child, child_key)
-            elif isinstance(value, list):
-                for child in value:
-                    walk(child, key)
-            elif isinstance(value, str) and (
-                key in reference_keys or key.endswith("_ref") or key.endswith("_refs")
-            ):
-                try:
-                    UUID(value)
-                except ValueError:
-                    return
-                if value not in allowed:
-                    valid = False
-
-        walk(payload)
-        return valid
+        return not validate_artifact_reference_graph(
+            payload, allowed_reference_ids=allowed
+        )
 
     @staticmethod
     def _spec_membership_complete(payload) -> bool:

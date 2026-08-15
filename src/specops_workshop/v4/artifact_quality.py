@@ -182,6 +182,26 @@ def audit_request_hash(value: q.ArtifactQualityAuditBundle | dict[str, Any]) -> 
     return domain_hash("SPECOPS:ARTIFACT_QUALITY_REQUEST:v1", material)
 
 
+def build_audit_sources(
+    sources: tuple[ProviderSourceUpload, ProviderSourceUpload],
+) -> tuple[q.AuditSourceDocument, q.AuditSourceDocument]:
+    """Project the exact two admitted sources into the evaluator contract."""
+
+    return tuple(
+        q.AuditSourceDocument(
+            source_id=item.source.source_id,
+            role=q.SourceRole(item.source.role.value),
+            version=item.source.version,
+            payload_hash=item.source.payload_hash,
+            canonical_locator=item.source.canonical_locator,
+            filename=item.source.filename,
+            media_type=item.source.media_type,
+            complete_text=item.content.decode("utf-8", errors="strict"),
+        )
+        for item in sources
+    )
+
+
 def build_audit_bundle(
     *,
     audit_id: UUID,
@@ -197,19 +217,7 @@ def build_audit_bundle(
     confirmed_spec: c.ConfirmedSpecSynthesisBinding | None,
 ) -> q.ArtifactQualityAuditBundle:
     artifact_type = q.ArtifactType(artifact_record["artifact_type"])
-    audit_sources = tuple(
-        q.AuditSourceDocument(
-            source_id=item.source.source_id,
-            role=q.SourceRole(item.source.role.value),
-            version=item.source.version,
-            payload_hash=item.source.payload_hash,
-            canonical_locator=item.source.canonical_locator,
-            filename=item.source.filename,
-            media_type=item.source.media_type,
-            complete_text=item.content.decode("utf-8", errors="strict"),
-        )
-        for item in sources
-    )
+    audit_sources = build_audit_sources(sources)
     audit_transcripts = tuple(
         q.AuditTranscript(
             event_id=item.event_id,

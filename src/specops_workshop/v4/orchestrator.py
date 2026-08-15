@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -17,10 +18,14 @@ from uuid import UUID, uuid5
 from pydantic import BaseModel, ConfigDict, Field
 from specops_contracts import artifact_quality_v1 as q
 from specops_contracts import workshop_v1 as c
-from specops_contracts.canonical import analyzer_request_hash, canonical_bytes, domain_hash, transcript_hash
+from specops_contracts.canonical import analyzer_request_hash, domain_hash, transcript_hash
 from specops_workflow.workshop_protocol import (
     FoundationProtocolError,
     WorkshopFoundationService,
+)
+from specops_workflow.artifact_evidence_support import (
+    EvidenceSupportProposal,
+    prepare_evidence_support_request,
 )
 from specops_workflow.workshop_completion import (
     CompletionUtterance,
@@ -35,7 +40,7 @@ from .openai_adapter import (
     ProviderSourceUpload,
     StoredConversationOpenAIAdapter,
 )
-from .artifact_quality import build_audit_bundle, load_quality_rules
+from .artifact_quality import build_audit_bundle, build_audit_sources, load_quality_rules
 from .artifact_quality_adapter import (
     ArtifactQualityEvaluator,
     PreparedArtifactQualityContext,
@@ -1146,6 +1151,14 @@ class V4ProductionOrchestrator:
         elif isinstance(request, c.SpecPackageSynthesisRequest):
             model = c.AdmitSpecPackageSynthesisCommand
             command_type = "ADMIT_SPEC_PACKAGE_SYNTHESIS"
+            candidate = self.foundation.project_spec_server_owned_records(
+                candidate,
+                confirmed_decision_bindings=getattr(
+                    request, "confirmed_decision_bindings", ()
+                ),
+                identity_plan=request.identity_plan,
+            )
+            common["candidate"] = candidate
             common.update(
                 target=request.target,
                 identity_plan=request.identity_plan,
@@ -1490,14 +1503,23 @@ class V4ProductionOrchestrator:
             if artifact_type == "SPEC_PACKAGE"
             else ()
         )
-        entity_kinds = self.foundation.artifact_identity_allocation_policy(
+        quality_rules = (
+            load_quality_rules(q.ArtifactType.SPEC_PACKAGE)
+            if artifact_type == "SPEC_PACKAGE"
+            else ()
+        )
+        construction_policy = self.foundation.artifact_construction_policy(
             artifact_type,
             confirmed_decision_count=len(confirmed_decisions),
+            quality_rule_ids=tuple(item.rule_id for item in quality_rules),
         )
+        entity_kinds = tuple(item[0] for item in construction_policy)
         plan = self.foundation.issue_artifact_identity_plan(
             self.case_id, artifact_type, entity_kinds
         )
-        semantic_json = canonical_bytes(snapshot).decode("utf-8")
+        construction_blueprint = self.foundation.artifact_construction_blueprint(
+            plan, construction_policy
+        )
         if domain_hash(
             "SPECOPS:SEMANTIC_STATE:v1", snapshot.model_dump(mode="json")
         ) != plan.semantic_state_hash:
@@ -1516,18 +1538,18 @@ class V4ProductionOrchestrator:
             target=plan.target,
             identity_plan=plan,
             foundation_snapshot=snapshot,
-            canonical_semantic_state_json=semantic_json,
         )
         if artifact_type == "SPEC_PACKAGE":
             request = _request(
                 c.SpecPackageSynthesisRequest,
                 dict(
                     common,
+                    construction_blueprint=construction_blueprint,
                     quality_rule_manifest=tuple(
                         c.ArtifactSynthesisQualityRule.model_validate(
                             item.model_dump()
                         )
-                        for item in load_quality_rules(q.ArtifactType.SPEC_PACKAGE)
+                        for item in quality_rules
                     ),
                     confirmed_decision_bindings=confirmed_decisions,
                     payload_schema_id="spec-package-payload",
@@ -1552,11 +1574,120 @@ class V4ProductionOrchestrator:
         admission = await self.execute_operation(request)
         if self.quality_evaluator is None:
             return admission
+        if artifact_type == "SPEC_PACKAGE":
+            await self._materialize_spec_evidence_support(
+                request=request,
+                admission=admission,
+            )
         audit = await self.audit_latest_artifact(artifact_type)
         return ProviderOperationAdmission(
             candidate=admission.candidate,
             receipt=admission.receipt,
             quality_audit=audit,
+        )
+
+    async def _materialize_spec_evidence_support(
+        self,
+        *,
+        request: c.SpecPackageSynthesisRequest,
+        admission: ProviderOperationAdmission,
+    ) -> None:
+        """Assess exact proposed pairs, then materialize Foundation-owned hashes."""
+
+        candidate = admission.candidate
+        if not isinstance(candidate, c.SpecPackageSynthesisCandidate):
+            raise TypeError("Spec admission did not retain a Spec synthesis candidate")
+        proposals = candidate.evidence_support_proposals
+        if not proposals:
+            return
+
+        planned = {
+            item.foundation_id: item.entity_kind
+            for item in request.identity_plan.planned_identities
+        }
+        if len({item.evidence_ref for item in proposals}) != len(proposals) or len(
+            {item.finding_ref for item in proposals}
+        ) != len(proposals):
+            raise ValueError("evidence-support proposal identities must be unique")
+        if any(
+            planned.get(item.evidence_ref) != "EVIDENCE"
+            or planned.get(item.finding_ref) != "SEMANTIC_EVIDENCE_FINDING"
+            for item in proposals
+        ):
+            raise ValueError("evidence-support proposals must use their allocated identities")
+
+        record = self.foundation.latest_artifact_record(self.case_id, "SPEC_PACKAGE")
+        if record is None:
+            raise ValueError("Spec evidence support requires an admitted artifact")
+        sources = build_audit_sources(self.sources)
+        source_by_role = {item.role: item.source_id for item in sources}
+        exact_proposals = tuple(
+            EvidenceSupportProposal(
+                claim_ref=item.claim_ref,
+                claim_pointer=item.claim_pointer,
+                source_id=source_by_role[q.SourceRole(item.source_role.value)],
+                locator=item.locator,
+                exact_excerpt=item.exact_excerpt,
+                evidence_ref=item.evidence_ref,
+                finding_ref=item.finding_ref,
+            )
+            for item in proposals
+        )
+        evaluator_run_id = _stable_id(
+            self.case_id,
+            "artifact-evidence-support-evaluator",
+            record["artifact_id"],
+            record["artifact_version"],
+            record["payload_hash"],
+        )
+        allocated_ids = iter(
+            tuple(
+                _stable_id(
+                    evaluator_run_id,
+                    "pair",
+                    index,
+                    item.claim_ref,
+                    item.claim_pointer,
+                )
+                for index, item in enumerate(proposals)
+            )
+            + (_stable_id(evaluator_run_id, "request"),)
+        )
+        support_request = prepare_evidence_support_request(
+            evaluator_run_id=evaluator_run_id,
+            artifact_id=UUID(record["artifact_id"]),
+            artifact_version=record["artifact_version"],
+            record_revision=record["record_revision"],
+            payload=json.loads(record["payload_json"]),
+            sources=sources,
+            proposals=exact_proposals,
+            new_id=lambda: next(allocated_ids),
+        )
+        client_request_id = f"aqa-support-{support_request.request_hash[7:39]}"
+        known = tuple(
+            item["provider_response_id"]
+            for item in self.foundation.pending_provider_responses(self.case_id)
+            if item["client_request_id"] == client_request_id
+            and item["operation"] == "ARTIFACT_EVIDENCE_SUPPORT"
+        )
+        if len(known) > 1:
+            raise RuntimeError("multiple provider Responses bind one evidence request")
+        evaluation = await self.quality_evaluator.evaluate_evidence_support(
+            support_request,
+            known_response_id=known[0] if known else None,
+            response_checkpoint=lambda response_id, request_id: (
+                self.foundation.checkpoint_provider_response(
+                    self.case_id,
+                    client_request_id=request_id,
+                    operation="ARTIFACT_EVIDENCE_SUPPORT",
+                    provider_response_id=response_id,
+                )
+            ),
+        )
+        self.foundation.materialize_artifact_evidence_support(
+            self.case_id,
+            support_request,
+            evaluation.candidate,
         )
 
     def _shallow_runway_blocks_synthesis(self) -> bool:

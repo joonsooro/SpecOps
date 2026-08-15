@@ -1494,6 +1494,8 @@ export interface components {
             planned_identities: components["schemas"]["V4_PlannedArtifactIdentity"][];
             /** Semantic State Hash */
             semantic_state_hash: string;
+            /** Source Entity Refs */
+            source_entity_refs: components["schemas"]["V4_FoundationEntityRef"][];
             target: components["schemas"]["V4_ArtifactDraftTarget"];
         };
         /** CandidateEntityRef */
@@ -2231,8 +2233,6 @@ export interface components {
             foundation_id: string;
             /** Foundation Version */
             foundation_version: number;
-            /** Source Entity Refs */
-            source_entity_refs: components["schemas"]["V4_FoundationEntityRef"][];
         };
         /** ProblemCandidate */
         V4_ProblemCandidate: {
@@ -2522,6 +2522,31 @@ export interface components {
          * @enum {string}
          */
         V4_SpeakerAttributionMethod: "VERBAL_SELF_ASSERTION" | "ENTERPRISE_SSO" | "VOICE_SYSTEM";
+        /** SpecEvidenceSupportProposalCandidate */
+        V4_SpecEvidenceSupportProposalCandidate: {
+            /** Claim Pointer */
+            claim_pointer: string;
+            /**
+             * Claim Ref
+             * Format: uuid
+             */
+            claim_ref: string;
+            /**
+             * Evidence Ref
+             * Format: uuid
+             */
+            evidence_ref: string;
+            /** Exact Excerpt */
+            exact_excerpt: string;
+            /**
+             * Finding Ref
+             * Format: uuid
+             */
+            finding_ref: string;
+            /** Locator */
+            locator: string;
+            source_role: components["schemas"]["V4_SourceRole"];
+        };
         /** SpecPackageSynthesisCandidate */
         V4_SpecPackageSynthesisCandidate: {
             /**
@@ -2538,6 +2563,11 @@ export interface components {
              * Format: uuid
              */
             context_id: string;
+            /**
+             * Evidence Support Proposals
+             * @default []
+             */
+            evidence_support_proposals: components["schemas"]["V4_SpecEvidenceSupportProposalCandidate"][];
             /**
              * Foundation Artifact Id
              * Format: uuid

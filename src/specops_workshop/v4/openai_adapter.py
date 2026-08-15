@@ -1271,7 +1271,7 @@ class StoredConversationOpenAIAdapter:
                 {
                     "type": "input_text",
                     "text": (
-                        "Normative Foundation artifact payload JSON Schema: "
+                        "Provider-owned artifact payload JSON Schema: "
                         f"{payload_schema}"
                     ),
                 }
@@ -1279,7 +1279,11 @@ class StoredConversationOpenAIAdapter:
         content.append(
             {
                 "type": "input_text",
-                "text": request.model_dump_json(exclude_none=False),
+                "text": json.dumps(
+                    self._provider_request_projection(request),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             }
         )
         return {
@@ -1305,7 +1309,9 @@ class StoredConversationOpenAIAdapter:
     def _artifact_payload_schema_text(
         operation: contracts.AnalyzerOperation,
     ) -> str | None:
-        schema = StoredConversationOpenAIAdapter._artifact_payload_schema(operation)
+        schema = StoredConversationOpenAIAdapter._provider_owned_artifact_payload_schema(
+            operation
+        )
         if schema is None:
             return None
         return json.dumps(schema, sort_keys=True, separators=(",", ":"))
@@ -1330,12 +1336,59 @@ class StoredConversationOpenAIAdapter:
         return schema
 
     @staticmethod
+    def _provider_owned_artifact_payload_schema(
+        operation: contracts.AnalyzerOperation,
+    ) -> dict[str, Any] | None:
+        schema = StoredConversationOpenAIAdapter._artifact_payload_schema(operation)
+        if schema is None or operation is not contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS:
+            return schema
+        projected = deepcopy(schema)
+        for field in (
+            "actors",
+            "decisions",
+            "evidence_catalog",
+            "semantic_evidence_findings",
+        ):
+            projected["properties"].pop(field)
+            projected["required"].remove(field)
+        return projected
+
+    @staticmethod
+    def _provider_request_projection(
+        request: contracts.AnalyzerProviderRequest,
+    ) -> dict[str, Any]:
+        """Return the single, compact semantic representation sent to the model."""
+
+        value = request.model_dump(mode="json", exclude_none=False)
+        if isinstance(request, contracts.SpecPackageSynthesisRequest):
+            bindings = value.pop("confirmed_decision_bindings")
+            value["foundation_owned_record_refs"] = {
+                "actors": sorted(
+                    {
+                        item["actor_ref"]
+                        for item in bindings
+                    }
+                ),
+                "decisions": [
+                    {
+                        "decision_id": item["decision_id"],
+                        "decision_version": item["decision_version"],
+                        "actor_ref": item["actor_ref"],
+                    }
+                    for item in bindings
+                ],
+            }
+        return value
+
+    @staticmethod
     def _bind_artifact_payload_output_schema(
         operation: contracts.AnalyzerOperation,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
-        payload_schema = StoredConversationOpenAIAdapter._artifact_payload_schema(
-            operation
+        payload_schema = (
+            StoredConversationOpenAIAdapter._provider_owned_artifact_payload_schema(
+                operation
+            )
         )
         if payload_schema is None:
             return schema
@@ -1412,8 +1465,10 @@ class StoredConversationOpenAIAdapter:
             if isinstance(payload_properties, dict)
             else None
         )
+        if decisions is None:
+            return bound
         if not isinstance(decisions, dict):
-            raise ValueError("Spec payload schema does not expose decisions")
+            raise ValueError("Spec payload decision projection is malformed")
         decisions["minItems"] = len(bindings)
 
         # A terminal synthesis request has no legitimate deferred decision slots.
@@ -1643,17 +1698,22 @@ class StoredConversationOpenAIAdapter:
             )
         if operation is contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS:
             instructions += (
-                " Treat quality_rule_manifest as the exact construction checklist for this draft, "
+                " Treat construction_blueprint and quality_rule_manifest as the exact construction "
+                "checklist for this draft. Populate only ANALYZER-owned construction slots. Do not "
+                "emit actors or decisions; Foundation deterministically projects those server-owned "
+                "records after provider completion. Do not emit evidence_catalog or "
+                "semantic_evidence_findings. Instead, propose exact claim/evidence pairs only in "
+                "evidence_support_proposals; use ANALYZER-owned claim pointers plus Foundation-owned "
+                "EVIDENCE and SEMANTIC_EVIDENCE_FINDING identities, and copy an exact source excerpt. "
+                "Foundation computes every hash before a separate SUPPORTS assessment. Use "
+                "foundation_owned_record_refs only when other "
+                "artifact items need to reference those canonical identities. Construct the draft "
                 "without claiming that any rule passed. Use enough separately identified, atomic "
                 "requirements, behavior rules, data rules, scenarios, experience states, and "
                 "acceptance checks to satisfy its stated coverage conditions; do not collapse "
-                "independently testable obligations into the schema-minimum single item. Reproduce "
-                "every confirmed_decision_bindings entry as one status=confirmed payload decision "
-                "whose decisions[].id and confirmation_binding.confirmed_decision_id both equal "
-                "that binding's decision_id, and whose exact statement and confirmation ceremony "
-                "fields are preserved. Use each binding actor_ref as the matching actors[].id and "
-                "as the decision authority actor_ref. All payload decision_refs must reference the "
-                "matching decisions[].id, never a different copied identity. Reference those "
+                "independently testable obligations into the schema-minimum single item. All payload "
+                "decision_refs must reference the matching Foundation-owned decision identity, never "
+                "a copied identity. Reference those "
                 "decisions from every requirement or rule they govern. Do not invent, defer, or "
                 "replace a Foundation-confirmed decision, and do not introduce a new deferred "
                 "decision unless the current Foundation snapshot contains a genuinely unresolved "

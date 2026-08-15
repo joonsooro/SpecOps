@@ -46,6 +46,36 @@ def _bind_matching_planned_identities(payload: dict, identity_plan) -> dict:
     return bind_planned_identities(payload, mapping)
 
 
+def _provider_owned_spec_payload(payload: dict, identity_plan) -> dict:
+    """Mirror the production schema: Foundation owns exact server records."""
+
+    # Keep the generated actor just long enough to bind every actor_ref to the
+    # Foundation-allocated ACTOR slot. No unconfirmed decision may be emitted.
+    payload["decisions"] = []
+    payload["evidence_catalog"] = []
+    payload["semantic_evidence_findings"] = []
+    payload = _bind_matching_planned_identities(payload, identity_plan)
+    bind_fixture_references(payload)
+    payload.pop("actors")
+    payload.pop("decisions")
+    payload.pop("evidence_catalog")
+    payload.pop("semantic_evidence_findings")
+
+    def clear_server_owned_refs(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"decision_refs", "source_evidence_refs", "evidence_refs"}:
+                    value[key] = []
+                else:
+                    clear_server_owned_refs(item)
+        elif isinstance(value, list):
+            for item in value:
+                clear_server_owned_refs(item)
+
+    clear_server_owned_refs(payload)
+    return payload
+
+
 class BrowserAnalyzerAdapter(DeterministicAdapter):
     async def execute(self, request, *, context):
         self.operations.append(request.request_type)
@@ -53,27 +83,7 @@ class BrowserAnalyzerAdapter(DeterministicAdapter):
             payload = PayloadFactory(full_identity_plan=True).payload(
                 "spec-package-payload.schema.json"
             )
-            payload = _bind_matching_planned_identities(payload, request.identity_plan)
-            bind_fixture_references(payload)
-            source_evidence = request.foundation_snapshot.evidence[0]
-            evidence = payload["evidence_catalog"][0]
-            evidence.update(
-                source_id=str(context.source_set.ordered_sources[0].source.source_id),
-                source_hash=source_evidence.source_hash,
-                excerpt_hash=source_evidence.excerpt_hash,
-                claim_refs=[payload["requirements"][0]["id"]],
-            )
-            finding = payload["semantic_evidence_findings"][0]
-            finding.update(
-                claim_ref=payload["requirements"][0]["id"],
-                evidence_ref=evidence["id"],
-                source_hash=source_evidence.source_hash,
-                excerpt_hash=source_evidence.excerpt_hash,
-                analyzer_run_id=str(request.analyzer_run_id),
-            )
-            for decision in payload["decisions"]:
-                decision["status"] = "deferred"
-                decision["confirmation_binding"] = None
+            payload = _provider_owned_spec_payload(payload, request.identity_plan)
             return c.SpecPackageSynthesisCandidate(
                 output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
                 analyzer_run_id=request.analyzer_run_id,

@@ -1178,7 +1178,6 @@ class PlannedArtifactIdentity(ContractModel):
         str,
         StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
     ]
-    source_entity_refs: Annotated[tuple[FoundationEntityRef, ...], Field(max_length=100)]
 
 
 class ArtifactSynthesisIdentityPlan(ContractModel):
@@ -1187,6 +1186,9 @@ class ArtifactSynthesisIdentityPlan(ContractModel):
     target: ArtifactDraftTarget
     based_on_case_revision: NonNegativeInt
     semantic_state_hash: Sha256
+    source_entity_refs: Annotated[
+        tuple[FoundationEntityRef, ...], Field(max_length=100)
+    ]
     planned_identities: Annotated[tuple[PlannedArtifactIdentity, ...], Field(min_length=1, max_length=10_000)]
 
     @model_validator(mode="after")
@@ -1194,6 +1196,31 @@ class ArtifactSynthesisIdentityPlan(ContractModel):
         identities = [item.foundation_id for item in self.planned_identities]
         if len(identities) != len(set(identities)):
             raise ValueError("planned Foundation identities must be unique")
+        return self
+
+
+class ArtifactConstructionSlot(ContractModel):
+    foundation_id: UUID
+    foundation_version: PositiveInt
+    entity_kind: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    owner: Literal["ANALYZER", "FOUNDATION"]
+    purpose: Statement
+
+
+class ArtifactConstructionBlueprint(ContractModel):
+    blueprint_version: Literal["1.0.0"]
+    slots: Annotated[
+        tuple[ArtifactConstructionSlot, ...], Field(min_length=1, max_length=10_000)
+    ]
+
+    @model_validator(mode="after")
+    def unique_slots(self) -> ArtifactConstructionBlueprint:
+        identities = [(item.foundation_id, item.foundation_version) for item in self.slots]
+        if len(identities) != len(set(identities)):
+            raise ValueError("construction slots must bind unique Foundation identities")
         return self
 
 
@@ -1261,8 +1288,8 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
     request_type: Literal[AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS]
     target: ArtifactDraftTarget
     identity_plan: ArtifactSynthesisIdentityPlan
+    construction_blueprint: ArtifactConstructionBlueprint
     foundation_snapshot: FoundationSemanticSnapshot
-    canonical_semantic_state_json: JsonObjectText
     quality_rule_manifest: Annotated[
         tuple[ArtifactSynthesisQualityRule, ...], Field(min_length=26, max_length=26)
     ]
@@ -1272,11 +1299,6 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
     payload_schema_id: Literal["spec-package-payload"]
     payload_schema_version: Literal["4.0.0"]
     requested_output: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
-
-    @field_validator("canonical_semantic_state_json")
-    @classmethod
-    def valid_semantic_state(cls, value: str) -> str:
-        return validate_json_object_text(value, "canonical semantic state")
 
     @model_validator(mode="after")
     def matching_snapshot_and_target(self) -> SpecPackageSynthesisRequest:
@@ -1315,11 +1337,25 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
             (item.foundation_id, item.foundation_version): item.entity_kind
             for item in self.identity_plan.planned_identities
         }
+        blueprint = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.construction_blueprint.slots
+        }
+        if blueprint != planned:
+            raise ValueError("construction blueprint must bind every planned identity exactly")
+        blueprint_owners = {
+            (item.foundation_id, item.foundation_version): item.owner
+            for item in self.construction_blueprint.slots
+        }
         if any(planned.get(key) != "DECISION" for key in supplied):
             raise ValueError("every confirmed decision must retain its canonical planned identity")
+        if any(blueprint_owners.get(key) != "FOUNDATION" for key in supplied):
+            raise ValueError("confirmed decisions must be Foundation-owned construction slots")
         actor_refs = {item.actor_ref for item in self.confirmed_decision_bindings}
         if any(planned.get((actor_ref, 1)) != "ACTOR" for actor_ref in actor_refs):
             raise ValueError("every confirming actor must retain its canonical planned identity")
+        if any(blueprint_owners.get((actor_ref, 1)) != "FOUNDATION" for actor_ref in actor_refs):
+            raise ValueError("confirming actors must be Foundation-owned construction slots")
         return self
 
 
@@ -1329,15 +1365,9 @@ class TechnicalContractSynthesisRequest(AnalyzerRequestEnvelope):
     identity_plan: ArtifactSynthesisIdentityPlan
     confirmed_spec: ConfirmedSpecSynthesisBinding
     foundation_snapshot: FoundationSemanticSnapshot
-    canonical_semantic_state_json: JsonObjectText
     payload_schema_id: Literal["technical-contract-payload"]
     payload_schema_version: Literal["4.0.0"]
     requested_output: Literal["TECHNICAL_CONTRACT_SYNTHESIS_CANDIDATE"]
-
-    @field_validator("canonical_semantic_state_json")
-    @classmethod
-    def valid_semantic_state(cls, value: str) -> str:
-        return validate_json_object_text(value, "canonical semantic state")
 
     @model_validator(mode="after")
     def matching_snapshot_and_target(self) -> TechnicalContractSynthesisRequest:
@@ -1378,6 +1408,28 @@ class SpecPackageSynthesisCandidate(ArtifactPayloadSynthesisCandidate):
     output_type: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
     payload_schema_id: Literal["spec-package-payload"]
     payload_schema_version: Literal["4.0.0"]
+    evidence_support_proposals: Annotated[
+        tuple["SpecEvidenceSupportProposalCandidate", ...], Field(max_length=1_000)
+    ] = ()
+
+
+class SpecEvidenceSupportProposalCandidate(ContractModel):
+    evidence_ref: UUID
+    finding_ref: UUID
+    claim_ref: UUID
+    claim_pointer: Annotated[
+        str,
+        StringConstraints(
+            strict=True,
+            pattern=r"^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
+            max_length=2_048,
+        ),
+    ]
+    source_role: SourceRole
+    locator: Statement
+    exact_excerpt: Annotated[
+        str, StringConstraints(strict=True, min_length=1, max_length=8_000)
+    ]
 
 
 class TechnicalContractSynthesisCandidate(ArtifactPayloadSynthesisCandidate):
@@ -2506,6 +2558,8 @@ __all__ = [
     "AnalyzerProviderRequest",
     "AnalyzeFinalTurnRequest",
     "ApplyDecisionBatchResponseCommand",
+    "ArtifactConstructionBlueprint",
+    "ArtifactConstructionSlot",
     "ArtifactConfirmationBinding",
     "ArtifactSynthesisQualityRule",
     "ArtifactReviewSubjectBinding",

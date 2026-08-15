@@ -7,7 +7,7 @@
           "artifact_pointers": {
             "items": {
               "maxLength": 2048,
-              "pattern": "^(?:|/(?:[^~/]|~0|~1)*)$",
+              "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
               "type": "string"
             },
             "title": "Artifact Pointers",
@@ -2692,6 +2692,14 @@
             "title": "Semantic State Hash",
             "type": "string"
           },
+          "source_entity_refs": {
+            "items": {
+              "$ref": "#/components/schemas/V4_FoundationEntityRef"
+            },
+            "maxItems": 100,
+            "title": "Source Entity Refs",
+            "type": "array"
+          },
           "target": {
             "$ref": "#/components/schemas/V4_ArtifactDraftTarget"
           }
@@ -2702,6 +2710,7 @@
           "target",
           "based_on_case_revision",
           "semantic_state_hash",
+          "source_entity_refs",
           "planned_identities"
         ],
         "title": "ArtifactSynthesisIdentityPlan",
@@ -4396,21 +4405,12 @@
             "minimum": 1,
             "title": "Foundation Version",
             "type": "integer"
-          },
-          "source_entity_refs": {
-            "items": {
-              "$ref": "#/components/schemas/V4_FoundationEntityRef"
-            },
-            "maxItems": 100,
-            "title": "Source Entity Refs",
-            "type": "array"
           }
         },
         "required": [
           "foundation_id",
           "foundation_version",
-          "entity_kind",
-          "source_entity_refs"
+          "entity_kind"
         ],
         "title": "PlannedArtifactIdentity",
         "type": "object"
@@ -5237,6 +5237,58 @@
         "title": "SpeakerAttributionMethod",
         "type": "string"
       },
+      "V4_SpecEvidenceSupportProposalCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_pointer": {
+            "maxLength": 2048,
+            "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
+            "title": "Claim Pointer",
+            "type": "string"
+          },
+          "claim_ref": {
+            "format": "uuid",
+            "title": "Claim Ref",
+            "type": "string"
+          },
+          "evidence_ref": {
+            "format": "uuid",
+            "title": "Evidence Ref",
+            "type": "string"
+          },
+          "exact_excerpt": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Exact Excerpt",
+            "type": "string"
+          },
+          "finding_ref": {
+            "format": "uuid",
+            "title": "Finding Ref",
+            "type": "string"
+          },
+          "locator": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Locator",
+            "type": "string"
+          },
+          "source_role": {
+            "$ref": "#/components/schemas/V4_SourceRole"
+          }
+        },
+        "required": [
+          "evidence_ref",
+          "finding_ref",
+          "claim_ref",
+          "claim_pointer",
+          "source_role",
+          "locator",
+          "exact_excerpt"
+        ],
+        "title": "SpecEvidenceSupportProposalCandidate",
+        "type": "object"
+      },
       "V4_SpecPackageSynthesisCandidate": {
         "additionalProperties": false,
         "properties": {
@@ -5261,6 +5313,15 @@
             "format": "uuid",
             "title": "Context Id",
             "type": "string"
+          },
+          "evidence_support_proposals": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_SpecEvidenceSupportProposalCandidate"
+            },
+            "maxItems": 1000,
+            "title": "Evidence Support Proposals",
+            "type": "array"
           },
           "foundation_artifact_id": {
             "format": "uuid",

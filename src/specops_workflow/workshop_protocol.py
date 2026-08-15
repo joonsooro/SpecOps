@@ -1281,6 +1281,23 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
         snapshot = self.semantic_snapshot(case_id)
         source_refs = self._artifact_plan_source_refs(snapshot)
+        canonical_identities: dict[str, list[tuple[UUID, int]]] = {}
+        if artifact_type == "SPEC_PACKAGE":
+            canonical_identities = {
+                "ACTOR": [(self.case_actor(case_id, "PM"), 1)],
+                "DECISION": [
+                    (item.decision_id, item.decision_version)
+                    for item in sorted(snapshot.decisions, key=lambda value: str(value.decision_id))
+                    if item.status is c.SemanticRecordStatus.CONFIRMED
+                ],
+            }
+
+        def planned_identity(kind: str) -> tuple[UUID, int]:
+            available = canonical_identities.get(kind, [])
+            if available:
+                return available.pop(0)
+            return self.new_id(), 1
+
         return c.ArtifactSynthesisIdentityPlan(
             identity_plan_id=self.new_id(),
             identity_plan_version=1,
@@ -1291,12 +1308,13 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ),
             planned_identities=tuple(
                 c.PlannedArtifactIdentity(
-                    foundation_id=self.new_id(),
-                    foundation_version=1,
+                    foundation_id=identity,
+                    foundation_version=version,
                     entity_kind=kind,
                     source_entity_refs=source_refs,
                 )
                 for kind in entity_kinds
+                for identity, version in (planned_identity(kind),)
             ),
         )
 

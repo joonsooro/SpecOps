@@ -665,6 +665,8 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "unused capacity identities are allowed" in instructions
     assert "quality_rule_manifest as the exact construction checklist" in instructions
     assert "every confirmed_decision_bindings entry" in instructions
+    assert "decisions[].id and confirmation_binding.confirmed_decision_id" in instructions
+    assert "binding actor_ref as the matching actors[].id" in instructions
     assert len(json.loads(content[1]["text"])["quality_rule_manifest"]) == 26
     assert "create no other payload-owned identity" in instructions
 

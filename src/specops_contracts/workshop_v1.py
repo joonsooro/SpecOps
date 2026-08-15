@@ -1311,6 +1311,15 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
             for key in supplied
         ):
             raise ValueError("confirmed decision synthesis binding changed semantic content")
+        planned = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.identity_plan.planned_identities
+        }
+        if any(planned.get(key) != "DECISION" for key in supplied):
+            raise ValueError("every confirmed decision must retain its canonical planned identity")
+        actor_refs = {item.actor_ref for item in self.confirmed_decision_bindings}
+        if any(planned.get((actor_ref, 1)) != "ACTOR" for actor_ref in actor_refs):
+            raise ValueError("every confirming actor must retain its canonical planned identity")
         return self
 
 

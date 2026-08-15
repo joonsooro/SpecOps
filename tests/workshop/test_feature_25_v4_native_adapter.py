@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections import Counter
 from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -132,6 +133,16 @@ def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
                 entity_kind="PACKAGE_ITEM",
             ),
         ),
+        slots=(
+            c.ArtifactIdentitySlot(
+                slot_key="PACKAGE_ITEM:0001",
+                entity_kind="PACKAGE_ITEM",
+                ordinal=1,
+                owner="ANALYZER",
+                foundation_id=UUID("00000000-0000-4000-8000-000000000022"),
+                allocation_mode="NEW_ENTITY",
+            ),
+        ),
     )
     snapshot = _snapshot(prepared.source_set.source_set_hash)
     data = {
@@ -150,10 +161,13 @@ def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
             blueprint_version="1.0.0",
             slots=(
                 c.ArtifactConstructionSlot(
+                    slot_key="PACKAGE_ITEM:0001",
                     foundation_id=plan.planned_identities[0].foundation_id,
                     foundation_version=1,
                     entity_kind="PACKAGE_ITEM",
+                    ordinal=1,
                     owner="ANALYZER",
+                    allocation_mode="NEW_ENTITY",
                     purpose="Construct the package membership record.",
                 ),
             ),
@@ -622,7 +636,6 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     prefix = "Provider-owned artifact payload JSON Schema: "
     assert content[0]["text"].startswith(prefix)
     payload_schema = json.loads(content[0]["text"].removeprefix(prefix))
-    assert payload_schema["$id"].endswith("/spec-package-payload.schema.json")
     assert payload_schema["type"] == "object"
     assert payload_schema["additionalProperties"] is False
     assert "product_thesis" in payload_schema["required"]
@@ -630,6 +643,17 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "decisions" not in payload_schema["properties"]
     assert "evidence_catalog" not in payload_schema["properties"]
     assert "semantic_evidence_findings" not in payload_schema["properties"]
+    package_items = payload_schema["properties"]["package_items"]
+    package_handle = request.identity_plan.slots[0].slot_key
+    assert package_items["type"] == "object"
+    assert package_items["required"] == [package_handle]
+    assert list(package_items["properties"]) == [package_handle]
+    package_body_ref = package_items["properties"][package_handle]["anyOf"][0]["$ref"]
+    package_body = payload_schema["$defs"][
+        package_body_ref.removeprefix("#/$defs/")
+    ]
+    assert "id" not in package_body["properties"]
+    assert "id" not in package_body["required"]
     for definition in payload_schema["$defs"].values():
         assert "evidence_refs" not in definition.get("properties", {})
         assert "source_evidence_refs" not in definition.get("properties", {})
@@ -639,14 +663,13 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     provider_request = json.loads(content[1]["text"])
     assert "canonical_semantic_state_json" not in provider_request
     assert "confirmed_decision_bindings" not in provider_request
-    assert provider_request["identity_plan"].keys() >= {
-        "planned_identities",
-        "source_entity_refs",
+    assert "planned_identities" not in provider_request["identity_plan"]
+    assert provider_request["identity_plan"]["slots"][0]["slot_key"] == package_handle
+    assert "foundation_id" not in provider_request["identity_plan"]["slots"][0]
+    assert set(provider_request["construction_blueprint"]["slots"][0]) == {
+        "slot_key",
+        "purpose",
     }
-    assert all(
-        "source_entity_refs" not in item
-        for item in provider_request["identity_plan"]["planned_identities"]
-    )
 
     output_schema = arguments["text"]["format"]["schema"]
     assert output_schema["properties"]["foundation_artifact_id"]["const"] == str(
@@ -665,11 +688,12 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     payload_root = output_schema["$defs"][payload_reference.removeprefix("#/$defs/")]
     assert payload_root["type"] == "object"
     assert "product_thesis" in payload_root["properties"]
+    assert "identity_assignment_map" not in output_schema["properties"]
     encoded_output_schema = json.dumps(output_schema)
     assert "allOf" not in encoded_output_schema
-    assert "uniqueItems" in json.dumps(payload_schema)
+    assert "uniqueItems" not in json.dumps(payload_schema)
     assert "uniqueItems" not in encoded_output_schema
-    assert '"type": ["string", "null"]' in json.dumps(payload_schema)
+    assert '"type": ["string", "null"]' not in json.dumps(payload_schema)
     assert '"type": ["string", "null"]' not in encoded_output_schema
     assert output_schema["$defs"][
         "SpecPackageSynthesisPayload_acceptanceCheck"
@@ -694,14 +718,16 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "candidate_payload_json as exactly one nested JSON object" in instructions
     assert "never use Markdown, prose" in instructions
     assert "JSON-encoded string" in instructions
-    assert "use each selected identity at most once" in instructions
-    assert "unused capacity identities are allowed" in instructions
+    assert "fixed object whose property names are typed local slot_key handles" in instructions
+    assert "one semantic item or null" in instructions
+    assert "never emit an id field" in instructions
+    assert "rather than a numeric array index" in instructions
     assert "quality_rule_manifest as the exact construction checklist" in instructions
     assert "Do not emit actors or decisions" in instructions
     assert "Foundation deterministically projects" in instructions
     assert "Do not emit evidence_refs or source_evidence_refs" in instructions
     assert len(json.loads(content[1]["text"])["quality_rule_manifest"]) == 26
-    assert "create no other payload-owned identity" in instructions
+    assert "Foundation alone assigns canonical UUIDs" in instructions
 
     wire_candidate = {
         "analyzer_run_id": str(request.analyzer_run_id),
@@ -765,6 +791,24 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
         )
         for kind, _, _ in policy
     )
+    ordinals = Counter()
+    slots = []
+    for identity, (kind, owner, _purpose) in zip(identities, policy, strict=True):
+        ordinals[kind] += 1
+        slots.append(
+            c.ArtifactIdentitySlot(
+                slot_key=f"{kind}:{ordinals[kind]:04d}",
+                entity_kind=kind,
+                ordinal=ordinals[kind],
+                owner=owner,
+                foundation_id=identity.foundation_id,
+                allocation_mode=(
+                    "BOUND_EXISTING"
+                    if owner == "FOUNDATION" and kind in {"ACTOR", "DECISION"}
+                    else "NEW_ENTITY"
+                ),
+            )
+        )
     plan = c.ArtifactSynthesisIdentityPlan(
         identity_plan_id=uuid4(),
         identity_plan_version=1,
@@ -773,6 +817,7 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
         semantic_state_hash=request.identity_plan.semantic_state_hash,
         source_entity_refs=(),
         planned_identities=identities,
+        slots=tuple(slots),
     )
     request = request.model_copy(
         update={
@@ -794,14 +839,32 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
     payload = schema["$defs"][payload_ref.removeprefix("#/$defs/")]
     properties = payload["properties"]
 
-    assert properties["requirements"]["minItems"] == 22
-    assert "maxItems" not in properties["requirements"]
-    assert properties["acceptance_checks"]["minItems"] == 22
-    assert "maxItems" not in properties["acceptance_checks"]
-    assert properties["scenarios"]["minItems"] == 12
-    assert properties["experience_states"]["minItems"] == 9
-    assert properties["data_rules"]["minItems"] == 6
-    assert properties["glossary"]["minItems"] == 6
+    expected_capacity = Counter(item.entity_kind for item in identities)
+    for field, kind in (
+        ("requirements", "REQUIREMENT"),
+        ("acceptance_checks", "ACCEPTANCE_CHECK"),
+        ("scenarios", "SCENARIO"),
+        ("experience_states", "EXPERIENCE_STATE"),
+        ("data_rules", "DATA_RULE"),
+        ("glossary", "GLOSSARY_TERM"),
+    ):
+        assert properties[field]["type"] == "object"
+        assert len(properties[field]["properties"]) == expected_capacity[kind]
+        assert properties[field]["required"] == list(
+            properties[field]["properties"]
+        )
+        assert "items" not in properties[field]
+    scope_ref = properties["scope"]["$ref"].removeprefix("#/$defs/")
+    scope = schema["$defs"][scope_ref]["properties"]
+    assert len(scope["in_scope"]["properties"]) == 10
+    assert len(scope["non_goals"]["properties"]) == 10
+    behavior_ref = properties["behaviour_contract"]["$ref"].removeprefix(
+        "#/$defs/"
+    )
+    behavior = schema["$defs"][behavior_ref]["properties"]
+    assert len(behavior["always"]["properties"]) == 12
+    assert len(behavior["ask_first"]["properties"]) == 12
+    assert len(behavior["never"]["properties"]) == 12
     assert schema["properties"]["evidence_support_proposals"]["minItems"] == 8
     assert schema["properties"]["evidence_support_proposals"]["maxItems"] == 1_000
     max_items = []
@@ -818,6 +881,70 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
 
     collect_max_items(schema)
     assert max_items == [1_000]
+
+
+def test_provider_parser_preserves_local_handles_for_foundation_materialization():
+    adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
+    sources = (
+        _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"PM source"),
+        _source(c.SourceRole.TECHNICAL_CONTRACT, 11, "technical.md", b"Technical"),
+    )
+    prepared = adapter.prepared_from_ids(
+        sources, ("file_pm", "file_technical"), "conv_keyed_projection"
+    )
+    request = _spec_synthesis_request(prepared)
+    package_handle = "PACKAGE_ITEM:0001"
+    glossary_handle = "GLOSSARY_TERM:0001"
+    envelope = {
+        "analyzer_run_id": str(request.analyzer_run_id),
+        "context_id": str(request.context_id),
+        "request_hash": request.request_hash,
+        "source_set_hash": request.source_set_hash,
+        "based_on_case_revision": request.based_on_case_revision,
+        "foundation_artifact_id": str(request.target.foundation_artifact_id),
+        "identity_plan_id": str(request.identity_plan.identity_plan_id),
+        "identity_plan_version": request.identity_plan.identity_plan_version,
+        "semantic_state_hash": request.identity_plan.semantic_state_hash,
+        "candidate_payload_json": {
+            "package_items": {
+                package_handle: {"type": "SPEC_PACKAGE", "ref": "SPEC-TEST"}
+            },
+            "glossary": {
+                glossary_handle: {
+                    "term": "matching access scope",
+                    "definition": "The tenant and permission scope used by one request.",
+                }
+            },
+        },
+        "output_type": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        "payload_schema_id": "spec-package-payload",
+        "payload_schema_version": "4.0.2",
+        "evidence_support_proposals": [
+            {
+                "evidence_ref": "EVIDENCE:0001",
+                "finding_ref": "SEMANTIC_EVIDENCE_FINDING:0001",
+                "claim_ref": glossary_handle,
+                "claim_pointer": f"/glossary/{glossary_handle}/definition",
+                "source_role": "PM_SPEC",
+                "locator": "line:1",
+                "exact_excerpt": "The tenant and permission scope used by one request.",
+            }
+        ],
+    }
+
+    candidate = adapter._candidate_from_provider_output(
+        c.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS,
+        c.SpecPackageSynthesisCandidate,
+        json.dumps(envelope),
+    )
+    payload = json.loads(candidate.candidate_payload_json)
+
+    assert payload["package_items"][package_handle]["type"] == "SPEC_PACKAGE"
+    assert "id" not in payload["glossary"][glossary_handle]
+    assert candidate.evidence_support_proposals[0].claim_ref == glossary_handle
+    assert candidate.evidence_support_proposals[0].claim_pointer == (
+        f"/glossary/{glossary_handle}/definition"
+    )
 
 
 def test_terminal_spec_schema_excludes_foundation_owned_decision_records():

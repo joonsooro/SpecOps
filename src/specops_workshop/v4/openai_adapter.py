@@ -54,6 +54,64 @@ ARTIFACT_PAYLOAD_SCHEMAS = {
     ),
 }
 
+_SPEC_FOUNDATION_ASSIGNED_COLLECTIONS = (
+    (("package_items",), "PACKAGE_ITEM"),
+    (("glossary",), "GLOSSARY_TERM"),
+    (("outcomes",), "OUTCOME"),
+    (("scope", "in_scope"), "SCOPE_ITEM"),
+    (("scope", "non_goals"), "SCOPE_ITEM"),
+    (("scope", "boundaries"), "SCOPE_BOUNDARY"),
+    (("journeys",), "JOURNEY"),
+    (("behaviour_contract", "always"), "BEHAVIOUR_RULE"),
+    (("behaviour_contract", "ask_first"), "BEHAVIOUR_RULE"),
+    (("behaviour_contract", "never"), "BEHAVIOUR_RULE"),
+    (("requirements",), "REQUIREMENT"),
+    (("data_rules",), "DATA_RULE"),
+    (("experience_states",), "EXPERIENCE_STATE"),
+    (("scenarios",), "SCENARIO"),
+    (("quality_attributes",), "QUALITY_ATTRIBUTE"),
+    (("constraints",), "CONSTRAINT"),
+    (("dependencies",), "DEPENDENCY"),
+    (("risks",), "RISK"),
+    (("open_items",), "OPEN_ITEM"),
+    (("acceptance_checks",), "ACCEPTANCE_CHECK"),
+)
+_SPEC_EVIDENCE_OWNER_PATHS = frozenset(
+    {
+        ("glossary",),
+        ("outcomes",),
+        ("scope", "in_scope"),
+        ("scope", "non_goals"),
+        ("scope", "boundaries"),
+        ("behaviour_contract", "always"),
+        ("behaviour_contract", "ask_first"),
+        ("behaviour_contract", "never"),
+        ("requirements",),
+        ("data_rules",),
+        ("quality_attributes",),
+        ("constraints",),
+        ("dependencies",),
+        ("risks",),
+    }
+)
+
+
+def _spec_collection_identity_assignments(
+    request: contracts.SpecPackageSynthesisRequest,
+) -> dict[tuple[str, ...], tuple[str, ...]]:
+    """Partition local Analyzer handles across canonical collection paths."""
+
+    identities_by_kind: dict[str, list[str]] = {}
+    for slot in request.construction_blueprint.slots:
+        if slot.owner == "ANALYZER" and slot.allocation_mode == "NEW_ENTITY":
+            identities_by_kind.setdefault(slot.entity_kind, []).append(
+                slot.slot_key
+            )
+    assignments: dict[tuple[str, ...], tuple[str, ...]] = {}
+    for path, kind in _SPEC_FOUNDATION_ASSIGNED_COLLECTIONS:
+        assignments[path] = tuple(identities_by_kind.get(kind, []))
+    return assignments
+
 
 @dataclass(frozen=True)
 class ProviderSourceUpload:
@@ -1265,7 +1323,9 @@ class StoredConversationOpenAIAdapter:
                 {"type": "input_file", "file_id": item.provider_file_id}
                 for item in request.source_set.ordered_sources
             )
-        payload_schema = self._artifact_payload_schema_text(operation)
+        payload_schema = self._artifact_payload_schema_text(
+            operation, bound_candidate_schema=schema
+        )
         if payload_schema is not None:
             content.append(
                 {
@@ -1308,7 +1368,53 @@ class StoredConversationOpenAIAdapter:
     @staticmethod
     def _artifact_payload_schema_text(
         operation: contracts.AnalyzerOperation,
+        *,
+        bound_candidate_schema: dict[str, Any] | None = None,
     ) -> str | None:
+        if (
+            operation is contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS
+            and bound_candidate_schema is not None
+        ):
+            properties = bound_candidate_schema.get("properties")
+            definitions = bound_candidate_schema.get("$defs")
+            payload_ref = (
+                properties.get("candidate_payload_json", {}).get("$ref")
+                if isinstance(properties, dict)
+                else None
+            )
+            if not isinstance(definitions, dict) or not isinstance(payload_ref, str):
+                raise ValueError("bound Spec candidate schema lacks its payload root")
+            root_name = payload_ref.removeprefix("#/$defs/")
+            root = definitions.get(root_name)
+            if not isinstance(root, dict):
+                raise ValueError("bound Spec payload root is unresolved")
+            required_definitions: set[str] = set()
+
+            def collect(value: Any) -> None:
+                if isinstance(value, list):
+                    for item in value:
+                        collect(item)
+                    return
+                if not isinstance(value, dict):
+                    return
+                reference = value.get("$ref")
+                if isinstance(reference, str) and reference.startswith("#/$defs/"):
+                    name = reference.removeprefix("#/$defs/")
+                    if name not in required_definitions:
+                        definition = definitions.get(name)
+                        if not isinstance(definition, dict):
+                            raise ValueError("bound Spec payload reference is unresolved")
+                        required_definitions.add(name)
+                        collect(definition)
+                for item in value.values():
+                    collect(item)
+
+            collect(root)
+            document = deepcopy(root)
+            document["$defs"] = {
+                name: deepcopy(definitions[name]) for name in sorted(required_definitions)
+            }
+            return json.dumps(document, sort_keys=True, separators=(",", ":"))
         schema = StoredConversationOpenAIAdapter._provider_owned_artifact_payload_schema(
             operation
         )
@@ -1369,6 +1475,15 @@ class StoredConversationOpenAIAdapter:
         value = request.model_dump(mode="json", exclude_none=False)
         if isinstance(request, contracts.SpecPackageSynthesisRequest):
             bindings = value.pop("confirmed_decision_bindings")
+            identity_plan = value["identity_plan"]
+            identity_plan.pop("planned_identities", None)
+            for slot in identity_plan.get("slots", []):
+                if slot.get("allocation_mode") == "NEW_ENTITY":
+                    slot.pop("foundation_id", None)
+            value["construction_blueprint"]["slots"] = [
+                {"slot_key": slot["slot_key"], "purpose": slot["purpose"]}
+                for slot in value["construction_blueprint"].get("slots", [])
+            ]
             value["foundation_owned_record_refs"] = {
                 "actors": sorted(
                     {
@@ -1436,6 +1551,11 @@ class StoredConversationOpenAIAdapter:
         properties = bound.get("properties")
         if not isinstance(properties, dict) or "candidate_payload_json" not in properties:
             raise ValueError("candidate schema lacks artifact payload field")
+        if operation is contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS:
+            properties.pop("identity_assignment_map", None)
+            required = bound.get("required")
+            if isinstance(required, list) and "identity_assignment_map" in required:
+                required.remove("identity_assignment_map")
         properties["candidate_payload_json"] = {"$ref": f"#/$defs/{root_name}"}
         validate_openai_strict_schema(bound)
         return bound
@@ -1548,6 +1668,151 @@ class StoredConversationOpenAIAdapter:
             maximum = analyzer_capacity["BEHAVIOUR_RULE"]
             if maximum:
                 value["minItems"] = 1
+
+        assignments = _spec_collection_identity_assignments(request)
+
+        def collection_schema(path: tuple[str, ...]) -> dict[str, Any]:
+            current = payload_root
+            for index, field in enumerate(path):
+                current_properties = (
+                    current.get("properties") if isinstance(current, dict) else None
+                )
+                if not isinstance(current_properties, dict):
+                    raise ValueError("Spec payload collection path is malformed")
+                value = current_properties.get(field)
+                if not isinstance(value, dict):
+                    raise ValueError("Spec payload collection path is missing")
+                if index == len(path) - 1:
+                    return value
+                reference = value.get("$ref")
+                current = (
+                    definitions.get(reference.removeprefix("#/$defs/"))
+                    if isinstance(reference, str)
+                    else None
+                )
+            raise AssertionError("empty Spec collection path")
+
+        for path, _kind in _SPEC_FOUNDATION_ASSIGNED_COLLECTIONS:
+            identities = assignments[path]
+            if not identities:
+                continue
+            collection = collection_schema(path)
+            item_schema = collection.get("items")
+            if not isinstance(item_schema, dict):
+                raise ValueError("Spec payload collection lacks an item schema")
+            reference = item_schema.get("$ref")
+            if isinstance(reference, str):
+                source_name = reference.removeprefix("#/$defs/")
+                source_definition = definitions.get(source_name)
+                if not isinstance(source_definition, dict):
+                    raise ValueError("Spec payload item reference is unresolved")
+                body = deepcopy(source_definition)
+            else:
+                body = deepcopy(item_schema)
+            body_properties = body.get("properties")
+            body_required = body.get("required")
+            if not isinstance(body_properties, dict) or not isinstance(body_required, list):
+                raise ValueError("Spec payload identity-bearing item is malformed")
+            if "id" not in body_properties or "id" not in body_required:
+                raise ValueError("Spec payload identity-bearing item lacks an id")
+            body_properties.pop("id")
+            body_required.remove("id")
+            body_name = "SpecPackageFoundationAssigned_" + "_".join(path)
+            if body_name in definitions:
+                raise ValueError("Foundation-assigned Spec body definition collides")
+            definitions[body_name] = body
+            collection.clear()
+            collection.update(
+                {
+                    "type": "object",
+                    "properties": {
+                        identity: {
+                            "anyOf": [
+                                {"$ref": f"#/$defs/{body_name}"},
+                                {"type": "null"},
+                            ]
+                        }
+                        for identity in identities
+                    },
+                    "required": list(identities),
+                    "additionalProperties": False,
+                }
+            )
+
+        local_or_uuid_pattern = (
+            r"^(?:[A-Z][A-Z0-9_]{1,63}:[0-9]{4}|"
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+            r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+        )
+        reference_keys = {
+            "primary_customer",
+            "beneficiary_actor_ref",
+            "actor_ref",
+            "from_ref",
+            "to_ref",
+            "source_id",
+            "trigger_interface_ref",
+            "failure_ref",
+            "component_ref",
+        }
+
+        def localize_reference_schema(value: Any, key: str = "") -> None:
+            if not isinstance(value, dict):
+                return
+            if key in reference_keys or key.endswith("_ref") or key.endswith("_refs"):
+                target = value.get("items") if value.get("type") == "array" else value
+                if isinstance(target, dict):
+                    target.pop("format", None)
+                    target.pop("enum", None)
+                    target.pop("const", None)
+                    target["type"] = "string"
+                    target["pattern"] = local_or_uuid_pattern
+                return
+            properties_value = value.get("properties")
+            if isinstance(properties_value, dict):
+                for child_key, child in properties_value.items():
+                    localize_reference_schema(child, child_key)
+            items_value = value.get("items")
+            if isinstance(items_value, dict):
+                localize_reference_schema(items_value, key)
+
+        localize_reference_schema(payload_root)
+        for definition in definitions.values():
+            localize_reference_schema(definition)
+
+        proposal_items = proposal_schema.get("items")
+        proposal_ref = (
+            proposal_items.get("$ref") if isinstance(proposal_items, dict) else None
+        )
+        proposal_definition = (
+            definitions.get(proposal_ref.removeprefix("#/$defs/"))
+            if isinstance(proposal_ref, str)
+            else None
+        )
+        proposal_properties = (
+            proposal_definition.get("properties")
+            if isinstance(proposal_definition, dict)
+            else None
+        )
+        if not isinstance(proposal_properties, dict):
+            raise ValueError("Spec evidence proposal schema is malformed")
+        planned_by_kind: dict[str, list[str]] = {}
+        for slot in request.construction_blueprint.slots:
+            planned_by_kind.setdefault(slot.entity_kind, []).append(
+                slot.slot_key
+            )
+        evidence_claim_ids = [
+            identity
+            for path in _SPEC_EVIDENCE_OWNER_PATHS
+            for identity in assignments[path]
+        ]
+        proposal_properties["claim_ref"]["enum"] = evidence_claim_ids
+        proposal_properties["evidence_ref"]["enum"] = planned_by_kind.get(
+            "EVIDENCE", []
+        )
+        proposal_properties["finding_ref"]["enum"] = planned_by_kind.get(
+            "SEMANTIC_EVIDENCE_FINDING", []
+        )
 
         decisions = (
             payload_properties.get("decisions")
@@ -1779,13 +2044,27 @@ class StoredConversationOpenAIAdapter:
         if operation in ARTIFACT_PAYLOAD_SCHEMAS:
             instructions += (
                 " Populate candidate_payload_json as exactly one nested JSON object that "
-                "validates against the normative Foundation payload schema supplied in this "
-                "request; never use Markdown, prose, or a JSON-encoded string in that field. "
-                "Use only identity_plan.planned_identities foundation_id values at payload paths "
-                "for their matching entity_kind, use each selected identity at most once, and "
-                "create no other payload-owned identity; unused capacity identities are allowed. "
-                "Foundation will independently enforce the payload schema and identity plan."
+                "validates against the provider-owned payload schema supplied in this request; "
+                "never use Markdown, prose, or a JSON-encoded string in that field. "
             )
+            if operation is contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS:
+                instructions += (
+                    "Every identity-bearing provider collection is a fixed object whose property "
+                    "names are typed local slot_key handles. A property value is either one semantic "
+                    "item or null when that capacity is unused; never emit an id field inside a value. "
+                    "Use only those local handles for references to new items. In "
+                    "evidence_support_proposals.claim_pointer, use the local handle property segment "
+                    "rather than a numeric array index. Foundation alone assigns canonical UUIDs, "
+                    "rehydrates arrays in slot ordinal order, rewrites local references, and validates "
+                    "the final graph. Never copy or infer a foundation_id for a NEW_ENTITY slot."
+                )
+            else:
+                instructions += (
+                    "Use only identity_plan.planned_identities foundation_id values at payload paths "
+                    "for their matching entity_kind, use each selected identity at most once, and "
+                    "create no other payload-owned identity; unused capacity identities are allowed. "
+                    "Foundation will independently enforce the payload schema and identity plan."
+                )
         if operation is contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS:
             instructions += (
                 " Treat construction_blueprint and quality_rule_manifest as the exact construction "

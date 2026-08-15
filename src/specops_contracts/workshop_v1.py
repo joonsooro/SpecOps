@@ -1180,6 +1180,28 @@ class PlannedArtifactIdentity(ContractModel):
     ]
 
 
+ArtifactIdentitySlotKey = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        pattern=r"^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+        max_length=69,
+    ),
+]
+
+
+class ArtifactIdentitySlot(ContractModel):
+    slot_key: ArtifactIdentitySlotKey
+    entity_kind: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    ordinal: PositiveInt
+    owner: Literal["ANALYZER", "FOUNDATION"]
+    foundation_id: UUID
+    allocation_mode: Literal["NEW_ENTITY", "BOUND_EXISTING"]
+
+
 class ArtifactSynthesisIdentityPlan(ContractModel):
     identity_plan_id: UUID
     identity_plan_version: PositiveInt
@@ -1190,23 +1212,49 @@ class ArtifactSynthesisIdentityPlan(ContractModel):
         tuple[FoundationEntityRef, ...], Field(max_length=100)
     ]
     planned_identities: Annotated[tuple[PlannedArtifactIdentity, ...], Field(min_length=1, max_length=10_000)]
+    slots: Annotated[tuple[ArtifactIdentitySlot, ...], Field(max_length=10_000)] = ()
 
     @model_validator(mode="after")
     def unique_identities(self) -> ArtifactSynthesisIdentityPlan:
         identities = [item.foundation_id for item in self.planned_identities]
         if len(identities) != len(set(identities)):
             raise ValueError("planned Foundation identities must be unique")
+        if not self.slots:
+            return self
+        slot_keys = [item.slot_key for item in self.slots]
+        ordinals = [(item.entity_kind, item.ordinal) for item in self.slots]
+        slot_identities = [item.foundation_id for item in self.slots]
+        if len(slot_keys) != len(set(slot_keys)):
+            raise ValueError("identity-plan slot keys must be unique")
+        if len(ordinals) != len(set(ordinals)):
+            raise ValueError("identity-plan kind ordinals must be unique")
+        if len(slot_identities) != len(set(slot_identities)):
+            raise ValueError("identity-plan slots must bind unique Foundation identities")
+        planned = {
+            (item.foundation_id, item.entity_kind) for item in self.planned_identities
+        }
+        slotted = {(item.foundation_id, item.entity_kind) for item in self.slots}
+        if planned != slotted:
+            raise ValueError("identity-plan slots must exactly cover planned identities")
+        if any(
+            item.allocation_mode == "BOUND_EXISTING" and item.owner != "FOUNDATION"
+            for item in self.slots
+        ):
+            raise ValueError("bound-existing slots must be Foundation-owned")
         return self
 
 
 class ArtifactConstructionSlot(ContractModel):
+    slot_key: ArtifactIdentitySlotKey
     foundation_id: UUID
     foundation_version: PositiveInt
     entity_kind: Annotated[
         str,
         StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
     ]
+    ordinal: PositiveInt
     owner: Literal["ANALYZER", "FOUNDATION"]
+    allocation_mode: Literal["NEW_ENTITY", "BOUND_EXISTING"]
     purpose: Statement
 
 
@@ -1221,6 +1269,9 @@ class ArtifactConstructionBlueprint(ContractModel):
         identities = [(item.foundation_id, item.foundation_version) for item in self.slots]
         if len(identities) != len(set(identities)):
             raise ValueError("construction slots must bind unique Foundation identities")
+        slot_keys = [item.slot_key for item in self.slots]
+        if len(slot_keys) != len(set(slot_keys)):
+            raise ValueError("construction slot keys must be unique")
         return self
 
 
@@ -1404,6 +1455,24 @@ class ArtifactPayloadSynthesisCandidate(ContractModel):
         return validate_json_object_text(value, "candidate payload")
 
 
+class ArtifactIdentityAssignment(ContractModel):
+    slot_key: ArtifactIdentitySlotKey
+    entity_kind: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    ordinal: PositiveInt
+    foundation_id: UUID
+    canonical_pointer: Annotated[
+        str,
+        StringConstraints(
+            strict=True,
+            pattern=r"^(?:/(?:[^~/]|~0|~1)*)+$",
+            max_length=2_048,
+        ),
+    ]
+
+
 class SpecPackageSynthesisCandidate(ArtifactPayloadSynthesisCandidate):
     output_type: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
     payload_schema_id: Literal["spec-package-payload"]
@@ -1411,12 +1480,15 @@ class SpecPackageSynthesisCandidate(ArtifactPayloadSynthesisCandidate):
     evidence_support_proposals: Annotated[
         tuple["SpecEvidenceSupportProposalCandidate", ...], Field(max_length=1_000)
     ] = ()
+    identity_assignment_map: Annotated[
+        tuple[ArtifactIdentityAssignment, ...], Field(max_length=10_000)
+    ] = ()
 
 
 class SpecEvidenceSupportProposalCandidate(ContractModel):
-    evidence_ref: UUID
-    finding_ref: UUID
-    claim_ref: UUID
+    evidence_ref: UUID | ArtifactIdentitySlotKey
+    finding_ref: UUID | ArtifactIdentitySlotKey
+    claim_ref: UUID | ArtifactIdentitySlotKey
     claim_pointer: Annotated[
         str,
         StringConstraints(
@@ -2561,6 +2633,8 @@ __all__ = [
     "ArtifactConstructionBlueprint",
     "ArtifactConstructionSlot",
     "ArtifactConfirmationBinding",
+    "ArtifactIdentityAssignment",
+    "ArtifactIdentitySlot",
     "ArtifactSynthesisQualityRule",
     "ArtifactReviewSubjectBinding",
     "BootstrapAnalyzerRequest",

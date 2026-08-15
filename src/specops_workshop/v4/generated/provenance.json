@@ -8,7 +8,7 @@
     "spec_package": "4.0.0",
     "technical_contract": "4.0.0"
   },
-  "contract_sha256": "11210a94503bcba4f44e304f6c9a4fe84cc85474ba528ecbac4045d8fdb64a5a",
+  "contract_sha256": "1cef3e11241fa5eaf191d8637b97d6326bcea3ca30752fa5621d1685603bc551",
   "contract_source": "workshop_interaction_protocol_v1.py",
   "openai_artifact_quality_schema": "artifact_quality_audit",
   "openai_operations": [

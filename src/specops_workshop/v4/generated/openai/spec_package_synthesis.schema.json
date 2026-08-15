@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "ArtifactIdentityAssignment": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_pointer": {
+          "maxLength": 2048,
+          "pattern": "^(?:/(?:[^~/]|~0|~1)*)+$",
+          "type": "string"
+        },
+        "entity_kind": {
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+          "type": "string"
+        },
+        "foundation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ordinal": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "slot_key": {
+          "maxLength": 69,
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot_key",
+        "entity_kind",
+        "ordinal",
+        "foundation_id",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
     "SourceRole": {
       "enum": [
         "PM_SPEC",
@@ -16,12 +52,30 @@
           "type": "string"
         },
         "claim_ref": {
-          "format": "uuid",
-          "type": "string"
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "maxLength": 69,
+              "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+              "type": "string"
+            }
+          ]
         },
         "evidence_ref": {
-          "format": "uuid",
-          "type": "string"
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "maxLength": 69,
+              "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+              "type": "string"
+            }
+          ]
         },
         "exact_excerpt": {
           "maxLength": 8000,
@@ -29,8 +83,17 @@
           "type": "string"
         },
         "finding_ref": {
-          "format": "uuid",
-          "type": "string"
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "maxLength": 69,
+              "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+              "type": "string"
+            }
+          ]
         },
         "locator": {
           "maxLength": 20000,
@@ -84,6 +147,13 @@
       "format": "uuid",
       "type": "string"
     },
+    "identity_assignment_map": {
+      "items": {
+        "$ref": "#/$defs/ArtifactIdentityAssignment"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    },
     "identity_plan_id": {
       "format": "uuid",
       "type": "string"
@@ -132,7 +202,8 @@
     "output_type",
     "payload_schema_id",
     "payload_schema_version",
-    "evidence_support_proposals"
+    "evidence_support_proposals",
+    "identity_assignment_map"
   ],
   "type": "object"
 }

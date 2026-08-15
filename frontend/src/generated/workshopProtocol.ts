@@ -1458,6 +1458,46 @@ export interface components {
             /** Next Artifact Version */
             next_artifact_version: number;
         };
+        /** ArtifactIdentityAssignment */
+        V4_ArtifactIdentityAssignment: {
+            /** Canonical Pointer */
+            canonical_pointer: string;
+            /** Entity Kind */
+            entity_kind: string;
+            /**
+             * Foundation Id
+             * Format: uuid
+             */
+            foundation_id: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Slot Key */
+            slot_key: string;
+        };
+        /** ArtifactIdentitySlot */
+        V4_ArtifactIdentitySlot: {
+            /**
+             * Allocation Mode
+             * @enum {string}
+             */
+            allocation_mode: "NEW_ENTITY" | "BOUND_EXISTING";
+            /** Entity Kind */
+            entity_kind: string;
+            /**
+             * Foundation Id
+             * Format: uuid
+             */
+            foundation_id: string;
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Owner
+             * @enum {string}
+             */
+            owner: "ANALYZER" | "FOUNDATION";
+            /** Slot Key */
+            slot_key: string;
+        };
         /** ArtifactReviewSubjectBinding */
         V4_ArtifactReviewSubjectBinding: {
             /**
@@ -1494,6 +1534,11 @@ export interface components {
             planned_identities: components["schemas"]["V4_PlannedArtifactIdentity"][];
             /** Semantic State Hash */
             semantic_state_hash: string;
+            /**
+             * Slots
+             * @default []
+             */
+            slots: components["schemas"]["V4_ArtifactIdentitySlot"][];
             /** Source Entity Refs */
             source_entity_refs: components["schemas"]["V4_FoundationEntityRef"][];
             target: components["schemas"]["V4_ArtifactDraftTarget"];
@@ -2526,22 +2571,13 @@ export interface components {
         V4_SpecEvidenceSupportProposalCandidate: {
             /** Claim Pointer */
             claim_pointer: string;
-            /**
-             * Claim Ref
-             * Format: uuid
-             */
+            /** Claim Ref */
             claim_ref: string;
-            /**
-             * Evidence Ref
-             * Format: uuid
-             */
+            /** Evidence Ref */
             evidence_ref: string;
             /** Exact Excerpt */
             exact_excerpt: string;
-            /**
-             * Finding Ref
-             * Format: uuid
-             */
+            /** Finding Ref */
             finding_ref: string;
             /** Locator */
             locator: string;
@@ -2573,6 +2609,11 @@ export interface components {
              * Format: uuid
              */
             foundation_artifact_id: string;
+            /**
+             * Identity Assignment Map
+             * @default []
+             */
+            identity_assignment_map: components["schemas"]["V4_ArtifactIdentityAssignment"][];
             /**
              * Identity Plan Id
              * Format: uuid

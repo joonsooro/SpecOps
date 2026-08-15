@@ -127,7 +127,12 @@ class ArtifactQualityFoundationMixin:
             ).scalar_one_or_none()
             if plan_json is None:
                 raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
-            plan = c.ArtifactSynthesisIdentityPlan.model_validate_json(plan_json)
+            stored_plan = json.loads(plan_json)
+            if isinstance(stored_plan, dict) and "identity_plan" in stored_plan:
+                stored_plan = stored_plan["identity_plan"]
+            plan = c.ArtifactSynthesisIdentityPlan.model_validate_json(
+                json.dumps(stored_plan, sort_keys=True, separators=(",", ":"))
+            )
             planned = {
                 str(item.foundation_id): item.entity_kind
                 for item in plan.planned_identities

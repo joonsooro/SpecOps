@@ -14,6 +14,10 @@ from specops_workshop.api import create_app
 from specops_workshop.config import Settings
 from specops_workshop.sources import SourceCatalog
 from specops_workflow.workshop_protocol import WorkshopFoundationService
+from specops_workflow.spec_identity_materialization import (
+    SPEC_ANALYZER_COLLECTIONS,
+    spec_collection_slot_assignments,
+)
 
 from test_feature_26_v4_production_seam import DeterministicAdapter
 from v4_payload_factory import (
@@ -47,7 +51,7 @@ def _bind_matching_planned_identities(payload: dict, identity_plan) -> dict:
 
 
 def _provider_owned_spec_payload(payload: dict, identity_plan) -> dict:
-    """Mirror the production schema: Foundation owns exact server records."""
+    """Mirror production: local handles carry semantics; Foundation owns IDs."""
 
     # Keep the generated actor just long enough to bind every actor_ref to the
     # Foundation-allocated ACTOR slot. No unconfirmed decision may be emitted.
@@ -75,6 +79,53 @@ def _provider_owned_spec_payload(payload: dict, identity_plan) -> dict:
                 project_provider_owned_refs(item)
 
     project_provider_owned_refs(payload)
+
+    slot_assignments = spec_collection_slot_assignments(identity_plan.slots)
+    kind_offsets: dict[str, int] = {}
+    selected_by_path = {}
+    identity_to_handle = {}
+    for path, kind in SPEC_ANALYZER_COLLECTIONS:
+        collection = payload
+        for part in path:
+            collection = collection[part]
+        start = kind_offsets.get(kind, 0)
+        selected = slot_assignments[path][start : start + len(collection)]
+        kind_offsets[kind] = start + len(collection)
+        if len(selected) != len(collection):
+            raise AssertionError(f"identity plan lacks local {kind} capacity")
+        selected_by_path[path] = selected
+        identity_to_handle.update(
+            (item["id"], slot.slot_key)
+            for item, slot in zip(collection, selected, strict=True)
+        )
+
+    def rewrite_dict_scalars(value):
+        if isinstance(value, dict):
+            for child_key, child in tuple(value.items()):
+                if child_key != "id" and isinstance(child, str):
+                    value[child_key] = identity_to_handle.get(child, child)
+                else:
+                    rewrite_dict_scalars(child)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                if isinstance(child, str):
+                    value[index] = identity_to_handle.get(child, child)
+                else:
+                    rewrite_dict_scalars(child)
+
+    rewrite_dict_scalars(payload)
+    for path, _kind in SPEC_ANALYZER_COLLECTIONS:
+        parent = payload
+        for part in path[:-1]:
+            parent = parent[part]
+        collection = parent[path[-1]]
+        slots = slot_assignments[path]
+        keyed = {slot.slot_key: None for slot in slots}
+        for item, slot in zip(collection, selected_by_path[path], strict=True):
+            body = dict(item)
+            body.pop("id")
+            keyed[slot.slot_key] = body
+        parent[path[-1]] = keyed
     return payload
 
 

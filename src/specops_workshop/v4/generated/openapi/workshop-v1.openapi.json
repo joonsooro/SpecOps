@@ -2608,6 +2608,101 @@
         "title": "ArtifactDraftTarget",
         "type": "object"
       },
+      "V4_ArtifactIdentityAssignment": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_pointer": {
+            "maxLength": 2048,
+            "pattern": "^(?:/(?:[^~/]|~0|~1)*)+$",
+            "title": "Canonical Pointer",
+            "type": "string"
+          },
+          "entity_kind": {
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+            "title": "Entity Kind",
+            "type": "string"
+          },
+          "foundation_id": {
+            "format": "uuid",
+            "title": "Foundation Id",
+            "type": "string"
+          },
+          "ordinal": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "slot_key": {
+            "maxLength": 69,
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+            "title": "Slot Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_key",
+          "entity_kind",
+          "ordinal",
+          "foundation_id",
+          "canonical_pointer"
+        ],
+        "title": "ArtifactIdentityAssignment",
+        "type": "object"
+      },
+      "V4_ArtifactIdentitySlot": {
+        "additionalProperties": false,
+        "properties": {
+          "allocation_mode": {
+            "enum": [
+              "NEW_ENTITY",
+              "BOUND_EXISTING"
+            ],
+            "title": "Allocation Mode",
+            "type": "string"
+          },
+          "entity_kind": {
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+            "title": "Entity Kind",
+            "type": "string"
+          },
+          "foundation_id": {
+            "format": "uuid",
+            "title": "Foundation Id",
+            "type": "string"
+          },
+          "ordinal": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "owner": {
+            "enum": [
+              "ANALYZER",
+              "FOUNDATION"
+            ],
+            "title": "Owner",
+            "type": "string"
+          },
+          "slot_key": {
+            "maxLength": 69,
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+            "title": "Slot Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_key",
+          "entity_kind",
+          "ordinal",
+          "owner",
+          "foundation_id",
+          "allocation_mode"
+        ],
+        "title": "ArtifactIdentitySlot",
+        "type": "object"
+      },
       "V4_ArtifactReviewSubjectBinding": {
         "additionalProperties": false,
         "properties": {
@@ -2691,6 +2786,15 @@
             "pattern": "^sha256:[0-9a-f]{64}$",
             "title": "Semantic State Hash",
             "type": "string"
+          },
+          "slots": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_ArtifactIdentitySlot"
+            },
+            "maxItems": 10000,
+            "title": "Slots",
+            "type": "array"
           },
           "source_entity_refs": {
             "items": {
@@ -5247,14 +5351,32 @@
             "type": "string"
           },
           "claim_ref": {
-            "format": "uuid",
-            "title": "Claim Ref",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "maxLength": 69,
+                "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+                "type": "string"
+              }
+            ],
+            "title": "Claim Ref"
           },
           "evidence_ref": {
-            "format": "uuid",
-            "title": "Evidence Ref",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "maxLength": 69,
+                "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+                "type": "string"
+              }
+            ],
+            "title": "Evidence Ref"
           },
           "exact_excerpt": {
             "maxLength": 8000,
@@ -5263,9 +5385,18 @@
             "type": "string"
           },
           "finding_ref": {
-            "format": "uuid",
-            "title": "Finding Ref",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "maxLength": 69,
+                "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+                "type": "string"
+              }
+            ],
+            "title": "Finding Ref"
           },
           "locator": {
             "maxLength": 20000,
@@ -5327,6 +5458,15 @@
             "format": "uuid",
             "title": "Foundation Artifact Id",
             "type": "string"
+          },
+          "identity_assignment_map": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_ArtifactIdentityAssignment"
+            },
+            "maxItems": 10000,
+            "title": "Identity Assignment Map",
+            "type": "array"
           },
           "identity_plan_id": {
             "format": "uuid",

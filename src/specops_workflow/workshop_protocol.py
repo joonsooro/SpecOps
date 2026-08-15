@@ -72,6 +72,12 @@ from .artifact_projection import (
 )
 from .artifact_quality_foundation import ArtifactQualityFoundationMixin
 from .artifact_reference_graph import validate_artifact_reference_graph
+from .spec_identity_materialization import (
+    SpecIdentityMaterializationError,
+    derive_materialized_assignment,
+    materialize_spec_identities,
+    validate_materialized_assignment,
+)
 from .workshop_completion import CompletionUtterance, classify_completion_utterance
 
 
@@ -1267,6 +1273,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         case_id: UUID,
         artifact_type: str,
         entity_kinds: tuple[str, ...],
+        *,
+        construction_policy: tuple[tuple[str, str, str], ...] | None = None,
     ) -> c.ArtifactSynthesisIdentityPlan:
         """Mint a synthesis target/identity plan from current Foundation state.
 
@@ -1315,11 +1323,54 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 ],
             }
 
-        def planned_identity(kind: str) -> tuple[UUID, int]:
+        if construction_policy is not None and (
+            len(construction_policy) != len(entity_kinds)
+            or tuple(item[0] for item in construction_policy) != entity_kinds
+        ):
+            raise ValueError("construction policy must exactly match requested entity kinds")
+
+        def planned_identity(kind: str) -> tuple[UUID, int, bool]:
             available = canonical_identities.get(kind, [])
             if available:
-                return available.pop(0)
-            return self.new_id(), 1
+                identity, version = available.pop(0)
+                return identity, version, True
+            return self.new_id(), 1, False
+
+        identities: list[c.PlannedArtifactIdentity] = []
+        slots: list[c.ArtifactIdentitySlot] = []
+        ordinals: dict[str, int] = {}
+        for index, kind in enumerate(entity_kinds):
+            identity, version, bound_existing = planned_identity(kind)
+            owner = (
+                construction_policy[index][1]
+                if construction_policy is not None
+                else "FOUNDATION"
+                if bound_existing
+                else "ANALYZER"
+            )
+            if bound_existing and owner != "FOUNDATION":
+                raise ValueError("canonical identities require Foundation ownership")
+            ordinal = ordinals.get(kind, 0) + 1
+            ordinals[kind] = ordinal
+            identities.append(
+                c.PlannedArtifactIdentity(
+                    foundation_id=identity,
+                    foundation_version=version,
+                    entity_kind=kind,
+                )
+            )
+            slots.append(
+                c.ArtifactIdentitySlot(
+                    slot_key=f"{kind}:{ordinal:04d}",
+                    entity_kind=kind,
+                    ordinal=ordinal,
+                    owner=owner,
+                    foundation_id=identity,
+                    allocation_mode=(
+                        "BOUND_EXISTING" if bound_existing else "NEW_ENTITY"
+                    ),
+                )
+            )
 
         return c.ArtifactSynthesisIdentityPlan(
             identity_plan_id=self.new_id(),
@@ -1330,15 +1381,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 "SPECOPS:SEMANTIC_STATE:v1", snapshot.model_dump(mode="json")
             ),
             source_entity_refs=source_refs,
-            planned_identities=tuple(
-                c.PlannedArtifactIdentity(
-                    foundation_id=identity,
-                    foundation_version=version,
-                    entity_kind=kind,
-                )
-                for kind in entity_kinds
-                for identity, version in (planned_identity(kind),)
-            ),
+            planned_identities=tuple(identities),
+            slots=tuple(slots),
         )
 
     @staticmethod
@@ -1415,7 +1459,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ("ACTOR", 1, "FOUNDATION", "Q004 project canonical actor authority."),
             ("GLOSSARY_TERM", 8, "ANALYZER", "Q005 bound one material term."),
             ("OUTCOME", 2, "ANALYZER", "Define one measurable outcome."),
-            ("SCOPE_ITEM", 6, "ANALYZER", "Define one atomic scope inclusion or non-goal."),
+            ("SCOPE_ITEM", 10, "ANALYZER", "Define one atomic scope inclusion or non-goal."),
             ("SCOPE_BOUNDARY", 2, "ANALYZER", "Define one explicit scope boundary."),
             ("JOURNEY", 3, "ANALYZER", "Trace one complete actor journey."),
             ("BEHAVIOUR_RULE", 12, "ANALYZER", "Define one atomic behavior obligation."),
@@ -1464,18 +1508,28 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
     ) -> c.ArtifactConstructionBlueprint:
         if len(policy) != len(plan.planned_identities):
             raise ValueError("construction policy and identity plan lengths differ")
+        if len(plan.slots) != len(plan.planned_identities):
+            raise ValueError("identity plan lacks typed construction slots")
         slots = []
-        for identity, (kind, owner, purpose) in zip(
-            plan.planned_identities, policy, strict=True
+        for identity, identity_slot, (kind, owner, purpose) in zip(
+            plan.planned_identities, plan.slots, policy, strict=True
         ):
-            if identity.entity_kind != kind:
+            if (
+                identity.entity_kind != kind
+                or identity_slot.entity_kind != kind
+                or identity_slot.owner != owner
+                or identity_slot.foundation_id != identity.foundation_id
+            ):
                 raise ValueError("construction policy and identity kind differ")
             slots.append(
                 c.ArtifactConstructionSlot(
+                    slot_key=identity_slot.slot_key,
                     foundation_id=identity.foundation_id,
                     foundation_version=identity.foundation_version,
                     entity_kind=kind,
+                    ordinal=identity_slot.ordinal,
                     owner=owner,
+                    allocation_mode=identity_slot.allocation_mode,
                     purpose=purpose,
                 )
             )
@@ -3357,6 +3411,26 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         errors = list(_payload_validator(schema_name).iter_errors(payload))
         if errors:
             raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED)
+        assignment_map: tuple[c.ArtifactIdentityAssignment, ...] = ()
+        if artifact_type == "SPEC_PACKAGE":
+            try:
+                assignment_map = (
+                    command.candidate.identity_assignment_map
+                    or derive_materialized_assignment(
+                        payload=payload,
+                        identity_plan=command.identity_plan,
+                    )
+                )
+                validate_materialized_assignment(
+                    payload=payload,
+                    identity_plan=command.identity_plan,
+                    assignment_map=assignment_map,
+                )
+            except SpecIdentityMaterializationError as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                    safe_diagnostic_pointers=exc.pointers,
+                ) from exc
         if artifact_type == "TECHNICAL_CONTRACT":
             self._validate_confirmed_spec_lineage(connection, command, prior_revision)
         planned = {str(item.foundation_id): item.entity_kind for item in command.identity_plan.planned_identities}
@@ -3429,7 +3503,17 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     artifact_id=str(command.target.foundation_artifact_id),
                     artifact_version=command.target.next_artifact_version,
                     semantic_state_hash=command.identity_plan.semantic_state_hash,
-                    plan_json=command.identity_plan.model_dump_json(),
+                    plan_json=_json(
+                        {
+                            "identity_plan": command.identity_plan.model_dump(
+                                mode="json"
+                            ),
+                            "assignment_map": [
+                                item.model_dump(mode="json")
+                                for item in assignment_map
+                            ],
+                        }
+                    ),
                     status="CONSUMED",
                     created_at=_instant(self.now()),
                 )
@@ -3545,7 +3629,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         confirmed_decision_bindings: tuple[c.ConfirmedDecisionSynthesisBinding, ...],
         identity_plan: c.ArtifactSynthesisIdentityPlan,
     ) -> c.SpecPackageSynthesisCandidate:
-        """Merge canonical actors and decision ceremonies into a provider-owned draft."""
+        """Materialize Analyzer handles, then merge Foundation-owned records."""
 
         try:
             payload = json.loads(
@@ -3554,6 +3638,29 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             )
         except ValueError as exc:
             raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED) from exc
+        if candidate.identity_assignment_map:
+            try:
+                validate_materialized_assignment(
+                    payload=payload,
+                    identity_plan=identity_plan,
+                    assignment_map=candidate.identity_assignment_map,
+                )
+            except SpecIdentityMaterializationError as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                    safe_diagnostic_pointers=exc.pointers,
+                ) from exc
+            expected = self._server_owned_spec_records(
+                confirmed_decision_bindings, identity_plan
+            )
+            if (
+                payload.get("actors") != expected["actors"]
+                or payload.get("decisions") != expected["decisions"]
+            ):
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+                )
+            return candidate
         if any(
             field in payload
             for field in (
@@ -3566,6 +3673,17 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             raise FoundationProtocolError(
                 c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
             )
+        try:
+            payload, proposals, assignment_map = materialize_spec_identities(
+                payload=payload,
+                proposals=candidate.evidence_support_proposals,
+                identity_plan=identity_plan,
+            )
+        except SpecIdentityMaterializationError as exc:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                safe_diagnostic_pointers=exc.pointers,
+            ) from exc
         self._initialize_foundation_owned_evidence_refs(payload)
         payload.update(
             self._server_owned_spec_records(
@@ -3579,7 +3697,9 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             update={
                 "candidate_payload_json": json.dumps(
                     payload, sort_keys=True, separators=(",", ":")
-                )
+                ),
+                "evidence_support_proposals": proposals,
+                "identity_assignment_map": assignment_map,
             }
         )
 
@@ -3628,8 +3748,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
     ) -> dict[str, list[dict[str, Any]]]:
         actor_ids = [
             item.foundation_id
-            for item in identity_plan.planned_identities
+            for item in identity_plan.slots
             if item.entity_kind == "ACTOR"
+            and item.owner == "FOUNDATION"
+            and item.allocation_mode == "BOUND_EXISTING"
         ]
         bound_actor_ids = {item.actor_ref for item in bindings}
         if len(actor_ids) != 1 or not bound_actor_ids.issubset(set(actor_ids)):

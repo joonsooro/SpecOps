@@ -1562,7 +1562,10 @@ class V4ProductionOrchestrator:
         )
         entity_kinds = tuple(item[0] for item in construction_policy)
         plan = self.foundation.issue_artifact_identity_plan(
-            self.case_id, artifact_type, entity_kinds
+            self.case_id,
+            artifact_type,
+            entity_kinds,
+            construction_policy=construction_policy,
         )
         construction_blueprint = self.foundation.artifact_construction_blueprint(
             plan, construction_policy

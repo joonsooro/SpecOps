@@ -1498,11 +1498,16 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
     )
     payload.update(foundation._server_owned_spec_records((), plan))
     identities = list(plan.planned_identities)
+    slots = list(plan.slots)
     if plan_error == "wrong_kind":
         identities[0] = identities[0].model_copy(update={"entity_kind": "COMPONENT"})
+        slots[0] = slots[0].model_copy(update={"entity_kind": "COMPONENT"})
     else:
         identities.pop()
-    invalid_plan = plan.model_copy(update={"planned_identities": tuple(identities)})
+        slots.pop()
+    invalid_plan = plan.model_copy(
+        update={"planned_identities": tuple(identities), "slots": tuple(slots)}
+    )
     candidate = c.SpecPackageSynthesisCandidate(
         output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
         analyzer_run_id=uuid4(),
@@ -1822,6 +1827,24 @@ def test_rule_derived_blueprint_projects_cross_domain_authority_deterministicall
                 foundation_id=decision_id,
                 foundation_version=1,
                 entity_kind="DECISION",
+            ),
+        ),
+        slots=(
+            c.ArtifactIdentitySlot(
+                slot_key="ACTOR:0001",
+                entity_kind="ACTOR",
+                ordinal=1,
+                owner="FOUNDATION",
+                foundation_id=actor_id,
+                allocation_mode="BOUND_EXISTING",
+            ),
+            c.ArtifactIdentitySlot(
+                slot_key="DECISION:0001",
+                entity_kind="DECISION",
+                ordinal=1,
+                owner="FOUNDATION",
+                foundation_id=decision_id,
+                allocation_mode="BOUND_EXISTING",
             ),
         ),
     )

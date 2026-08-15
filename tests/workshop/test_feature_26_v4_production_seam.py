@@ -595,7 +595,7 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
                     payload_schema_version=(
                         "4.0.0"
                         if operation is c.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS
-                        else "4.0.1"
+                        else "4.0.2"
                     ),
                 )
             cases.append((request, candidate))

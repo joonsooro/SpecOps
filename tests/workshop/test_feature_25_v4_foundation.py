@@ -650,7 +650,7 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
             omitted_payload, separators=(",", ":"), sort_keys=True
         ),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.1",
+        payload_schema_version="4.0.2",
     )
     admission_values = _base(9)
     admission_values.update(
@@ -1053,7 +1053,7 @@ def test_full_spec_then_technical_contract_validation_projection_and_exact_linea
             semantic_state_hash=plan.semantic_state_hash,
             candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
             payload_schema_version=(
-                "4.0.1" if artifact_type == "SPEC_PACKAGE" else "4.0.0"
+                "4.0.2" if artifact_type == "SPEC_PACKAGE" else "4.0.0"
             ),
         )
         if artifact_type == "SPEC_PACKAGE":
@@ -1516,7 +1516,7 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.1",
+        payload_schema_version="4.0.2",
     )
     values = _base(4)
     values.update(
@@ -1574,7 +1574,7 @@ def test_artifact_admission_accepts_unused_bounded_identity_capacity(tmp_path):
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.1",
+        payload_schema_version="4.0.2",
     )
     values = _base(4)
     values.update(
@@ -1639,7 +1639,7 @@ def test_foundation_materializes_only_exact_supported_evidence_revision(tmp_path
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.1",
+        payload_schema_version="4.0.2",
     )
     values = _base(4)
     values.update(
@@ -1757,7 +1757,7 @@ def test_artifact_admission_rejects_reference_to_unused_planned_identity(tmp_pat
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.1",
+        payload_schema_version="4.0.2",
     )
     values = _base(4)
     values.update(

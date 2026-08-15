@@ -167,7 +167,7 @@ def _spec_synthesis_request(prepared) -> c.SpecPackageSynthesisRequest:
         ),
         "confirmed_decision_bindings": (),
         "payload_schema_id": "spec-package-payload",
-        "payload_schema_version": "4.0.1",
+        "payload_schema_version": "4.0.2",
         "requested_output": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
     }
     data["request_hash"] = _request_hash(data)
@@ -630,12 +630,12 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "decisions" not in payload_schema["properties"]
     assert "evidence_catalog" not in payload_schema["properties"]
     assert "semantic_evidence_findings" not in payload_schema["properties"]
-    assert payload_schema["$defs"]["requirement"]["properties"][
-        "source_evidence_refs"
-    ]["maxItems"] == 0
-    assert payload_schema["$defs"]["behaviourRule"]["properties"][
-        "evidence_refs"
-    ]["maxItems"] == 0
+    assert "maxItems" not in payload_schema["$defs"]["requirement"][
+        "properties"
+    ]["source_evidence_refs"]
+    assert "maxItems" not in payload_schema["$defs"]["behaviourRule"][
+        "properties"
+    ]["evidence_refs"]
     assert json.loads(content[1]["text"])["request_type"] == "SPEC_PACKAGE_SYNTHESIS"
     provider_request = json.loads(content[1]["text"])
     assert "canonical_semantic_state_json" not in provider_request
@@ -714,7 +714,7 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
         "candidate_payload_json": {"wire_object": True},
         "output_type": "SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
         "payload_schema_id": "spec-package-payload",
-        "payload_schema_version": "4.0.1",
+        "payload_schema_version": "4.0.2",
     }
     candidate = adapter._candidate_from_provider_output(
         c.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS,
@@ -793,15 +793,29 @@ def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
     properties = payload["properties"]
 
     assert properties["requirements"]["minItems"] == 22
-    assert properties["requirements"]["maxItems"] == 22
+    assert "maxItems" not in properties["requirements"]
     assert properties["acceptance_checks"]["minItems"] == 22
-    assert properties["acceptance_checks"]["maxItems"] == 22
+    assert "maxItems" not in properties["acceptance_checks"]
     assert properties["scenarios"]["minItems"] == 12
     assert properties["experience_states"]["minItems"] == 9
     assert properties["data_rules"]["minItems"] == 6
     assert properties["glossary"]["minItems"] == 6
     assert schema["properties"]["evidence_support_proposals"]["minItems"] == 8
-    assert schema["properties"]["evidence_support_proposals"]["maxItems"] == 12
+    assert schema["properties"]["evidence_support_proposals"]["maxItems"] == 1_000
+    max_items = []
+
+    def collect_max_items(value):
+        if isinstance(value, dict):
+            if "maxItems" in value:
+                max_items.append(value["maxItems"])
+            for child in value.values():
+                collect_max_items(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_max_items(child)
+
+    collect_max_items(schema)
+    assert max_items == [1_000]
 
 
 def test_terminal_spec_schema_excludes_foundation_owned_decision_records():

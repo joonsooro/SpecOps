@@ -1351,12 +1351,6 @@ class StoredConversationOpenAIAdapter:
         ):
             projected["properties"].pop(field)
             projected["required"].remove(field)
-        for definition in projected.get("$defs", {}).values():
-            properties = definition.get("properties", {})
-            for field in ("evidence_refs", "source_evidence_refs"):
-                evidence_refs = properties.get(field)
-                if isinstance(evidence_refs, dict):
-                    evidence_refs["maxItems"] = 0
         return projected
 
     @staticmethod
@@ -1476,12 +1470,14 @@ class StoredConversationOpenAIAdapter:
             if item.owner == "ANALYZER"
         )
 
-        def bound_array(field: str, *, minimum: int, maximum: int) -> None:
+        # Provider schemas carry construction minima only. Foundation enforces the
+        # exact identity capacities and rejects any over-capacity candidate before
+        # persistence, so provider-specific upper-bound support is not authoritative.
+        def require_array_minimum(field: str, *, minimum: int) -> None:
             value = payload_properties.get(field)
             if not isinstance(value, dict):
                 raise ValueError(f"Spec payload schema does not expose {field}")
             value["minItems"] = minimum
-            value["maxItems"] = maximum
 
         direct_bounds = {
             "package_items": (1, analyzer_capacity["PACKAGE_ITEM"]),
@@ -1501,13 +1497,12 @@ class StoredConversationOpenAIAdapter:
         }
         for field, (minimum, maximum) in direct_bounds.items():
             if maximum:
-                bound_array(field, minimum=minimum, maximum=maximum)
+                require_array_minimum(field, minimum=minimum)
 
         proposal_schema = properties.get("evidence_support_proposals")
         if not isinstance(proposal_schema, dict):
             raise ValueError("Spec candidate schema does not expose evidence proposals")
         proposal_schema["minItems"] = min(8, slot_capacity["EVIDENCE"])
-        proposal_schema["maxItems"] = slot_capacity["EVIDENCE"]
 
         def referenced_object(field: str) -> dict[str, Any]:
             value = payload_properties.get(field)
@@ -1535,7 +1530,6 @@ class StoredConversationOpenAIAdapter:
             )
             if maximum:
                 value["minItems"] = 1
-                value["maxItems"] = maximum
 
         behaviour_properties = referenced_object("behaviour_contract").get("properties")
         if not isinstance(behaviour_properties, dict):
@@ -1547,7 +1541,6 @@ class StoredConversationOpenAIAdapter:
             maximum = analyzer_capacity["BEHAVIOUR_RULE"]
             if maximum:
                 value["minItems"] = 1
-                value["maxItems"] = maximum
 
         decisions = (
             payload_properties.get("decisions")

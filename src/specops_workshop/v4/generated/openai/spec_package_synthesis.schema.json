@@ -102,7 +102,7 @@
       "type": "string"
     },
     "payload_schema_version": {
-      "const": "4.0.1",
+      "const": "4.0.2",
       "type": "string"
     },
     "request_hash": {

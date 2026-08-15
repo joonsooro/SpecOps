@@ -1600,7 +1600,7 @@ class V4ProductionOrchestrator:
                     ),
                     confirmed_decision_bindings=confirmed_decisions,
                     payload_schema_id="spec-package-payload",
-                    payload_schema_version="4.0.1",
+                    payload_schema_version="4.0.2",
                     requested_output="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
                 ),
             )

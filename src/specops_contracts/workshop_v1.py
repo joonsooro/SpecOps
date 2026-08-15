@@ -1297,7 +1297,7 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
         tuple[ConfirmedDecisionSynthesisBinding, ...], Field(max_length=26)
     ]
     payload_schema_id: Literal["spec-package-payload"]
-    payload_schema_version: Literal["4.0.1"]
+    payload_schema_version: Literal["4.0.2"]
     requested_output: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
 
     @model_validator(mode="after")
@@ -1407,7 +1407,7 @@ class ArtifactPayloadSynthesisCandidate(ContractModel):
 class SpecPackageSynthesisCandidate(ArtifactPayloadSynthesisCandidate):
     output_type: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
     payload_schema_id: Literal["spec-package-payload"]
-    payload_schema_version: Literal["4.0.1"]
+    payload_schema_version: Literal["4.0.2"]
     evidence_support_proposals: Annotated[
         tuple["SpecEvidenceSupportProposalCandidate", ...], Field(max_length=1_000)
     ] = ()

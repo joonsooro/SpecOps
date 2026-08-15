@@ -2594,7 +2594,7 @@ export interface components {
              * Payload Schema Version
              * @constant
              */
-            payload_schema_version: "4.0.1";
+            payload_schema_version: "4.0.2";
             /** Request Hash */
             request_hash: string;
             /** Semantic State Hash */

@@ -378,7 +378,7 @@ class ConfirmedSpecAuditBinding(StrictModel):
     payload_hash: Sha256
     confirmation_id: UUID
     confirmed_case_revision: int = Field(strict=True, ge=1)
-    canonical_payload_json: NonEmpty
+    canonical_payload_json: CompleteText
 
 
 class ArtifactQualityAuditBundle(StrictModel):

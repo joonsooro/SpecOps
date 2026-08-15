@@ -140,6 +140,21 @@ def test_artifact_audit_subject_accepts_a_complete_payload_over_generic_text_lim
     assert len(subject.canonical_payload_json) > 100_000
 
 
+def test_confirmed_spec_audit_binding_accepts_a_complete_payload_over_generic_text_limit():
+    binding = q.ConfirmedSpecAuditBinding(
+        artifact_id=UUID("50000000-0000-4000-8000-000000000006"),
+        artifact_key="SPEC-QUALITY",
+        artifact_version=3,
+        record_revision=10,
+        payload_hash=HASH,
+        confirmation_id=UUID("50000000-0000-4000-8000-000000000007"),
+        confirmed_case_revision=73,
+        canonical_payload_json="{" + '"payload":"' + "x" * 105_000 + '"}',
+    )
+
+    assert len(binding.canonical_payload_json) > 100_000
+
+
 class _Endpoint:
     def __init__(self, result):
         self.result = result

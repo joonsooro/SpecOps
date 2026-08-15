@@ -18,38 +18,61 @@ def quality_revision_pointer_closure(
     finding_pointers: tuple[str, ...],
     allocated_identity_kinds: tuple[str, ...],
 ) -> tuple[str, ...]:
-    """Add only the non-authority reference closure needed for an actor split."""
+    """Add only the reference closure needed by Foundation-allocated splits."""
 
     result = set(finding_pointers)
-    if "ACTOR" not in allocated_identity_kinds:
-        return tuple(sorted(result))
-    actor_ids: set[str] = set()
-    actors = payload.get("actors", [])
-    for pointer in finding_pointers:
-        tokens = _pointer_tokens(pointer)
-        if len(tokens) < 2 or tokens[0] != "actors":
+    allocated = set(allocated_identity_kinds)
+    collections = {
+        "ACTOR": "actors",
+        "REQUIREMENT": "requirements",
+        "ACCEPTANCE_CHECK": "acceptance_checks",
+        "GLOSSARY_TERM": "glossary",
+    }
+    anchor_ids: set[str] = set()
+    requirement_anchors: list[dict[str, Any]] = []
+    for kind, collection in collections.items():
+        if kind not in allocated:
             continue
-        try:
-            actor = actors[int(tokens[1])]
-        except (IndexError, TypeError, ValueError):
-            raise ValueError("quality revision actor pointer does not resolve") from None
-        actor_id = actor.get("id") if isinstance(actor, dict) else None
-        if not isinstance(actor_id, str):
-            raise ValueError("quality revision actor pointer has no identity")
-        actor_ids.add(actor_id)
-    if not actor_ids:
-        return tuple(sorted(result))
+        values = payload.get(collection, [])
+        if not isinstance(values, list):
+            raise ValueError("quality revision split collection does not resolve")
+        result.add(f"/{_escape_pointer_token(collection)}")
+        for pointer in finding_pointers:
+            tokens = _pointer_tokens(pointer)
+            if len(tokens) < 2 or tokens[0] != collection:
+                continue
+            try:
+                item = values[int(tokens[1])]
+            except (IndexError, TypeError, ValueError):
+                raise ValueError("quality revision split pointer does not resolve") from None
+            identity = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(identity, str):
+                raise ValueError("quality revision split pointer has no identity")
+            anchor_ids.add(identity)
+            if collection == "requirements":
+                requirement_anchors.append(item)
 
-    result.add("/actors")
+    if "ACCEPTANCE_CHECK" in allocated:
+        for requirement in requirement_anchors:
+            refs = requirement.get("acceptance_check_refs", [])
+            if not isinstance(refs, list) or any(
+                not isinstance(value, str) for value in refs
+            ):
+                raise ValueError("quality revision acceptance-check refs are invalid")
+            anchor_ids.update(refs)
+
+    if allocated.intersection({"REQUIREMENT", "ACCEPTANCE_CHECK"}):
+        result.add("/traceability")
+
     for key, value in payload.items():
-        if key in {"actors", "decisions"}:
+        if key == "decisions":
             continue
         escaped_key = _escape_pointer_token(key)
         if isinstance(value, list):
             for index, item in enumerate(value):
-                if _contains_exact_value(item, actor_ids):
+                if _contains_exact_value(item, anchor_ids):
                     result.add(f"/{escaped_key}/{index}")
-        elif _contains_exact_value(value, actor_ids):
+        elif _contains_exact_value(value, anchor_ids):
             result.add(f"/{escaped_key}")
     return tuple(sorted(result))
 
@@ -152,11 +175,25 @@ def apply_quality_revision_candidate(
     revised_actors = revised.get("actors", [])
     if revised.get("decisions", []) != payload.get("decisions", []):
         raise ValueError("quality revision changed Foundation-owned decisions")
-    if (
-        not isinstance(original_actors, list)
-        or not isinstance(revised_actors, list)
-        or revised_actors[: len(original_actors)] != original_actors
-    ):
+    if not isinstance(original_actors, list) or not isinstance(revised_actors, list):
+        raise ValueError("quality revision actor collection is invalid")
+    expected_existing_actors = deepcopy(original_actors)
+    expected_document = {"actors": expected_existing_actors}
+    for pointer in request.canonical_artifact_pointers:
+        tokens = _pointer_tokens(pointer)
+        if (
+            len(tokens) == 4
+            and tokens[0] == "actors"
+            and tokens[2] == "responsibilities"
+        ):
+            try:
+                replacement = _resolve_pointer(revised, pointer)
+                _replace_pointer(expected_document, pointer, replacement)
+            except (IndexError, KeyError, TypeError, ValueError):
+                raise ValueError(
+                    "quality revision actor responsibility pointer does not resolve"
+                ) from None
+    if revised_actors[: len(original_actors)] != expected_existing_actors:
         raise ValueError("quality revision changed an existing Foundation-owned actor")
     allocated_actor_ids = {
         str(item.foundation_id)
@@ -227,6 +264,13 @@ def _replace_pointer(document: dict, pointer: str, replacement) -> None:
         if final not in target:
             raise ValueError("quality revision pointer does not resolve")
         target[final] = replacement
+
+
+def _resolve_pointer(document: dict, pointer: str):
+    target: Any = document
+    for token in _pointer_tokens(pointer):
+        target = target[int(token)] if isinstance(target, list) else target[token]
+    return target
 
 
 def _pointer_tokens(pointer: str) -> list[str]:

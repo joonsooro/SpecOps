@@ -214,3 +214,104 @@ def test_actor_split_allows_only_one_exact_allocated_addition_and_preserves_auth
             candidate=changed,
             identity_kinds=WorkshopFoundationService._artifact_identity_kinds,
         )
+
+
+def test_requirement_split_scope_closes_requirement_and_acceptance_references():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    requirement_id = payload["requirements"][0]["id"]
+    acceptance_id = payload["acceptance_checks"][0]["id"]
+    payload["requirements"][0]["acceptance_check_refs"] = [acceptance_id]
+    payload["acceptance_checks"][0]["requirement_refs"] = [requirement_id]
+    payload["package_items"][0]["requirement_refs"] = [requirement_id]
+    payload["package_items"][0]["acceptance_check_refs"] = [acceptance_id]
+    payload["decisions"] = [{"affected_refs": [requirement_id]}]
+
+    pointers = quality_revision_pointer_closure(
+        payload=payload,
+        finding_pointers=(
+            "/requirements/0/behaviour",
+            "/acceptance_checks/0/then/0",
+            "/glossary",
+        ),
+        allocated_identity_kinds=(
+            "REQUIREMENT",
+            "REQUIREMENT",
+            "ACCEPTANCE_CHECK",
+            "GLOSSARY_TERM",
+        ),
+    )
+
+    assert "/requirements" in pointers
+    assert "/acceptance_checks" in pointers
+    assert "/glossary" in pointers
+    assert "/package_items/0" in pointers
+    assert "/traceability" in pointers
+    assert not any(pointer.startswith("/decisions") for pointer in pointers)
+
+
+def test_exact_found_actor_responsibility_may_change_but_actor_role_may_not():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    payload["actors"][0]["responsibilities"] = ["Old scope wording"]
+    request = prepare_quality_revision_request(
+        artifact_id=uuid4(),
+        artifact_version=3,
+        record_revision=2,
+        based_on_case_revision=8,
+        payload=payload,
+        audit_id=uuid4(),
+        finding_ids=(uuid4(),),
+        failed_rule_ids=("SPEC-Q-005",),
+        canonical_artifact_pointers=("/actors/0/responsibilities/0",),
+        allocated_identity_kinds=(),
+    )
+    candidate = q.ArtifactQualityRevisionCandidate(
+        protocol_version="1.0.0",
+        output_type="ARTIFACT_QUALITY_REVISION_CANDIDATE",
+        revision_request_id=request.revision_request_id,
+        revision_request_version=1,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        attempt=1,
+        patches=(
+            q.ArtifactRevisionPatch(
+                pointer="/actors/0/responsibilities/0",
+                replacement_value_json=json.dumps("Exact fingerprint comparison"),
+            ),
+        ),
+    )
+
+    revised = apply_quality_revision_candidate(
+        payload=payload,
+        request=request,
+        candidate=candidate,
+        identity_kinds=WorkshopFoundationService._artifact_identity_kinds,
+    )
+    assert revised["actors"][0]["responsibilities"] == [
+        "Exact fingerprint comparison"
+    ]
+    assert revised["actors"][0]["id"] == payload["actors"][0]["id"]
+
+    changed_role = candidate.model_copy(
+        update={
+            "patches": (
+                q.ArtifactRevisionPatch(
+                    pointer="/actors/0/responsibilities/0",
+                    replacement_value_json=json.dumps("Exact fingerprint comparison"),
+                ),
+                q.ArtifactRevisionPatch(
+                    pointer="/actors/0/name",
+                    replacement_value_json=json.dumps("Changed role"),
+                ),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="outside admitted"):
+        apply_quality_revision_candidate(
+            payload=payload,
+            request=request,
+            candidate=changed_role,
+            identity_kinds=WorkshopFoundationService._artifact_identity_kinds,
+        )

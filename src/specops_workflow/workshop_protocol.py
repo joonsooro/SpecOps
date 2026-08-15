@@ -33,6 +33,7 @@ from specops_contracts.canonical import (
 )
 
 from .persistence import (
+    EVIDENCE_ASSESSMENT_TABLES,
     WORKSHOP_PROTOCOL_TABLES as V4_WORKSHOP_PROTOCOL_TABLES,
     V0_RUNTIME_TABLES,
     audit_events,
@@ -4062,6 +4063,43 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ) from exc
         next_record = dict(record)
         next_record["record_revision"] = record["record_revision"] + 1
+        payload = json.loads(record["payload_json"])
+        evidence_refs = {
+            item["id"] for item in payload.get("evidence_catalog", [])
+        }
+        artifact_evidence_pairs: dict[str, dict[str, Any]] = {}
+        if evidence_refs:
+            assessment_runs = EVIDENCE_ASSESSMENT_TABLES[
+                "workshop_artifact_evidence_assessment_runs"
+            ]
+            assessments = EVIDENCE_ASSESSMENT_TABLES[
+                "workshop_artifact_evidence_assessments"
+            ]
+            rows = connection.execute(
+                select(assessments.c.evidence_ref, assessments.c.pair_json)
+                .join(
+                    assessment_runs,
+                    assessment_runs.c.request_hash == assessments.c.request_hash,
+                )
+                .where(
+                    assessment_runs.c.case_id == record["case_id"],
+                    assessment_runs.c.artifact_id == record["artifact_id"],
+                    assessment_runs.c.artifact_version == record["artifact_version"],
+                    assessment_runs.c.resulting_record_revision
+                    <= record["record_revision"],
+                    assessment_runs.c.resulting_payload_hash == record["payload_hash"],
+                    assessments.c.evidence_ref.in_(evidence_refs),
+                    assessments.c.disposition == "CANONICAL",
+                )
+            ).mappings().all()
+            for row in rows:
+                if row["evidence_ref"] in artifact_evidence_pairs:
+                    raise FoundationProtocolError(
+                        c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED
+                    )
+                artifact_evidence_pairs[row["evidence_ref"]] = json.loads(
+                    row["pair_json"]
+                )
         governance = json.loads(record["governance_json"])
         governance = self.governance_with_projection_pass(
             record=next_record,
@@ -4075,7 +4113,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             provisional = build_review_view(
                 artifact_type=command.subject.artifact_type,
                 record=next_record,
-                payload=json.loads(record["payload_json"]),
+                payload=payload,
                 governance=governance,
                 confirmed_from=(
                     None
@@ -4086,6 +4124,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 view_mode=command.view_mode,
                 case_revision=prior_revision + 1,
                 source_set=source_set,
+                artifact_evidence_pairs=artifact_evidence_pairs,
                 snapshot=self.semantic_snapshot(command.case_id),
                 now=generated_at,
             )
@@ -4101,7 +4140,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             view = build_review_view(
                 artifact_type=command.subject.artifact_type,
                 record=next_record,
-                payload=json.loads(record["payload_json"]),
+                payload=payload,
                 governance=governance,
                 confirmed_from=(
                     None
@@ -4112,6 +4151,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 view_mode=command.view_mode,
                 case_revision=prior_revision + 1,
                 source_set=source_set,
+                artifact_evidence_pairs=artifact_evidence_pairs,
                 snapshot=self.semantic_snapshot(command.case_id),
                 now=generated_at,
             )

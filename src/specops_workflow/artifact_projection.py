@@ -196,7 +196,12 @@ def _pointer(group: str, index: int) -> str:
     return f"/payload/{group}/{index}"
 
 
-def _evidence_index(payload, snapshot, source_set: c.SourceSetBinding):
+def _evidence_index(
+    payload,
+    snapshot,
+    source_set: c.SourceSetBinding,
+    artifact_evidence_pairs: dict[str, dict[str, Any]],
+):
     by_id = {str(item.evidence_id): item for item in snapshot.evidence}
     source_by_id = {
         str(item.source.source_id): item.source for item in source_set.ordered_sources
@@ -204,6 +209,9 @@ def _evidence_index(payload, snapshot, source_set: c.SourceSetBinding):
     finding_by_evidence: dict[str, list] = {}
     for item in snapshot.evidence_findings:
         finding_by_evidence.setdefault(str(item.evidence_id), []).append(item)
+    payload_findings_by_evidence: dict[str, list[dict[str, Any]]] = {}
+    for item in payload.get("semantic_evidence_findings", []):
+        payload_findings_by_evidence.setdefault(item["evidence_ref"], []).append(item)
     result = []
     for item in payload["evidence_catalog"]:
         admitted = by_id.get(item["id"])
@@ -217,29 +225,73 @@ def _evidence_index(payload, snapshot, source_set: c.SourceSetBinding):
                 ),
                 None,
             )
+        artifact_pair = artifact_evidence_pairs.get(item["id"])
         source = source_by_id.get(item["source_id"])
-        if admitted is None or source is None:
+        if source is None or (admitted is None and artifact_pair is None):
             raise ValueError("artifact evidence does not resolve to Foundation evidence")
-        locator = admitted.locator
-        if isinstance(locator, c.SourceLineLocator):
+        if artifact_pair is not None:
+            if (
+                artifact_pair["evidence_ref"] != item["id"]
+                or artifact_pair["source_id"] != item["source_id"]
+                or artifact_pair["source_hash"] != item["source_hash"]
+                or artifact_pair["excerpt_hash"] != item["excerpt_hash"]
+                or artifact_pair["claim_ref"] not in item["claim_refs"]
+            ):
+                raise ValueError("artifact evidence assessment binding changed")
             focus = {
-                "kind": "source_lines",
-                "start_line": locator.start_line,
-                "end_line": locator.end_line,
+                "kind": "quote_search",
+                "start_line": None,
+                "end_line": None,
                 "json_pointer": None,
                 "anchor": None,
-                "quote": None,
+                "quote": artifact_pair["exact_excerpt"],
             }
-            label = f"Lines {locator.start_line}-{locator.end_line}"
-        elif isinstance(locator, c.JsonPointerLocator):
-            focus = {"kind": "json_pointer", "start_line": None, "end_line": None, "json_pointer": locator.pointer, "anchor": None, "quote": None}
-            label = locator.pointer
-        elif isinstance(locator, c.DocumentAnchorLocator):
-            focus = {"kind": "document_anchor", "start_line": None, "end_line": None, "json_pointer": None, "anchor": locator.anchor, "quote": None}
-            label = locator.anchor
+            label = artifact_pair["locator"]
         else:
-            focus = {"kind": "quote_search", "start_line": None, "end_line": None, "json_pointer": None, "anchor": None, "quote": locator.exact_quote}
-            label = "Exact quote"
+            locator = admitted.locator
+            if isinstance(locator, c.SourceLineLocator):
+                focus = {
+                    "kind": "source_lines",
+                    "start_line": locator.start_line,
+                    "end_line": locator.end_line,
+                    "json_pointer": None,
+                    "anchor": None,
+                    "quote": None,
+                }
+                label = f"Lines {locator.start_line}-{locator.end_line}"
+            elif isinstance(locator, c.JsonPointerLocator):
+                focus = {"kind": "json_pointer", "start_line": None, "end_line": None, "json_pointer": locator.pointer, "anchor": None, "quote": None}
+                label = locator.pointer
+            elif isinstance(locator, c.DocumentAnchorLocator):
+                focus = {"kind": "document_anchor", "start_line": None, "end_line": None, "json_pointer": None, "anchor": locator.anchor, "quote": None}
+                label = locator.anchor
+            else:
+                focus = {"kind": "quote_search", "start_line": None, "end_line": None, "json_pointer": None, "anchor": None, "quote": locator.exact_quote}
+                label = "Exact quote"
+        payload_findings = payload_findings_by_evidence.get(item["id"], [])
+        semantic_assessments = (
+            [
+                {
+                    "finding_id": finding["finding_id"],
+                    "finding_version": finding["finding_version"],
+                    "claim_ref": finding["claim_ref"],
+                    "assessment": finding["assessment"],
+                    "confidence": finding["confidence"],
+                }
+                for finding in payload_findings
+            ]
+            if payload_findings
+            else [
+                {
+                    "finding_id": str(finding.finding_id),
+                    "finding_version": finding.finding_version,
+                    "claim_ref": str(finding.claim_id),
+                    "assessment": finding.assessment.value,
+                    "confidence": finding.confidence,
+                }
+                for finding in finding_by_evidence.get(item["id"], [])
+            ]
+        )
         result.append(
             {
                 "evidence_id": item["id"],
@@ -249,16 +301,7 @@ def _evidence_index(payload, snapshot, source_set: c.SourceSetBinding):
                 "source_document_hash": item["source_hash"],
                 "locator_label": label,
                 "claim_refs": item["claim_refs"],
-                "semantic_assessments": [
-                    {
-                        "finding_id": str(finding.finding_id),
-                        "finding_version": finding.finding_version,
-                        "claim_ref": str(finding.claim_id),
-                        "assessment": finding.assessment.value,
-                        "confidence": finding.confidence,
-                    }
-                    for finding in finding_by_evidence.get(item["id"], [])
-                ],
+                "semantic_assessments": semantic_assessments,
                 "focus_target": focus,
             }
         )
@@ -276,12 +319,15 @@ def build_review_view(
     view_mode: str,
     case_revision: int,
     source_set: c.SourceSetBinding,
+    artifact_evidence_pairs: dict[str, dict[str, Any]] | None = None,
     snapshot: c.FoundationSemanticSnapshot,
     now: datetime,
 ) -> dict[str, Any]:
     mode = view_mode.lower()
     instant = now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    evidence = _evidence_index(payload, snapshot, source_set)
+    evidence = _evidence_index(
+        payload, snapshot, source_set, artifact_evidence_pairs or {}
+    )
     integrity = {
         "profile_id": "artifact-review-view",
         "profile_version": "3.0.0",

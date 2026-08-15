@@ -146,7 +146,7 @@ class ArtifactAuditSubject(StrictModel):
     artifact_version: int = Field(strict=True, ge=1)
     record_revision: int = Field(strict=True, ge=1)
     payload_hash: Sha256
-    canonical_payload_json: NonEmpty
+    canonical_payload_json: CompleteText
 
 
 class AuditSourceDocument(StrictModel):

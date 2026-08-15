@@ -126,6 +126,20 @@ def _bundle() -> q.ArtifactQualityAuditBundle:
     )
 
 
+def test_artifact_audit_subject_accepts_a_complete_payload_over_generic_text_limit():
+    subject = q.ArtifactAuditSubject(
+        artifact_type=q.ArtifactType.SPEC_PACKAGE,
+        artifact_id=UUID("50000000-0000-4000-8000-000000000005"),
+        artifact_key="SPEC-QUALITY",
+        artifact_version=1,
+        record_revision=1,
+        payload_hash=HASH,
+        canonical_payload_json="{" + '"payload":"' + "x" * 105_000 + '"}',
+    )
+
+    assert len(subject.canonical_payload_json) > 100_000
+
+
 class _Endpoint:
     def __init__(self, result):
         self.result = result

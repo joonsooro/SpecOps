@@ -3151,6 +3151,62 @@ def test_last_browser_client_gets_exact_fifteen_minute_resume_grace(tmp_path):
     asyncio.run(scenario())
 
 
+def test_expired_grace_can_invalidate_context_from_older_contract_version(tmp_path):
+    class MutableClock:
+        value = NOW
+
+        def now(self):
+            return self.value
+
+        def advance(self, seconds: int):
+            self.value += timedelta(seconds=seconds)
+
+    async def scenario():
+        clock = MutableClock()
+        app = create_app(
+            settings=configured(tmp_path),
+            clock=clock,
+            source_catalog=SourceCatalog(ROOT),
+            live_provider=object(),
+            analyzer_adapter=CancellablePreparationAdapter("never"),
+        )
+        orchestrator = app.state.workshop_protocol_orchestrator
+        foundation = app.state.workshop_protocol_foundation
+        await orchestrator.prepare_workshop()
+        case_id = app.state.bootstrap.case_id
+        context_id = foundation.active_analyzer_context_id(case_id)
+        assert context_id is not None
+
+        contexts = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        with foundation.engine.begin() as connection:
+            stored = json.loads(
+                connection.execute(
+                    select(contexts.c.binding_json).where(
+                        contexts.c.context_id == str(context_id)
+                    )
+                ).scalar_one()
+            )
+            stored["analyzer_contract"]["semantic_quality_contract_version"] = "2.1.0"
+            connection.execute(
+                update(contexts)
+                .where(contexts.c.context_id == str(context_id))
+                .values(binding_json=json.dumps(stored, sort_keys=True))
+            )
+
+        with pytest.raises(ValueError):
+            foundation.active_analyzer_context(case_id)
+        assert foundation.active_analyzer_context_id(case_id) == context_id
+        assert await orchestrator.note_last_client_disconnected() == "RESTART_GRACE"
+        clock.advance(900)
+        assert await orchestrator.expire_restart_grace() is True
+        assert foundation.active_analyzer_context_id(case_id) is None
+
+        completed = await orchestrator.cleanup_preparation()
+        assert completed["cleanup_state"] == "COMPLETED"
+
+    asyncio.run(scenario())
+
+
 def test_presence_websocket_starts_grace_only_after_last_browser_page_closes(tmp_path):
     app = create_app(
         settings=configured(tmp_path),

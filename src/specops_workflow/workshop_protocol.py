@@ -402,6 +402,25 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ).scalar_one_or_none()
         return None if row is None else c.AnalyzerContextBinding.model_validate_json(row)
 
+    def active_analyzer_context_id(self, case_id: UUID) -> UUID | None:
+        """Return only the canonical identity of an active historical context.
+
+        Cleanup must remain possible after an executable contract upgrade makes an
+        older binding body intentionally fail current model validation.  This
+        accessor reads the server-owned identity column and does not admit or reuse
+        any stale semantic content.
+        """
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(table.c.context_id).where(
+                    table.c.case_id == str(case_id),
+                    table.c.status == c.ContextStatus.ACTIVE.value,
+                )
+            ).scalar_one_or_none()
+        return None if value is None else UUID(value)
+
     def active_analyzer_provider_conversation_id(self, case_id: UUID) -> str | None:
         """Return only the stable provider identity from a historical active context."""
 

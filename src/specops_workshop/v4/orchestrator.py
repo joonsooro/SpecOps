@@ -761,16 +761,16 @@ class V4ProductionOrchestrator:
                 for job in self.foundation.analyzer_jobs(self.case_id)
             ):
                 return False
-            context = self.foundation.active_analyzer_context(self.case_id)
-            if context is not None:
+            context_id = self.foundation.active_analyzer_context_id(self.case_id)
+            if context_id is not None:
                 values = self._command_base(
                     "INVALIDATE_ANALYZER_CONTEXT",
-                    f"restart-grace-{context.context_id}",
+                    f"restart-grace-{context_id}",
                     expected_revision=self.foundation.case_revision(self.case_id),
                 )
                 values.update(
                     command_type="INVALIDATE_ANALYZER_CONTEXT",
-                    context_id=context.context_id,
+                    context_id=context_id,
                     reason_code="WORKSHOP_CLOSED",
                 )
                 self.foundation.execute(c.InvalidateAnalyzerContextCommand(**values))
@@ -810,7 +810,7 @@ class V4ProductionOrchestrator:
                 and self.now() < available_at
             ):
                 return projection
-            if self.foundation.active_analyzer_context(self.case_id) is not None:
+            if self.foundation.active_analyzer_context_id(self.case_id) is not None:
                 raise RuntimeError("active Analyzer context cannot be preparation-cleaned")
             if not hasattr(self.adapter, "release_resource_ids"):
                 raise RuntimeError("provider adapter cannot resume preparation cleanup")

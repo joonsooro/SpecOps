@@ -1873,27 +1873,36 @@ def test_rule_derived_blueprint_projects_cross_domain_authority_deterministicall
     assert counts["ACCEPTANCE_CHECK"] == 14
 
 
-def test_provider_evidence_refs_are_cleared_before_server_records_are_projected():
+def test_foundation_initializes_absent_provider_evidence_fields_before_projection():
     provider_payload = {
         "requirements": [
-            {
-                "source_evidence_refs": [
-                    "10000000-0000-4000-8000-000000000010"
-                ]
-            }
+            {}
         ],
         "behaviour_contract": {
-            "always": [
-                {
-                    "evidence_refs": [
-                        "10000000-0000-4000-8000-000000000011"
-                    ]
-                }
-            ]
+            "always": [{}],
+            "ask_first": [],
+            "never": [],
         },
+        "glossary": [],
+        "outcomes": [],
+        "scope": {"in_scope": [], "non_goals": [], "boundaries": []},
+        "data_rules": [],
+        "quality_attributes": [],
+        "constraints": [],
+        "dependencies": [],
+        "risks": [],
     }
 
-    WorkshopFoundationService._clear_provider_owned_evidence_refs(provider_payload)
+    WorkshopFoundationService._initialize_foundation_owned_evidence_refs(provider_payload)
 
     assert provider_payload["requirements"][0]["source_evidence_refs"] == []
     assert provider_payload["behaviour_contract"]["always"][0]["evidence_refs"] == []
+
+    provider_payload["requirements"][0]["source_evidence_refs"] = [
+        "10000000-0000-4000-8000-000000000010"
+    ]
+    with pytest.raises(FoundationProtocolError) as exc:
+        WorkshopFoundationService._initialize_foundation_owned_evidence_refs(
+            provider_payload
+        )
+    assert exc.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED

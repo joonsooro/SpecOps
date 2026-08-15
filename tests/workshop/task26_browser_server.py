@@ -61,18 +61,20 @@ def _provider_owned_spec_payload(payload: dict, identity_plan) -> dict:
     payload.pop("evidence_catalog")
     payload.pop("semantic_evidence_findings")
 
-    def clear_server_owned_refs(value):
+    def project_provider_owned_refs(value):
         if isinstance(value, dict):
-            for key, item in value.items():
-                if key in {"decision_refs", "source_evidence_refs", "evidence_refs"}:
+            for key, item in tuple(value.items()):
+                if key in {"source_evidence_refs", "evidence_refs"}:
+                    value.pop(key)
+                elif key == "decision_refs":
                     value[key] = []
                 else:
-                    clear_server_owned_refs(item)
+                    project_provider_owned_refs(item)
         elif isinstance(value, list):
             for item in value:
-                clear_server_owned_refs(item)
+                project_provider_owned_refs(item)
 
-    clear_server_owned_refs(payload)
+    project_provider_owned_refs(payload)
     return payload
 
 

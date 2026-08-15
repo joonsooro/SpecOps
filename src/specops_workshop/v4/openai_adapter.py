@@ -1351,6 +1351,13 @@ class StoredConversationOpenAIAdapter:
         ):
             projected["properties"].pop(field)
             projected["required"].remove(field)
+        for definition in projected.get("$defs", {}).values():
+            properties = definition.get("properties", {})
+            required = definition.get("required", [])
+            for field in ("evidence_refs", "source_evidence_refs"):
+                if field in properties:
+                    properties.pop(field)
+                    required.remove(field)
         return projected
 
     @staticmethod
@@ -1788,8 +1795,8 @@ class StoredConversationOpenAIAdapter:
                 "semantic_evidence_findings. Instead, propose exact claim/evidence pairs only in "
                 "evidence_support_proposals; use ANALYZER-owned claim pointers plus Foundation-owned "
                 "EVIDENCE and SEMANTIC_EVIDENCE_FINDING identities, and copy an exact source excerpt. "
-                "Keep every evidence_refs and source_evidence_refs array in the provider-owned payload "
-                "empty; Foundation alone materializes evidence identities after exact-quote validation. "
+                "Do not emit evidence_refs or source_evidence_refs; those fields are absent from the "
+                "provider-owned schema and Foundation constructs them only after exact-quote validation. "
                 "Foundation computes every hash before a separate SUPPORTS assessment. Use "
                 "foundation_owned_record_refs only when other "
                 "artifact items need to reference those canonical identities. Construct the draft "

@@ -32,6 +32,7 @@ def _source(text: str) -> q.AuditSourceDocument:
 
 def test_foundation_computes_exact_claim_and_evidence_hashes_before_assessment():
     payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    payload["requirements"][0]["source_evidence_refs"] = []
     claim = payload["requirements"][0]["behaviour"]
     claim_ref = UUID(payload["requirements"][0]["id"])
     source = _source("The export includes every accepted snapshot row.\n")
@@ -50,6 +51,9 @@ def test_foundation_computes_exact_claim_and_evidence_hashes_before_assessment()
     )
     assert accepted == (proposal.evidence_ref,)
     assert dropped == ()
+    assert payload["requirements"][0]["source_evidence_refs"] == [
+        str(proposal.evidence_ref)
+    ]
     request = prepare_evidence_support_request(
         evaluator_run_id=uuid4(),
         artifact_id=uuid4(),
@@ -100,6 +104,7 @@ def test_foundation_computes_exact_claim_and_evidence_hashes_before_assessment()
 
 def test_evidence_support_fails_closed_on_non_support_or_changed_claim():
     payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    payload["requirements"][0]["source_evidence_refs"] = []
     source = _source("Exact source statement.\n")
     proposal = EvidenceSupportProposal(
         claim_ref=UUID(payload["requirements"][0]["id"]),
@@ -172,7 +177,7 @@ def test_false_exact_quote_is_pruned_without_changing_claim_or_decision_binding(
     source = _source("A different exact source sentence.\n")
     evidence_ref = uuid4()
     finding_ref = uuid4()
-    claim["source_evidence_refs"] = [str(evidence_ref)]
+    claim["source_evidence_refs"] = []
     decision_refs = list(claim["decision_refs"])
 
     revised, accepted, dropped = project_evidence_catalog(
@@ -197,3 +202,27 @@ def test_false_exact_quote_is_pruned_without_changing_claim_or_decision_binding(
     assert revised["requirements"][0]["decision_refs"] == decision_refs
     assert revised["requirements"][0]["source_evidence_refs"] == []
     assert revised["evidence_catalog"] == []
+
+
+def test_untrusted_embedded_evidence_link_is_rejected_before_quote_projection():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    claim = payload["requirements"][0]
+    source = _source("Exact source statement.\n")
+    claim["source_evidence_refs"] = [str(uuid4())]
+
+    with pytest.raises(ValueError, match="not Foundation-initialized"):
+        project_evidence_catalog(
+            payload=payload,
+            sources=(source,),
+            proposals=(
+                EvidenceSupportProposal(
+                    claim_ref=UUID(claim["id"]),
+                    claim_pointer="/requirements/0/behaviour",
+                    source_id=source.source_id,
+                    locator="line:1",
+                    exact_excerpt="Exact source statement.",
+                    evidence_ref=uuid4(),
+                    finding_ref=uuid4(),
+                ),
+            ),
+        )

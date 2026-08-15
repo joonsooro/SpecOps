@@ -50,6 +50,7 @@ def project_evidence_catalog(
     source_by_id = {item.source_id: item for item in sources}
     accepted: list[UUID] = []
     dropped: list[UUID] = []
+    initialized_claims: set[tuple[str, str]] = set()
     for proposal in proposals:
         exact_claim = resolve_payload_pointer(revised, proposal.claim_pointer)
         if not isinstance(exact_claim, str) or not exact_claim.strip():
@@ -58,6 +59,20 @@ def project_evidence_catalog(
         parent = resolve_payload_pointer(revised, parent_pointer)
         if not isinstance(parent, dict) or parent.get("id") != str(proposal.claim_ref):
             raise ValueError("claim ref does not own the exact claim pointer")
+        evidence_field = (
+            "source_evidence_refs"
+            if "source_evidence_refs" in parent
+            else "evidence_refs"
+            if "evidence_refs" in parent
+            else None
+        )
+        if evidence_field is None or not isinstance(parent[evidence_field], list):
+            raise ValueError("evidence-support claim owner lacks a canonical evidence field")
+        claim_key = (str(proposal.claim_ref), parent_pointer)
+        if claim_key not in initialized_claims:
+            if parent[evidence_field]:
+                raise ValueError("evidence-support claim field was not Foundation-initialized")
+            initialized_claims.add(claim_key)
         source = source_by_id.get(proposal.source_id)
         if source is None:
             raise ValueError("evidence-support proposal references an unknown source")
@@ -76,24 +91,8 @@ def project_evidence_catalog(
                 "claim_refs": [str(proposal.claim_ref)],
             }
         )
+        parent[evidence_field].append(str(proposal.evidence_ref))
         accepted.append(proposal.evidence_ref)
-
-    dropped_values = {str(item) for item in dropped}
-
-    def remove_false_evidence_refs(value: object) -> None:
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key in {"evidence_refs", "source_evidence_refs"} and isinstance(
-                    child, list
-                ):
-                    value[key] = [item for item in child if item not in dropped_values]
-                else:
-                    remove_false_evidence_refs(child)
-        elif isinstance(value, list):
-            for child in value:
-                remove_false_evidence_refs(child)
-
-    remove_false_evidence_refs(revised)
     return revised, tuple(accepted), tuple(dropped)
 
 

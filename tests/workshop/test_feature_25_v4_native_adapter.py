@@ -630,12 +630,11 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "decisions" not in payload_schema["properties"]
     assert "evidence_catalog" not in payload_schema["properties"]
     assert "semantic_evidence_findings" not in payload_schema["properties"]
-    assert "maxItems" not in payload_schema["$defs"]["requirement"][
-        "properties"
-    ]["source_evidence_refs"]
-    assert "maxItems" not in payload_schema["$defs"]["behaviourRule"][
-        "properties"
-    ]["evidence_refs"]
+    for definition in payload_schema["$defs"].values():
+        assert "evidence_refs" not in definition.get("properties", {})
+        assert "source_evidence_refs" not in definition.get("properties", {})
+        assert "evidence_refs" not in definition.get("required", [])
+        assert "source_evidence_refs" not in definition.get("required", [])
     assert json.loads(content[1]["text"])["request_type"] == "SPEC_PACKAGE_SYNTHESIS"
     provider_request = json.loads(content[1]["text"])
     assert "canonical_semantic_state_json" not in provider_request
@@ -678,6 +677,9 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert output_schema["$defs"][
         "SpecPackageSynthesisPayload_semanticEvidenceFinding"
     ]["properties"]["analyzer_contract_version"]["type"] == "string"
+    for definition in output_schema["$defs"].values():
+        assert "evidence_refs" not in definition.get("properties", {})
+        assert "source_evidence_refs" not in definition.get("properties", {})
     due_date = output_schema["$defs"][
         "SpecPackageSynthesisPayload_dependency"
     ]["properties"]["due_date"]
@@ -697,7 +699,7 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "quality_rule_manifest as the exact construction checklist" in instructions
     assert "Do not emit actors or decisions" in instructions
     assert "Foundation deterministically projects" in instructions
-    assert "Keep every evidence_refs and source_evidence_refs array" in instructions
+    assert "Do not emit evidence_refs or source_evidence_refs" in instructions
     assert len(json.loads(content[1]["text"])["quality_rule_manifest"]) == 26
     assert "create no other payload-owned identity" in instructions
 

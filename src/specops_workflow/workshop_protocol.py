@@ -3566,7 +3566,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             raise FoundationProtocolError(
                 c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
             )
-        self._clear_provider_owned_evidence_refs(payload)
+        self._initialize_foundation_owned_evidence_refs(payload)
         payload.update(
             self._server_owned_spec_records(
                 confirmed_decision_bindings,
@@ -3584,20 +3584,42 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
 
     @staticmethod
-    def _clear_provider_owned_evidence_refs(value: object) -> None:
-        """Evidence identities are Foundation-owned and enter via exact proposals."""
+    def _initialize_foundation_owned_evidence_refs(payload: dict[str, Any]) -> None:
+        """Add empty canonical evidence fields at exact provider-owned entity paths."""
 
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if key in {"evidence_refs", "source_evidence_refs"} and isinstance(
-                    child, list
-                ):
-                    value[key] = []
-                else:
-                    WorkshopFoundationService._clear_provider_owned_evidence_refs(child)
-        elif isinstance(value, list):
-            for child in value:
-                WorkshopFoundationService._clear_provider_owned_evidence_refs(child)
+        collection_fields = {
+            ("glossary",): "evidence_refs",
+            ("outcomes",): "evidence_refs",
+            ("scope", "in_scope"): "evidence_refs",
+            ("scope", "non_goals"): "evidence_refs",
+            ("scope", "boundaries"): "evidence_refs",
+            ("behaviour_contract", "always"): "evidence_refs",
+            ("behaviour_contract", "ask_first"): "evidence_refs",
+            ("behaviour_contract", "never"): "evidence_refs",
+            ("requirements",): "source_evidence_refs",
+            ("data_rules",): "evidence_refs",
+            ("quality_attributes",): "evidence_refs",
+            ("constraints",): "evidence_refs",
+            ("dependencies",): "evidence_refs",
+            ("risks",): "evidence_refs",
+        }
+
+        for path, field in collection_fields.items():
+            value: object = payload
+            for part in path:
+                if not isinstance(value, dict) or part not in value:
+                    raise FoundationProtocolError(
+                        c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+                    )
+                value = value[part]
+            if not isinstance(value, list) or any(
+                not isinstance(item, dict) or field in item for item in value
+            ):
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+                )
+            for item in value:
+                item[field] = []
 
     @staticmethod
     def _server_owned_spec_records(

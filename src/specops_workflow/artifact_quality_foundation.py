@@ -30,6 +30,7 @@ from .artifact_evidence_support import (
 from .artifact_quality_revision import (
     apply_quality_revision_candidate,
     prepare_quality_revision_request,
+    quality_revision_pointer_closure,
 )
 from .persistence import (
     ARTIFACT_QUALITY_TABLES,
@@ -363,7 +364,7 @@ class ArtifactQualityFoundationMixin:
             for item in receipt.combined_rule_results
             if item.result is q.ComponentResult.FAIL
         )
-        pointers = tuple(
+        finding_pointers = tuple(
             sorted(
                 {
                     pointer
@@ -372,6 +373,12 @@ class ArtifactQualityFoundationMixin:
                     if pointer
                 }
             )
+        )
+        payload = json.loads(record["payload_json"])
+        pointers = quality_revision_pointer_closure(
+            payload=payload,
+            finding_pointers=finding_pointers,
+            allocated_identity_kinds=allocated_identity_kinds,
         )
         if not finding_ids or not failed_rule_ids or not pointers:
             raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
@@ -386,7 +393,7 @@ class ArtifactQualityFoundationMixin:
             artifact_version=record["artifact_version"],
             record_revision=record["record_revision"],
             based_on_case_revision=based_on_case_revision,
-            payload=json.loads(record["payload_json"]),
+            payload=payload,
             audit_id=receipt.audit_id,
             finding_ids=finding_ids,
             failed_rule_ids=failed_rule_ids,
@@ -432,7 +439,7 @@ class ArtifactQualityFoundationMixin:
                 for item in prior_receipt.combined_rule_results
                 if item.result is q.ComponentResult.FAIL
             )
-            expected_pointers = tuple(
+            finding_pointers = tuple(
                 sorted(
                     {
                         pointer
@@ -441,6 +448,19 @@ class ArtifactQualityFoundationMixin:
                         if pointer
                     }
                 )
+            )
+            try:
+                base_payload = json.loads(request.canonical_payload_json)
+            except json.JSONDecodeError as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+                ) from exc
+            expected_pointers = quality_revision_pointer_closure(
+                payload=base_payload,
+                finding_pointers=finding_pointers,
+                allocated_identity_kinds=tuple(
+                    item.entity_kind for item in request.allocated_identities
+                ),
             )
             if (
                 request.finding_ids != expected_findings
@@ -462,7 +482,6 @@ class ArtifactQualityFoundationMixin:
             ) != expected_allocated:
                 raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
             try:
-                base_payload = json.loads(request.canonical_payload_json)
                 revised = apply_quality_revision_candidate(
                     payload=base_payload,
                     request=request,

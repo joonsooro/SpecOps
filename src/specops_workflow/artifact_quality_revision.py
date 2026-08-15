@@ -4,12 +4,54 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Callable
+from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from specops_contracts import artifact_quality_v1 as q
 from specops_contracts.canonical import domain_hash, payload_hash
 from specops_contracts.canonical import canonical_bytes
+
+
+def quality_revision_pointer_closure(
+    *,
+    payload: dict,
+    finding_pointers: tuple[str, ...],
+    allocated_identity_kinds: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Add only the non-authority reference closure needed for an actor split."""
+
+    result = set(finding_pointers)
+    if "ACTOR" not in allocated_identity_kinds:
+        return tuple(sorted(result))
+    actor_ids: set[str] = set()
+    actors = payload.get("actors", [])
+    for pointer in finding_pointers:
+        tokens = _pointer_tokens(pointer)
+        if len(tokens) < 2 or tokens[0] != "actors":
+            continue
+        try:
+            actor = actors[int(tokens[1])]
+        except (IndexError, TypeError, ValueError):
+            raise ValueError("quality revision actor pointer does not resolve") from None
+        actor_id = actor.get("id") if isinstance(actor, dict) else None
+        if not isinstance(actor_id, str):
+            raise ValueError("quality revision actor pointer has no identity")
+        actor_ids.add(actor_id)
+    if not actor_ids:
+        return tuple(sorted(result))
+
+    result.add("/actors")
+    for key, value in payload.items():
+        if key in {"actors", "decisions"}:
+            continue
+        escaped_key = _escape_pointer_token(key)
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                if _contains_exact_value(item, actor_ids):
+                    result.add(f"/{escaped_key}/{index}")
+        elif _contains_exact_value(value, actor_ids):
+            result.add(f"/{escaped_key}")
+    return tuple(sorted(result))
 
 
 def prepare_quality_revision_request(
@@ -98,13 +140,39 @@ def apply_quality_revision_candidate(
     for patch in candidate.patches:
         _replace_pointer(revised, patch.pointer, json.loads(patch.replacement_value_json))
     immutable_projection = {
-        "actors": revised.get("actors", []),
-        "decisions": revised.get("decisions", []),
+        "actors": payload.get("actors", []),
+        "decisions": payload.get("decisions", []),
     }
     if domain_hash(
         "SPECOPS:ARTIFACT_IMMUTABLE_PROJECTION:v1", immutable_projection
     ) != request.immutable_projection_hash:
-        raise ValueError("quality revision changed Foundation-owned projection")
+        raise ValueError("quality revision base Foundation projection changed")
+
+    original_actors = payload.get("actors", [])
+    revised_actors = revised.get("actors", [])
+    if revised.get("decisions", []) != payload.get("decisions", []):
+        raise ValueError("quality revision changed Foundation-owned decisions")
+    if (
+        not isinstance(original_actors, list)
+        or not isinstance(revised_actors, list)
+        or revised_actors[: len(original_actors)] != original_actors
+    ):
+        raise ValueError("quality revision changed an existing Foundation-owned actor")
+    allocated_actor_ids = {
+        str(item.foundation_id)
+        for item in request.allocated_identities
+        if item.entity_kind == "ACTOR"
+    }
+    appended_actor_ids = {
+        item.get("id")
+        for item in revised_actors[len(original_actors) :]
+        if isinstance(item, dict)
+    }
+    if appended_actor_ids != allocated_actor_ids or any(
+        not isinstance(item, dict)
+        for item in revised_actors[len(original_actors) :]
+    ):
+        raise ValueError("quality revision actor addition differs from Foundation allocation")
 
     original = identity_kinds(payload)
     updated = identity_kinds(revised)
@@ -148,7 +216,7 @@ def require_monotonic_quality_improvement(
 def _replace_pointer(document: dict, pointer: str, replacement) -> None:
     if not pointer or not pointer.startswith("/"):
         raise ValueError("quality revision cannot replace the complete artifact root")
-    tokens = [part.replace("~1", "/").replace("~0", "~") for part in pointer[1:].split("/")]
+    tokens = _pointer_tokens(pointer)
     target = document
     for token in tokens[:-1]:
         target = target[int(token)] if isinstance(target, list) else target[token]
@@ -159,3 +227,24 @@ def _replace_pointer(document: dict, pointer: str, replacement) -> None:
         if final not in target:
             raise ValueError("quality revision pointer does not resolve")
         target[final] = replacement
+
+
+def _pointer_tokens(pointer: str) -> list[str]:
+    if not pointer or not pointer.startswith("/"):
+        raise ValueError("quality revision pointer must be a non-root JSON pointer")
+    return [
+        part.replace("~1", "/").replace("~0", "~")
+        for part in pointer[1:].split("/")
+    ]
+
+
+def _escape_pointer_token(value: str) -> str:
+    return value.replace("~", "~0").replace("/", "~1")
+
+
+def _contains_exact_value(value: Any, expected: set[str]) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_exact_value(item, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_exact_value(item, expected) for item in value)
+    return isinstance(value, str) and value in expected

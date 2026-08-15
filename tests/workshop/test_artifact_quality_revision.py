@@ -9,6 +9,7 @@ from specops_contracts import artifact_quality_v1 as q
 from specops_workflow.artifact_quality_revision import (
     apply_quality_revision_candidate,
     prepare_quality_revision_request,
+    quality_revision_pointer_closure,
     require_monotonic_quality_improvement,
 )
 from specops_workflow.workshop_protocol import WorkshopFoundationService
@@ -119,4 +120,97 @@ def test_bounded_revision_rejects_unscoped_patch_and_requires_monotonic_audit():
             prior_failed_rule_ids=("SPEC-Q-007",),
             revised_finding_ids=(prior_finding, uuid4()),
             revised_failed_rule_ids=("SPEC-Q-007",),
+        )
+
+
+def test_actor_split_scope_is_reference_closed_without_decision_authority():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    actor_id = payload["actors"][0]["id"]
+    payload["requirements"][0]["actor_refs"] = [actor_id]
+    payload["product_thesis"]["primary_customer"] = actor_id
+    payload["decisions"] = [{"authority": {"actor_ref": actor_id}}]
+
+    pointers = quality_revision_pointer_closure(
+        payload=payload,
+        finding_pointers=("/actors/0", "/requirements/0"),
+        allocated_identity_kinds=("ACTOR",),
+    )
+
+    assert pointers == (
+        "/actors",
+        "/actors/0",
+        "/product_thesis",
+        "/requirements/0",
+    )
+    assert not any(pointer.startswith("/decisions") for pointer in pointers)
+
+
+def test_actor_split_allows_only_one_exact_allocated_addition_and_preserves_authority():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    request = prepare_quality_revision_request(
+        artifact_id=uuid4(),
+        artifact_version=3,
+        record_revision=2,
+        based_on_case_revision=8,
+        payload=payload,
+        audit_id=uuid4(),
+        finding_ids=(uuid4(),),
+        failed_rule_ids=("SPEC-Q-004",),
+        canonical_artifact_pointers=("/actors",),
+        allocated_identity_kinds=("ACTOR",),
+    )
+    actors = [dict(item) for item in payload["actors"]]
+    added = dict(actors[0])
+    added.update(
+        {
+            "id": str(request.allocated_identities[0].foundation_id),
+            "name": "Tenant-scoped Operations Manager",
+        }
+    )
+    actors.append(added)
+    candidate = q.ArtifactQualityRevisionCandidate(
+        protocol_version="1.0.0",
+        output_type="ARTIFACT_QUALITY_REVISION_CANDIDATE",
+        revision_request_id=request.revision_request_id,
+        revision_request_version=1,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        attempt=1,
+        patches=(
+            q.ArtifactRevisionPatch(
+                pointer="/actors",
+                replacement_value_json=json.dumps(actors),
+            ),
+        ),
+    )
+
+    revised = apply_quality_revision_candidate(
+        payload=payload,
+        request=request,
+        candidate=candidate,
+        identity_kinds=WorkshopFoundationService._artifact_identity_kinds,
+    )
+    assert revised["actors"][:-1] == payload["actors"]
+    assert revised["decisions"] == payload["decisions"]
+
+    actors[0] = {**actors[0], "name": "Changed authority"}
+    changed = candidate.model_copy(
+        update={
+            "patches": (
+                q.ArtifactRevisionPatch(
+                    pointer="/actors",
+                    replacement_value_json=json.dumps(actors),
+                ),
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="existing Foundation-owned actor"):
+        apply_quality_revision_candidate(
+            payload=payload,
+            request=request,
+            candidate=changed,
+            identity_kinds=WorkshopFoundationService._artifact_identity_kinds,
         )

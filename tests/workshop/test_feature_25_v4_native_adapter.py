@@ -774,6 +774,35 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
             )
 
 
+def test_rule_derived_blueprint_requires_generic_material_and_approval_completeness():
+    policy = WorkshopFoundationService.artifact_construction_policy(
+        "SPEC_PACKAGE",
+        confirmed_decision_count=12,
+        quality_rule_ids=tuple(f"SPEC-Q-{index:03d}" for index in range(1, 27)),
+    )
+    purposes = {
+        kind: {purpose for policy_kind, _owner, purpose in policy if policy_kind == kind}
+        for kind in {
+            "GLOSSARY_TERM",
+            "DATA_RULE",
+            "EXPERIENCE_STATE",
+            "SCENARIO",
+            "ACCEPTANCE_CHECK",
+        }
+    }
+    rendered = " ".join(
+        purpose for values in purposes.values() for purpose in values
+    ).lower()
+
+    assert "material dependent semantic" in rendered
+    assert "boundaries" in rendered
+    assert "missing or invalid behavior" in rendered
+    assert "blocked-without-approval" in rendered
+    assert "allowed-only-after-approval" in rendered
+    assert "durable approval receipt" in rendered
+    assert not {"csv", "order_date", "date range"}.intersection(rendered.split())
+
+
 def test_rule_derived_blueprint_is_executable_in_the_provider_schema():
     adapter = StoredConversationOpenAIAdapter(api_key="unused", client=SimpleNamespace())
     sources = (

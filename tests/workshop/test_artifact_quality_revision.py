@@ -249,6 +249,27 @@ def test_requirement_split_scope_closes_requirement_and_acceptance_references():
     assert not any(pointer.startswith("/decisions") for pointer in pointers)
 
 
+def test_experience_and_scenario_additions_are_pointer_and_trace_closed():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+
+    pointers = quality_revision_pointer_closure(
+        payload=payload,
+        finding_pointers=("/data_rules/0", "/experience_states"),
+        allocated_identity_kinds=(
+            "EXPERIENCE_STATE",
+            "SCENARIO",
+            "ACCEPTANCE_CHECK",
+        ),
+    )
+
+    assert "/experience_states" in pointers
+    assert "/scenarios" in pointers
+    assert "/acceptance_checks" in pointers
+    assert "/traceability" in pointers
+    assert "/package_items/0" in pointers
+    assert not any(pointer.startswith("/decisions") for pointer in pointers)
+
+
 def test_exact_found_actor_responsibility_may_change_but_actor_role_may_not():
     payload = PayloadFactory().payload("spec-package-payload.schema.json")
     payload["actors"][0]["responsibilities"] = ["Old scope wording"]

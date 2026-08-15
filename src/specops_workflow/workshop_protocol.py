@@ -1475,25 +1475,39 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 "Q026 locally bind one exact claim to supporting evidence.",
             ),
             ("ACTOR", 1, "FOUNDATION", "Q004 project canonical actor authority."),
-            ("GLOSSARY_TERM", 8, "ANALYZER", "Q005 bound one material term."),
+            (
+                "GLOSSARY_TERM",
+                8,
+                "ANALYZER",
+                "Q005 operationally define one material dependent semantic, including "
+                "meaning, representation, scope, boundaries, and missing or invalid behavior.",
+            ),
             ("OUTCOME", 2, "ANALYZER", "Define one measurable outcome."),
             ("SCOPE_ITEM", 16, "ANALYZER", "Define one atomic scope inclusion or non-goal."),
             ("SCOPE_BOUNDARY", 2, "ANALYZER", "Define one explicit scope boundary."),
             ("JOURNEY", 3, "ANALYZER", "Trace one complete actor journey."),
             ("BEHAVIOUR_RULE", 16, "ANALYZER", "Define one atomic behavior obligation."),
             ("REQUIREMENT", requirement_count, "ANALYZER", "Q007 define one atomic requirement."),
-            ("DATA_RULE", 8, "ANALYZER", "Q015 fully define one exported data element."),
+            (
+                "DATA_RULE",
+                8,
+                "ANALYZER",
+                "Q015 fully define one material data element's source, representation, "
+                "scope, temporal or numeric boundaries, null or invalid behavior, and retention.",
+            ),
             (
                 "EXPERIENCE_STATE",
                 9,
                 "ANALYZER",
-                "Q014 define one distinct lifecycle or failure state.",
+                "Q014 define one distinct lifecycle, missing-input, invalid-input, or failure "
+                "state with truthful user-visible behavior and recovery.",
             ),
             (
                 "SCENARIO",
                 12,
                 "ANALYZER",
-                "Q012-Q013 cover one success, boundary, negative, or recovery path.",
+                "Q012-Q013 cover one success, boundary, negative, recovery, or Ask First "
+                "path; an Ask First path proves blocked-without-approval and allowed-only-after-approval.",
             ),
             ("QUALITY_ATTRIBUTE", 4, "ANALYZER", "Define one measurable quality threshold."),
             ("CONSTRAINT", 4, "ANALYZER", "Define one explicit delivery constraint."),
@@ -1510,7 +1524,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 "ACCEPTANCE_CHECK",
                 requirement_count,
                 "ANALYZER",
-                "Q017 verify one independently executable obligation.",
+                "Q017 verify one independently executable obligation; approval-gated behavior "
+                "must verify the exact scope and durable approval receipt.",
             ),
         )
         return tuple(

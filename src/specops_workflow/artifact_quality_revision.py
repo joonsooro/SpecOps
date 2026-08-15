@@ -27,6 +27,8 @@ def quality_revision_pointer_closure(
         "REQUIREMENT": "requirements",
         "ACCEPTANCE_CHECK": "acceptance_checks",
         "GLOSSARY_TERM": "glossary",
+        "EXPERIENCE_STATE": "experience_states",
+        "SCENARIO": "scenarios",
     }
     anchor_ids: set[str] = set()
     requirement_anchors: list[dict[str, Any]] = []
@@ -61,8 +63,17 @@ def quality_revision_pointer_closure(
                 raise ValueError("quality revision acceptance-check refs are invalid")
             anchor_ids.update(refs)
 
-    if allocated.intersection({"REQUIREMENT", "ACCEPTANCE_CHECK"}):
+    if allocated.intersection(
+        {"REQUIREMENT", "ACCEPTANCE_CHECK", "EXPERIENCE_STATE", "SCENARIO"}
+    ):
         result.add("/traceability")
+    if "ACCEPTANCE_CHECK" in allocated:
+        package_items = payload.get("package_items", [])
+        if not isinstance(package_items, list):
+            raise ValueError("quality revision package-item collection does not resolve")
+        result.update(
+            f"/package_items/{index}" for index in range(len(package_items))
+        )
 
     for key, value in payload.items():
         if key == "decisions":

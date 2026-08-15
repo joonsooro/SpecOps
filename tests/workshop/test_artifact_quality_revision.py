@@ -6,12 +6,130 @@ from uuid import uuid4
 import pytest
 
 from specops_contracts import artifact_quality_v1 as q
+from specops_contracts.canonical import payload_hash
+from specops_workflow.artifact_quality_foundation import (
+    _confirmed_spec_payload_from_record,
+)
 from specops_workflow.artifact_quality_revision import (
     apply_quality_revision_candidate,
+    normalize_quality_revision_candidate_wire,
     prepare_quality_revision_request,
     quality_revision_pointer_closure,
     require_monotonic_quality_improvement,
 )
+
+
+def test_technical_split_allocations_open_only_their_canonical_collections():
+    payload = {
+        "data_contracts": [{"id": "00000000-0000-4000-8000-000000000001"}],
+        "quality_budgets": [{"id": "00000000-0000-4000-8000-000000000002"}],
+        "verification_plan": [{"id": "00000000-0000-4000-8000-000000000003"}],
+    }
+
+    pointers = quality_revision_pointer_closure(
+        payload=payload,
+        finding_pointers=("/data_contracts/0",),
+        allocated_identity_kinds=(
+            "DATA_CONTRACT",
+            "QUALITY_BUDGET",
+            "VERIFICATION_ITEM",
+        ),
+    )
+    assert pointers == (
+        "/data_contracts",
+        "/data_contracts/0",
+        "/quality_budgets",
+        "/verification_plan",
+    )
+
+
+def test_technical_revision_recovers_only_hash_bound_confirmed_spec_lineage():
+    spec_payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    binding = json.dumps(
+        {
+            "canonical_payload_json": json.dumps(spec_payload),
+            "payload_hash": payload_hash(spec_payload),
+        }
+    )
+
+    assert (
+        _confirmed_spec_payload_from_record("TECHNICAL_CONTRACT", binding)
+        == spec_payload
+    )
+    assert _confirmed_spec_payload_from_record("SPEC_PACKAGE", None) is None
+    with pytest.raises(ValueError, match="hash changed"):
+        _confirmed_spec_payload_from_record(
+            "TECHNICAL_CONTRACT",
+            json.dumps(
+                {
+                    "canonical_payload_json": json.dumps(spec_payload),
+                    "payload_hash": "sha256:" + "0" * 64,
+                }
+            ),
+        )
+
+
+def test_wire_normalization_is_exactly_string_typed_and_focus_bounded():
+    request_id = uuid4()
+    artifact_id = uuid4()
+    raw = json.dumps(
+        {
+            "protocol_version": "1.0.0",
+            "output_type": "ARTIFACT_QUALITY_REVISION_CANDIDATE",
+            "revision_request_id": str(request_id),
+            "revision_request_version": 1,
+            "request_hash": "sha256:" + "1" * 64,
+            "artifact_id": str(artifact_id),
+            "artifact_version": 1,
+            "record_revision": 2,
+            "payload_hash": "sha256:" + "2" * 64,
+            "attempt": 1,
+            "patches": [
+                {"pointer": "/kept", "replacement_value_json": "plain text"},
+                {"pointer": "/deferred/value", "replacement_value_json": "{}"},
+            ],
+        }
+    )
+
+    candidate, receipt = normalize_quality_revision_candidate_wire(
+        raw_candidate_json=raw,
+        payload={"kept": "old", "deferred": {"value": {}}},
+        excluded_pointer_prefixes=("/deferred",),
+    )
+
+    assert candidate.patches[0].replacement_value_json == '"plain text"'
+    assert receipt == {
+        "excluded_pointers": ("/deferred/value",),
+        "normalized_string_pointers": ("/kept",),
+    }
+
+
+def test_wire_normalization_rejects_ambiguous_non_string_content():
+    raw = json.dumps(
+        {
+            "protocol_version": "1.0.0",
+            "output_type": "ARTIFACT_QUALITY_REVISION_CANDIDATE",
+            "revision_request_id": str(uuid4()),
+            "revision_request_version": 1,
+            "request_hash": "sha256:" + "1" * 64,
+            "artifact_id": str(uuid4()),
+            "artifact_version": 1,
+            "record_revision": 2,
+            "payload_hash": "sha256:" + "2" * 64,
+            "attempt": 1,
+            "patches": [
+                {"pointer": "/value", "replacement_value_json": "not-json"}
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="ambiguous non-JSON"):
+        normalize_quality_revision_candidate_wire(
+            raw_candidate_json=raw,
+            payload={"value": {}},
+        )
+
+
 from specops_workflow.workshop_protocol import WorkshopFoundationService
 from v4_payload_factory import PayloadFactory
 

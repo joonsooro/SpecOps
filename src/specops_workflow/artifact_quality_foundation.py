@@ -77,6 +77,27 @@ def _source_ids_from_context_json(binding_json: str) -> set[str]:
         raise ValueError("stored Analyzer context has no exact source identities") from exc
 
 
+def _confirmed_spec_payload_from_record(
+    artifact_type: str, confirmed_from_json: str | None
+) -> dict[str, Any] | None:
+    """Recover the exact Spec lineage already bound to a Technical record."""
+
+    if artifact_type != "TECHNICAL_CONTRACT":
+        return None
+    if not isinstance(confirmed_from_json, str):
+        raise ValueError("Technical record has no confirmed Spec lineage")
+    try:
+        binding = json.loads(confirmed_from_json)
+        canonical_payload_json = binding["canonical_payload_json"]
+        expected_hash = binding["payload_hash"]
+        payload = json.loads(canonical_payload_json)
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Technical record has invalid confirmed Spec lineage") from exc
+    if not isinstance(payload, dict) or payload_hash(payload) != expected_hash:
+        raise ValueError("Technical record confirmed Spec lineage hash changed")
+    return payload
+
+
 class ArtifactQualityFoundationMixin:
     """Mixed into ``WorkshopFoundationService`` to keep one Foundation state owner."""
 
@@ -488,13 +509,14 @@ class ArtifactQualityFoundationMixin:
                     candidate=candidate,
                     identity_kinds=self._artifact_identity_kinds,
                 )
-                artifact_type = connection.execute(
-                    select(records.c.artifact_type).where(
+                artifact_record = connection.execute(
+                    select(records.c.artifact_type, records.c.confirmed_from_json).where(
                         records.c.case_id == str(case_id),
                         records.c.artifact_id == str(request.artifact_id),
                         records.c.artifact_version == request.artifact_version,
                     )
-                ).scalar_one()
+                ).mappings().one()
+                artifact_type = artifact_record["artifact_type"]
                 validate_exact(
                     "spec-package-payload.schema.json"
                     if artifact_type == "SPEC_PACKAGE"
@@ -531,6 +553,16 @@ class ArtifactQualityFoundationMixin:
                     )
                 ).scalars()
             )
+            try:
+                confirmed_spec_payload = _confirmed_spec_payload_from_record(
+                    artifact_type, artifact_record["confirmed_from_json"]
+                )
+            except ValueError as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED
+                ) from exc
+            if confirmed_spec_payload is not None:
+                allowed.update(self._artifact_identity_kinds(confirmed_spec_payload))
             issues = validate_artifact_reference_graph(
                 revised, allowed_reference_ids=allowed
             )

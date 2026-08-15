@@ -12,6 +12,57 @@ from specops_contracts.canonical import domain_hash, payload_hash
 from specops_contracts.canonical import canonical_bytes
 
 
+def normalize_quality_revision_candidate_wire(
+    *,
+    raw_candidate_json: str,
+    payload: dict,
+    excluded_pointer_prefixes: tuple[str, ...] = (),
+) -> tuple[q.ArtifactQualityRevisionCandidate, dict[str, tuple[str, ...]]]:
+    """Normalize only JSON-in-string wire values at known string leaves.
+
+    Provider proposals outside the caller's declared focus are discarded before
+    validation. An invalid ``replacement_value_json`` is normalized only when
+    its exact existing target is a string, making the intended replacement
+    unambiguous without interpreting or repairing its content.
+    """
+
+    value = json.loads(raw_candidate_json)
+    patches = value.get("patches") if isinstance(value, dict) else None
+    if not isinstance(patches, list):
+        raise ValueError("quality revision wire candidate has no patch list")
+    retained: list[dict[str, Any]] = []
+    excluded: list[str] = []
+    normalized: list[str] = []
+    for patch in patches:
+        if not isinstance(patch, dict) or not isinstance(patch.get("pointer"), str):
+            raise ValueError("quality revision wire patch is invalid")
+        pointer = patch["pointer"]
+        if any(
+            pointer == prefix or pointer.startswith(prefix + "/")
+            for prefix in excluded_pointer_prefixes
+        ):
+            excluded.append(pointer)
+            continue
+        replacement = patch.get("replacement_value_json")
+        if not isinstance(replacement, str):
+            raise ValueError("quality revision replacement is not a string")
+        try:
+            json.loads(replacement)
+        except json.JSONDecodeError:
+            if not isinstance(_resolve_pointer(payload, pointer), str):
+                raise ValueError(
+                    "quality revision replacement is ambiguous non-JSON content"
+                ) from None
+            patch = {**patch, "replacement_value_json": json.dumps(replacement)}
+            normalized.append(pointer)
+        retained.append(patch)
+    value["patches"] = retained
+    return q.ArtifactQualityRevisionCandidate.model_validate_json(json.dumps(value)), {
+        "excluded_pointers": tuple(excluded),
+        "normalized_string_pointers": tuple(normalized),
+    }
+
+
 def quality_revision_pointer_closure(
     *,
     payload: dict,
@@ -29,6 +80,9 @@ def quality_revision_pointer_closure(
         "GLOSSARY_TERM": "glossary",
         "EXPERIENCE_STATE": "experience_states",
         "SCENARIO": "scenarios",
+        "DATA_CONTRACT": "data_contracts",
+        "QUALITY_BUDGET": "quality_budgets",
+        "VERIFICATION_ITEM": "verification_plan",
     }
     anchor_ids: set[str] = set()
     requirement_anchors: list[dict[str, Any]] = []

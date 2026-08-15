@@ -401,3 +401,9 @@ def artifact_evidence_support_native_schema() -> dict[str, Any]:
     """Compile the bounded exact-pair SUPPORTS assessment output."""
 
     return compile_openai_strict_schema(quality.ArtifactEvidenceSupportCandidate)
+
+
+def artifact_quality_revision_native_schema() -> dict[str, Any]:
+    """Compile the one-attempt, pointer-bounded artifact revision output."""
+
+    return compile_openai_strict_schema(quality.ArtifactQualityRevisionCandidate)

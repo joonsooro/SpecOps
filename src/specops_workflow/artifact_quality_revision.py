@@ -113,13 +113,17 @@ def normalize_quality_revision_candidate_wire(
     retained_exact: list[dict[str, Any]] = []
     for patch in rewritten:
         pointer = patch["pointer"]
-        parent_pointer = next(
-            (
-                parent
-                for parent in allowed_parents
-                if pointer != parent and pointer.startswith(parent + "/")
-            ),
-            None,
+        parent_pointer = (
+            None
+            if pointer in allowed_parents
+            else next(
+                (
+                    parent
+                    for parent in allowed_parents
+                    if pointer.startswith(parent + "/")
+                ),
+                None,
+            )
         )
         if parent_pointer is None:
             retained_exact.append(patch)

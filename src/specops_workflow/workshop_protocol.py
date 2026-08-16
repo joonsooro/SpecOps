@@ -2701,6 +2701,9 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         asked_by_question = {
             (row["question_id"], row["question_version"]): row for row in asked_rows
         }
+        latest_asked_by_question_id = {
+            row["question_id"]: row for row in asked_rows
+        }
 
         derived_dependency_refs: set[
             tuple[c.GuidanceDependencyKind, UUID, int]
@@ -3044,9 +3047,13 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     consumed_at=None,
                 )
             )
-        for position, row in enumerate(
-            asked_by_question.values(), start=len(merged) + 1
-        ):
+        merged_question_ids = {str(question.question_id) for question in merged}
+        historical_asked_rows = (
+            row
+            for question_id, row in latest_asked_by_question_id.items()
+            if question_id not in merged_question_ids
+        )
+        for position, row in enumerate(historical_asked_rows, start=len(merged) + 1):
             connection.execute(
                 insert(runway_table).values(
                     case_id=str(command.case_id),

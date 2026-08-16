@@ -1516,6 +1516,156 @@ def test_guidance_quarantines_asked_selection_without_repeating_it(tmp_path):
     }
 
 
+def test_guidance_replenishment_keeps_revised_asked_question_once(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    brief_receipt = _admit_brief(foundation)
+    foundation.set_preparation_phase(CASE_ID, "READY")
+    mappings = {
+        item.candidate_key: item
+        for item in brief_receipt.identity_mappings
+        if item.entity_kind in {"PROBLEM", "QUESTION"}
+    }
+    question = mappings["question-1"]
+    problem = mappings["problem-export"]
+    initial_guidance = foundation.current_admitted_guidance(CASE_ID)
+    assert initial_guidance is not None
+    answer = _transcript_command(
+        foundation.case_revision(CASE_ID),
+        1,
+        "Use the company timezone, falling back to UTC.",
+    )
+    foundation.execute(answer)
+
+    revised_text = "Which authoritative configuration source supplies the company timezone?"
+    revised_reason = "The answer fixed the fallback but left the configuration source open."
+    analysis_run_id = uuid4()
+    analysis_hash = "sha256:" + "a" * 64
+    analysis = c.TurnAnalysisCandidate(
+        protocol_version="1.0.0",
+        output_type="TURN_ANALYSIS_CANDIDATE",
+        analyzer_run_id=analysis_run_id,
+        context_id=CONTEXT_ID,
+        request_hash=analysis_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        transcript_event_id=answer.transcript.event_id,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        disposition=c.TurnDisposition.SUBSTANTIVE,
+        no_change_reason_code=None,
+        evidence_candidates=(),
+        new_problems=(),
+        new_problem_clusters=(),
+        revised_problem_clusters=(),
+        new_questions=(),
+        revised_questions=(
+            c.TurnQuestionRevisionCandidate(
+                question_ref=c.FoundationEntityRef(
+                    ref_kind="FOUNDATION_ID",
+                    foundation_id=question.foundation_id,
+                    expected_version=question.record_version,
+                ),
+                text=revised_text,
+                rationale=revised_reason,
+                question_shape=c.QuestionShape.OPEN_TEXT,
+                capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
+                answer_options=(),
+                addresses_problem_refs=(
+                    c.FoundationEntityRef(
+                        ref_kind="FOUNDATION_ID",
+                        foundation_id=problem.foundation_id,
+                        expected_version=problem.record_version,
+                    ),
+                ),
+                prerequisite_problem_refs=(),
+                safe_without_current_turn_interpretation=True,
+            ),
+        ),
+        low_risk_facts=(),
+        decisions=(),
+        problem_assessments=(),
+        evidence_findings=(),
+    )
+    analysis_values = _base(foundation.case_revision(CASE_ID))
+    analysis_values.update(
+        command_type="ADMIT_TURN_ANALYSIS",
+        analyzer_run_id=analysis_run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=analysis_hash,
+        candidate=analysis,
+    )
+    foundation.execute(c.AdmitTurnAnalysisCommand(**analysis_values))
+
+    guidance_run_id = uuid4()
+    guidance_hash = "sha256:" + "b" * 64
+    guidance = c.GuidanceCandidate(
+        protocol_version="1.0.0",
+        output_type="GUIDANCE_CANDIDATE",
+        analyzer_run_id=guidance_run_id,
+        context_id=CONTEXT_ID,
+        request_hash=guidance_hash,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=foundation.case_revision(CASE_ID),
+        recommended_question=c.GuidanceQuestion(
+            question_ref=c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=question.foundation_id,
+                expected_version=question.record_version + 1,
+            ),
+            exact_text=revised_text,
+            reason=revised_reason,
+        ),
+        safe_alternates=(),
+        do_not_ask_question_refs=(),
+        dependencies=(
+            c.GuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_ref=None,
+            ),
+        ),
+        acknowledgement_suggestion="Continue with the revised clarification.",
+    )
+    guidance_values = _base(foundation.case_revision(CASE_ID))
+    guidance_values.update(
+        command_type="ADMIT_GUIDANCE",
+        analyzer_run_id=guidance_run_id,
+        context_id=CONTEXT_ID,
+        provider_request_hash=guidance_hash,
+        candidate=guidance,
+    )
+
+    foundation.execute(c.AdmitGuidanceCommand(**guidance_values))
+
+    current_guidance = foundation.current_admitted_guidance(CASE_ID)
+    assert current_guidance is not None
+    current_runway = foundation.runway_projection(CASE_ID)
+    current_rows = [
+        row
+        for row in current_runway["questions"]
+        if row["question_id"] == str(question.foundation_id)
+    ]
+    assert current_rows == [
+        {
+            "question_id": str(question.foundation_id),
+            "question_version": question.record_version + 1,
+            "position": current_rows[0]["position"],
+            "exact_text": revised_text,
+            "reason": revised_reason,
+        }
+    ]
+    assert str(question.foundation_id) not in current_runway["asked"]
+    runway_table = V0_RUNTIME_TABLES["workshop_runway_items"]
+    with engine_for(url).connect() as connection:
+        historical = connection.execute(
+            select(runway_table).where(
+                runway_table.c.case_id == str(CASE_ID),
+                runway_table.c.guidance_id == str(initial_guidance.guidance_id),
+                runway_table.c.question_id == str(question.foundation_id),
+            )
+        ).mappings().one()
+    assert historical["question_version"] == question.record_version
+    assert historical["status"] == "ASKED"
+
+
 def test_foundation_derives_current_dependencies_for_every_guidance_question(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)

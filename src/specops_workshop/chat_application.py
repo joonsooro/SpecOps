@@ -71,6 +71,27 @@ def _canonical_fingerprint(value: Any) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
+def _turn_submission_status(connection, *, jobs, case_id: UUID) -> str:
+    rows = connection.execute(
+        select(jobs.c.operation, jobs.c.subject_id, jobs.c.state).where(
+            jobs.c.case_id == str(case_id)
+        )
+    ).mappings().all()
+    blocking_job_failed = any(
+        not (
+            row["operation"] == c.AnalyzerOperation.TURN_ANALYSIS.value
+            and row["subject_id"].startswith("turn-correction:")
+        )
+        and row["state"] == "FAILED"
+        for row in rows
+    )
+    if blocking_job_failed:
+        return "ANALYSIS_FAILED"
+    if any(row["state"] not in {"COMPLETED", "FAILED"} for row in rows):
+        return "ANALYSIS_PENDING"
+    return "READY"
+
+
 def _job_identity(
     *, session_id: UUID, response_id: UUID, trigger_case_revision: int
 ) -> UUID:
@@ -172,6 +193,13 @@ class ParticipantTurnIngress:
                 ).scalar_one_or_none()
                 if participant is None:
                     raise ParticipantTurnError("AUTHORITY_FAILED")
+                submission_status = _turn_submission_status(
+                    connection, jobs=jobs, case_id=self.case_id
+                )
+                if submission_status == "ANALYSIS_FAILED":
+                    raise ParticipantTurnError("TURN_ANALYSIS_FAILED")
+                if submission_status == "ANALYSIS_PENDING":
+                    raise ParticipantTurnError("TURN_ANALYSIS_IN_PROGRESS")
 
                 prior_revision = self.foundation._case_revision(connection, self.case_id)
                 correction = None
@@ -430,6 +458,10 @@ class ParticipantTurnIngress:
                 return self._receipt(row_values, replayed=False, connection=connection)
         except IntegrityError as exc:
             raise ParticipantTurnError("IDEMPOTENCY_CONFLICT") from exc
+        except FoundationProtocolError as exc:
+            if exc.code is c.FoundationRejectionCode.STALE_STATE:
+                raise ParticipantTurnError("TURN_ANALYSIS_IN_PROGRESS") from exc
+            raise
 
     @staticmethod
     def _receipt(row: Any, *, replayed: bool, connection) -> ParticipantTurnReceipt:
@@ -487,6 +519,7 @@ class WorkshopConversationProjector:
 
     def project(self) -> WorkshopConversationContext:
         responses = TASK28_RUNTIME_TABLES["workshop_typed_responses"]
+        jobs = V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
         actions = TASK28_RUNTIME_TABLES["workshop_visual_proposal_actions"]
         views = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
         with self.foundation.engine.connect() as connection:
@@ -508,6 +541,9 @@ class WorkshopConversationProjector:
                 .where(actions.c.case_id == str(self.case_id))
                 .order_by(actions.c.action_sequence)
             ).mappings().all()
+            turn_submission_status = _turn_submission_status(
+                connection, jobs=jobs, case_id=self.case_id
+            )
         committed = tuple(
             CommittedQuestionResponseTurn(
                 question=FoundationAdmittedQuestion.model_validate_json(
@@ -626,6 +662,7 @@ class WorkshopConversationProjector:
                 questions=runway_questions,
                 runway_depth=len(runway_questions),
             ),
+            turn_submission_status=turn_submission_status,
             proposal_statuses=tuple(proposals),
             completion_status=completion_status,
             generated_at=self.foundation.now(),

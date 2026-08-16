@@ -1,5 +1,6 @@
 export type ConversationPhase = "WORKSHOP" | "HANDOFF_READY" | "COMPLETE";
 export type ProposalIntent = "CONFIRM" | "EDIT" | "REJECT";
+export type TurnSubmissionStatus = "READY" | "ANALYSIS_PENDING" | "ANALYSIS_FAILED";
 export const INITIAL_RUNWAY_DEPTH = 4;
 
 export function workshopStartEnabled(phase: string, runwayDepth: number): boolean {
@@ -11,6 +12,10 @@ export function workshopStartEnabled(phase: string, runwayDepth: number): boolea
 
 export function formulationEnabled(phase: ConversationPhase, revisionLocked: boolean): boolean {
   return phase === "WORKSHOP" && !revisionLocked;
+}
+
+export function turnSubmissionEnabled(status: TurnSubmissionStatus, busy: string | null): boolean {
+  return status === "READY" && busy === null;
 }
 
 export function proposalControlPayload(

@@ -74,6 +74,7 @@ const workshop = {
   session_card: { readiness: "NEEDS_CLARIFICATION", review_obligation: "DECISION_REQUIRED" },
   committed_turns: [{ question: priorQuestion, response }],
   question_runway: { questions: [question], runway_depth: 1 },
+  turn_submission_status: "READY",
   proposal_statuses: [proposal],
   completion_status: null,
   generated_at: "2026-08-16T12:00:00Z",
@@ -115,6 +116,26 @@ test("correction control loads the exact latest response binding and text", asyn
   await page.getByRole("button", { name: "Correct response" }).click();
   await expect(page.getByLabel("Correct committed response")).toHaveValue(response.normalized_text);
   await expect(page.getByRole("button", { name: "Save correction" })).toBeEnabled();
+});
+
+test("keeps the next draft local while prior turn analysis is pending", async ({ page }) => {
+  const pendingWorkshop = { ...workshop, turn_submission_status: "ANALYSIS_PENDING" };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: pendingWorkshop }));
+  let responseCalls = 0;
+  await page.route("**/api/workshop/responses", (route) => {
+    responseCalls += 1;
+    return route.fulfill({ status: 409, json: { detail: { code: "TURN_ANALYSIS_IN_PROGRESS" } } });
+  });
+
+  await page.goto("/");
+  const composer = page.getByLabel("Your typed response");
+  await composer.fill("Keep this draft local until analysis finishes.");
+  await expect(composer).toHaveValue("Keep this draft local until analysis finishes.");
+  await expect(page.getByRole("button", { name: "Analyzing previous response…" })).toBeDisabled();
+  await expect(page.getByText("Your previous response is saved. Analysis must finish before you send another.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Correct response" })).toBeDisabled();
+  expect(responseCalls).toBe(0);
 });
 
 test("playback is user-triggered, exact-text, and does not open a live input socket", async ({ page }) => {

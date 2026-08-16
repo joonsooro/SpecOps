@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, update
 from fastapi.testclient import TestClient
 
 from specops_contracts import workshop_v1 as c
@@ -111,6 +111,61 @@ def test_participant_turn_ingress_commits_every_authoritative_effect_atomically(
     assert context.committed_turns[0].response == receipt.snapshot
 
 
+def test_participant_turn_ingress_waits_for_prior_analysis_before_next_turn(tmp_path):
+    foundation, ingress, projector = _ready(tmp_path)
+    first_value = _intent(foundation)
+    first = ingress.submit_typed(first_value)
+    second_value = _intent(foundation, text="Use UTC for every export timestamp.")
+    revision_while_pending = foundation.case_revision(CASE_ID)
+    depth_while_pending = foundation.runway_projection(CASE_ID)["depth"]
+
+    assert projector.project().turn_submission_status == "ANALYSIS_PENDING"
+    assert ingress.submit_typed(first_value).replayed is True
+    with pytest.raises(ParticipantTurnError, match="TURN_ANALYSIS_IN_PROGRESS"):
+        ingress.submit_typed(second_value)
+    assert foundation.case_revision(CASE_ID) == revision_while_pending
+    assert foundation.runway_projection(CASE_ID)["depth"] == depth_while_pending
+
+    jobs = V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            update(jobs)
+            .where(jobs.c.job_id == str(first.analyzer_job_id))
+            .values(state="FAILED")
+        )
+    assert projector.project().turn_submission_status == "ANALYSIS_FAILED"
+    with pytest.raises(ParticipantTurnError, match="TURN_ANALYSIS_FAILED"):
+        ingress.submit_typed(second_value)
+
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            update(jobs)
+            .where(jobs.c.job_id == str(first.analyzer_job_id))
+            .values(state="COMPLETED")
+        )
+
+    assert projector.project().turn_submission_status == "READY"
+    second = ingress.submit_typed(second_value)
+    assert second.snapshot.turn_sequence == 2
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            update(jobs)
+            .where(jobs.c.job_id == str(second.analyzer_job_id))
+            .values(state="COMPLETED")
+        )
+    assert projector.project().turn_submission_status == "ANALYSIS_PENDING"
+    with pytest.raises(ParticipantTurnError, match="TURN_ANALYSIS_IN_PROGRESS"):
+        ingress.submit_typed(_intent(foundation, text="Keep the header row stable."))
+
+    with foundation.engine.begin() as connection:
+        connection.execute(
+            update(jobs)
+            .where(jobs.c.operation == c.AnalyzerOperation.GUIDANCE.value)
+            .values(state="COMPLETED")
+        )
+    assert projector.project().turn_submission_status == "READY"
+
+
 def test_completed_turn_analysis_materializes_pending_visual_proposal(tmp_path):
     foundation, ingress, projector = _ready(tmp_path)
     turn = ingress.submit_typed(_intent(foundation, text="Use UTC for the export timestamp."))
@@ -184,6 +239,13 @@ def test_ingress_idempotency_correction_and_channel_provenance_survive_restart(t
     with pytest.raises(ParticipantTurnError, match="IDEMPOTENCY_CONFLICT"):
         ingress.submit_typed(value.model_copy(update={"text": "Different"}))
 
+    with foundation.engine.begin() as connection:
+        jobs = V0_RUNTIME_TABLES["workshop_analyzer_jobs"]
+        connection.execute(
+            update(jobs)
+            .where(jobs.c.job_id == str(first.analyzer_job_id))
+            .values(state="COMPLETED")
+        )
     correction = ingress.submit_typed(
         SubmitTypedResponseIntent(
             client_submission_id=uuid4(),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { INITIAL_RUNWAY_DEPTH, formulationEnabled, proposalControlPayload, typedResponsePayload, workshopStartEnabled } from "./uiModel";
+import { INITIAL_RUNWAY_DEPTH, formulationEnabled, proposalControlPayload, turnSubmissionEnabled, typedResponsePayload, workshopStartEnabled } from "./uiModel";
 
 describe("Workshop server-projection UI rules", () => {
   it("fails closed until the server admits the exact four-question runway", () => {
@@ -13,6 +13,13 @@ describe("Workshop server-projection UI rules", () => {
     expect(formulationEnabled("WORKSHOP", true)).toBe(false);
     expect(formulationEnabled("HANDOFF_READY", false)).toBe(false);
     expect(formulationEnabled("COMPLETE", false)).toBe(false);
+  });
+
+  it("keeps drafting available while only a completed prior analysis unlocks Send", () => {
+    expect(turnSubmissionEnabled("READY", null)).toBe(true);
+    expect(turnSubmissionEnabled("ANALYSIS_PENDING", null)).toBe(false);
+    expect(turnSubmissionEnabled("ANALYSIS_FAILED", null)).toBe(false);
+    expect(turnSubmissionEnabled("READY", "send")).toBe(false);
   });
 
   it("keeps proposal control shapes exact", () => {

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { WorkshopPresenceClient } from "./presenceClient";
+import { turnSubmissionEnabled, type TurnSubmissionStatus } from "./uiModel";
 
 type Bootstrap = {
   case_id: string;
@@ -78,6 +79,7 @@ type WorkshopContext = {
   session_card: { readiness: string; review_obligation: string };
   committed_turns: { question: Question; response: ResponseSnapshot }[];
   question_runway: { questions: Question[]; runway_depth: number };
+  turn_submission_status: TurnSubmissionStatus;
   proposal_statuses: Proposal[];
   completion_status: "FINISHING_ANALYSIS" | "HANDOFF_READY" | "FINISH_FAILED" | null;
   generated_at: string;
@@ -169,10 +171,16 @@ export function App() {
     }
     return result;
   }, [context]);
-  const canSend = preparation?.phase === "READY"
+  const canDraft = preparation?.phase === "READY"
     && context?.workshop_state === "ACTIVE"
-    && (!!nextQuestion || !!correction)
-    && busy === null;
+    && (!!nextQuestion || !!correction);
+  const canSend = canDraft
+    && turnSubmissionEnabled(context?.turn_submission_status ?? "ANALYSIS_PENDING", busy);
+  const sendLabel = context?.turn_submission_status === "ANALYSIS_PENDING"
+    ? "Analyzing previous response…"
+    : context?.turn_submission_status === "ANALYSIS_FAILED"
+      ? "Analysis needs attention"
+      : busy === "send" ? "Saving…" : pendingSubmission ? "Retry" : correction ? "Save correction" : "Send";
 
   const submitResponse = async (event: FormEvent) => {
     event.preventDefault();
@@ -216,7 +224,7 @@ export function App() {
   };
 
   const beginCorrection = (response: ResponseSnapshot) => {
-    if (pendingSubmission) return;
+    if (pendingSubmission || context?.turn_submission_status !== "READY") return;
     setCorrection(response);
     setEditTarget(null);
     setText(response.normalized_text);
@@ -347,7 +355,7 @@ export function App() {
                 <p>{response.normalized_text}</p>
                 <small>Evidence {shortId(response.final_source_ref.artifact_id)} / {response.content_hash.slice(0, 12)}…</small>
                 {latestByTurn.get(response.turn_sequence) === response.response_id && context?.workshop_state === "ACTIVE" && (
-                  <button type="button" onClick={() => beginCorrection(response)} disabled={!!pendingSubmission}>Correct response</button>
+                  <button type="button" onClick={() => beginCorrection(response)} disabled={!!pendingSubmission || context.turn_submission_status !== "READY"}>Correct response</button>
                 )}
               </article>
             </li>
@@ -378,14 +386,18 @@ export function App() {
               id="response-text"
               rows={4}
               value={text}
-              disabled={!canSend || !!pendingSubmission}
+              disabled={!canDraft || !!pendingSubmission || busy !== null}
               onChange={(event) => setText(event.target.value)}
               placeholder={preparation?.phase === "READY" ? "Answer the canonical question…" : "Composer unlocks when preparation is ready"}
             />
-            <button type="submit" disabled={!canSend || !text.trim()}>{busy === "send" ? "Saving…" : pendingSubmission ? "Retry" : correction ? "Save correction" : "Send"}</button>
+            <button type="submit" disabled={!canSend || !text.trim()}>{sendLabel}</button>
           </div>
           {correction && !pendingSubmission && <button className="cancel-mode" type="button" onClick={() => { setCorrection(null); setText(""); }}>Cancel correction</button>}
-          <small>Only a successful Send receipt finalizes evidence. Draft text has no authority.</small>
+          <small aria-live="polite">{context?.turn_submission_status === "ANALYSIS_PENDING"
+            ? "Your previous response is saved. Analysis must finish before you send another."
+            : context?.turn_submission_status === "ANALYSIS_FAILED"
+              ? "The previous analysis did not complete. Sending another response remains locked."
+              : "Only a successful Send receipt finalizes evidence. Draft text has no authority."}</small>
         </form>
       </section>
 

@@ -152,6 +152,7 @@ class WorkshopConversationContext(ContractModel):
     session_card: c.VoiceSessionCard
     committed_turns: Annotated[tuple[CommittedQuestionResponseTurn, ...], Field(max_length=500)]
     question_runway: QuestionRunway
+    turn_submission_status: Literal["READY", "ANALYSIS_PENDING", "ANALYSIS_FAILED"]
     proposal_statuses: Annotated[tuple[ProposalStatusProjection, ...], Field(max_length=100)]
     completion_status: Literal[
         "FINISHING_ANALYSIS", "HANDOFF_READY", "FINISH_FAILED"

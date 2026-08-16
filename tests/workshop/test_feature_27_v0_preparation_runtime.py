@@ -56,7 +56,10 @@ from test_feature_26_v4_production_seam import (
 
 
 def _brief(
-    *, unsafe_question_index: int | None = None, extra_question_count: int = 0
+    *,
+    unsafe_question_index: int | None = None,
+    prerequisite_question_index: int | None = None,
+    extra_question_count: int = 0,
 ) -> c.InterviewBriefCandidate:
     questions = tuple(
         c.QuestionCandidate(
@@ -67,7 +70,9 @@ def _brief(
             capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
             answer_options=(),
             addresses_problem_keys=("problem-export",),
-            prerequisite_problem_keys=(),
+            prerequisite_problem_keys=(
+                ("problem-export",) if index == prerequisite_question_index else ()
+            ),
             safe_without_current_turn_interpretation=index != unsafe_question_index,
         )
         for index in range(1, c.INITIAL_RUNWAY_DEPTH + extra_question_count + 1)
@@ -293,6 +298,7 @@ def _admit_brief(
     foundation,
     *,
     unsafe_question_index: int | None = None,
+    prerequisite_question_index: int | None = None,
     extra_question_count: int = 0,
 ):
     values = _base(4)
@@ -303,6 +309,7 @@ def _admit_brief(
         provider_request_hash=REQUEST_HASH,
         candidate=_brief(
             unsafe_question_index=unsafe_question_index,
+            prerequisite_question_index=prerequisite_question_index,
             extra_question_count=extra_question_count,
         ),
     )
@@ -1036,6 +1043,16 @@ def test_unsafe_bootstrap_runway_fails_closed_without_guidance(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     receipt = _admit_brief(foundation, unsafe_question_index=c.INITIAL_RUNWAY_DEPTH)
+    assert receipt.admitted_guidance_id is None
+    assert foundation.runway_projection(CASE_ID)["depth"] == 0
+
+
+def test_prerequisite_bound_bootstrap_question_fails_closed_without_guidance(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    receipt = _admit_brief(
+        foundation, prerequisite_question_index=c.INITIAL_RUNWAY_DEPTH
+    )
     assert receipt.admitted_guidance_id is None
     assert foundation.runway_projection(CASE_ID)["depth"] == 0
 

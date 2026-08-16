@@ -2002,6 +2002,16 @@ class StoredConversationOpenAIAdapter:
             "not, omit that evidence candidate and every proposal that depends on it; never "
             "reconstruct, normalize, or approximately quote source text."
         )
+        if operation is contracts.AnalyzerOperation.BOOTSTRAP:
+            instructions += (
+                " Build initial_runway from exactly four distinct questions: one "
+                "recommended_question_key and three safe_alternate_question_keys. Every "
+                "selected question must set safe_without_current_turn_interpretation=true "
+                "and must have an empty prerequisite_problem_keys array, because every "
+                "BOOTSTRAP problem is initially OPEN. Never select a prerequisite-bound or "
+                "unsafe question into initial_runway; place it in do_not_ask_question_keys "
+                "when it must be explicitly excluded."
+            )
         if operation is contracts.AnalyzerOperation.TURN_ANALYSIS:
             instructions += (
                 " Treat an explicit decision replacement in the finalized transcript as a "

@@ -1214,6 +1214,11 @@ def test_provider_instructions_bind_quote_search_fields_without_claiming_authori
     assert "occurs verbatim at the requested occurrence" in instructions
     assert "omit that evidence candidate" in instructions
     assert "never claim authority" in instructions
+    assert "initial_runway from exactly four distinct questions" in instructions
+    assert "safe_without_current_turn_interpretation=true" in instructions
+    assert "empty prerequisite_problem_keys array" in instructions
+    assert "every BOOTSTRAP problem is initially OPEN" in instructions
+    assert "Never select a prerequisite-bound or unsafe question" in instructions
 
     turn_analysis = StoredConversationOpenAIAdapter._instructions(
         c.AnalyzerOperation.TURN_ANALYSIS

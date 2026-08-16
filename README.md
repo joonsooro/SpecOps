@@ -42,8 +42,8 @@ FastAPI application boundary
        +--------------------+----------------------+
        |                    |                      |
        v                    v                      v
-Live voice provider   GPT-5.6 Terra          V4 orchestrator
-                      Analyzer / evaluator
+Gemini 3.1 Flash      GPT-5.6 Terra          V4 orchestrator
+Live Voice Agent      Analyzer / evaluator
        |                    |                      |
        +-------- AI proposals and transcripts ----+
                                                     |
@@ -69,7 +69,7 @@ The FastAPI application in `src/specops_workshop/` coordinates browser sessions,
 
 ### AI adapters
 
-Gemini Live supplies the conversational voice channel. **The SpecOps Analyzer is OpenAI GPT-5.6 Terra, configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. Provider output is treated as untrusted input: it must satisfy strict schemas and workflow rules before it can affect committed state.
+**The SpecOps Voice Agent is Google Gemini 3.1 Flash Live Preview** (`gemini-3.1-flash-live-preview`), which supplies the real-time conversational voice channel. **The SpecOps Analyzer is OpenAI GPT-5.6 Terra, configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. Provider output is treated as untrusted input: it must satisfy strict schemas and workflow rules before it can affect committed state.
 
 ### Deterministic foundation
 
@@ -99,7 +99,7 @@ tests/                    Foundation, workshop, contract, and release tests
 - Pydantic and JSON Schema
 - SQLAlchemy, Alembic, and SQLite
 - React, TypeScript, and Vite
-- Gemini Live for the voice channel
+- Google Gemini 3.1 Flash Live Preview for the Voice Agent
 - OpenAI GPT-5.6 Terra for the Analyzer and artifact-quality evaluator
 - Pytest, Vitest, and Playwright
 

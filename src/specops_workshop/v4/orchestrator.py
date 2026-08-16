@@ -55,6 +55,7 @@ from .artifact_quality_adapter import (
     ArtifactQualityEvaluator,
     PreparedArtifactQualityContext,
 )
+from ..chatbot_provider import ChatbotGuidanceCoordinator, ChatbotProvider
 
 
 PRODUCTION_NAMESPACE = UUID("e52d201a-e1d0-4df7-90e5-39ac4091998d")
@@ -135,6 +136,7 @@ class V4ProductionOrchestrator:
         sources: tuple[ProviderSourceUpload, ProviderSourceUpload],
         analyzer_contract: c.AnalyzerContractBinding,
         quality_evaluator: ArtifactQualityEvaluator | None = None,
+        chatbot_provider: ChatbotProvider | None = None,
         now=lambda: datetime.now(timezone.utc),
     ) -> None:
         self.foundation = foundation
@@ -145,8 +147,25 @@ class V4ProductionOrchestrator:
         self.source_set_hash = adapter.source_set_hash(tuple(item.source for item in sources))
         self.analyzer_contract = analyzer_contract
         self.quality_evaluator = quality_evaluator
+        self.chatbot_guidance = (
+            None
+            if chatbot_provider is None
+            else ChatbotGuidanceCoordinator(
+                foundation,
+                chatbot_provider,
+                case_id=case_id,
+                session_id=session_id,
+            )
+        )
         self.now = now
         self._context_lock = asyncio.Lock()
+
+    async def execute_chatbot_guidance(
+        self, request: c.ReplenishGuidanceRequest
+    ) -> c.GuidanceCandidate:
+        if self.chatbot_guidance is None:
+            raise RuntimeError("ChatbotProvider is not configured")
+        return await self.chatbot_guidance.execute(request)
 
     def _command_base(
         self,

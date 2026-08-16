@@ -79,8 +79,11 @@ from .artifact_quality_storage import (
 )
 
 WORKSHOP_PROTOCOL_TABLES = define_workshop_protocol_tables(metadata)
-from .workshop_protocol_storage import V0_RUNTIME_TABLE_NAMES
+from .workshop_protocol_storage import TASK28_RUNTIME_TABLE_NAMES, V0_RUNTIME_TABLE_NAMES
 V0_RUNTIME_TABLES = {name: metadata.tables[name] for name in V0_RUNTIME_TABLE_NAMES}
+TASK28_RUNTIME_TABLES = {
+    name: metadata.tables[name] for name in TASK28_RUNTIME_TABLE_NAMES
+}
 ARTIFACT_QUALITY_TABLES = define_artifact_quality_tables(metadata)
 EVIDENCE_ASSESSMENT_TABLES = define_evidence_assessment_tables(metadata)
 

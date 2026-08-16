@@ -8,8 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 GEMINI_MODEL = "gemini-3.1-flash-live-preview"
+LUNA_MODEL = "gpt-5.6-luna"
 TERRA_MODEL = "gpt-5.6-terra"
 AnalyzerReasoningEffort = Literal["medium"]
+ChatbotReasoningEffort = Literal["medium"]
 
 
 class Settings(BaseModel):
@@ -17,10 +19,12 @@ class Settings(BaseModel):
 
     specops_database_url: str = Field(min_length=1)
     workshop_database_url: str = Field(min_length=1)
-    gemini_api_key: SecretStr = Field(repr=False)
+    gemini_api_key: SecretStr | None = Field(default=None, repr=False)
     openai_api_key: SecretStr = Field(repr=False)
     gemini_model: str = GEMINI_MODEL
+    luna_model: str = LUNA_MODEL
     terra_model: str = TERRA_MODEL
+    chatbot_reasoning_effort: ChatbotReasoningEffort = "medium"
     analyzer_reasoning_effort: AnalyzerReasoningEffort = "medium"
 
     @classmethod
@@ -40,16 +44,28 @@ class Settings(BaseModel):
             "gemini_api_key": values.get("GEMINI_API_KEY"),
             "openai_api_key": values.get("OPENAI_API_KEY"),
             "gemini_model": values.get("GEMINI_LIVE_MODEL", GEMINI_MODEL),
+            "luna_model": values.get("OPENAI_CHATBOT_MODEL", LUNA_MODEL),
             "terra_model": values.get("OPENAI_ANALYZER_MODEL", TERRA_MODEL),
+            "chatbot_reasoning_effort": values.get(
+                "OPENAI_CHATBOT_REASONING_EFFORT", "medium"
+            ),
             "analyzer_reasoning_effort": values.get(
                 "OPENAI_ANALYZER_REASONING_EFFORT", "medium"
             ),
         }
-        missing = sorted(key for key, value in mapped.items() if value is None)
+        missing = sorted(
+            key
+            for key, value in mapped.items()
+            if value is None and key != "gemini_api_key"
+        )
         if missing:
             raise ValueError(f"missing required Workshop settings: {', '.join(missing)}")
         settings = cls.model_validate(mapped)
-        if settings.gemini_model != GEMINI_MODEL or settings.terra_model != TERRA_MODEL:
+        if (
+            settings.gemini_model != GEMINI_MODEL
+            or settings.luna_model != LUNA_MODEL
+            or settings.terra_model != TERRA_MODEL
+        ):
             raise ValueError("Workshop provider models must match the pinned release models")
         return settings
 

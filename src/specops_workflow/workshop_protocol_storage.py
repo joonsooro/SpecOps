@@ -42,11 +42,19 @@ V0_RUNTIME_TABLE_NAMES = (
     "workshop_analyzer_jobs",
 )
 
+# Task 28 is an additive application seam over the frozen Workshop Protocol.
+# Keep these names out of V0_RUNTIME_TABLE_NAMES: migration 0005 imports that
+# tuple and must continue to represent the exact historical Task 27 schema.
+TASK28_RUNTIME_TABLE_NAMES = (
+    "workshop_typed_responses",
+    "workshop_visual_proposal_actions",
+)
+
 
 def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
     """Register the V4 tables on the one canonical Foundation metadata graph."""
 
-    all_names = (*V4_TABLE_NAMES, *V0_RUNTIME_TABLE_NAMES)
+    all_names = (*V4_TABLE_NAMES, *V0_RUNTIME_TABLE_NAMES, *TASK28_RUNTIME_TABLE_NAMES)
     if all(name in metadata.tables for name in all_names):
         return {name: metadata.tables[name] for name in V4_TABLE_NAMES}
 
@@ -330,6 +338,42 @@ def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
         Column("created_at", Text, nullable=False),
         Column("updated_at", Text, nullable=False),
         UniqueConstraint("case_id", "operation", "subject_id"),
+    )
+    table(
+        "workshop_typed_responses",
+        Column("response_id", Text, primary_key=True),
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False),
+        Column("session_id", Text, nullable=False),
+        Column("question_id", Text, nullable=False),
+        Column("question_version", Integer, nullable=False),
+        Column("turn_sequence", Integer, nullable=False),
+        Column("response_version", Integer, nullable=False),
+        Column("normalized_text", Text, nullable=False),
+        Column("content_hash", Text, nullable=False),
+        Column("final_source_ref_json", Text, nullable=False),
+        Column("client_submission_id", Text, nullable=False, unique=True),
+        Column("request_fingerprint", Text, nullable=False),
+        Column("correction_of_response_id", Text),
+        Column("edit_target_json", Text),
+        Column("input_channel", Text, nullable=False),
+        Column("channel_confirmation_receipt_id", Text),
+        Column("question_snapshot_json", Text, nullable=False),
+        Column("transcript_event_id", Text, nullable=False, unique=True),
+        Column("created_at", Text, nullable=False),
+        UniqueConstraint("case_id", "session_id", "turn_sequence", "response_version"),
+    )
+    table(
+        "workshop_visual_proposal_actions",
+        Column("client_action_id", Text, primary_key=True),
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False),
+        Column("proposal_ref", Text, nullable=False),
+        Column("proposal_version", Integer, nullable=False),
+        Column("action_sequence", Integer, nullable=False),
+        Column("action", Text, nullable=False),
+        Column("binding_json", Text, nullable=False),
+        Column("request_fingerprint", Text, nullable=False),
+        Column("result_json", Text, nullable=False),
+        Column("created_at", Text, nullable=False),
     )
 
     Index(

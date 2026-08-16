@@ -380,11 +380,29 @@ async def confirmed_artifact(
     return None if value is None else ConfirmedArtifactProjection.model_validate(value)
 
 
-def install_workshop_protocol_api(app: FastAPI, foundation: WorkshopFoundationService) -> None:
+def install_workshop_protocol_api(
+    app: FastAPI,
+    foundation: WorkshopFoundationService,
+    *,
+    participant_runtime: bool = False,
+) -> None:
     app.state.workshop_protocol_foundation = foundation
     # Append concrete routes so the established runtime's route-inspection
     # safety checks continue to see only path-bearing route objects.
-    app.router.routes.extend(router.routes)
+    excluded = {
+        "/api/v4/foundation/commands",
+        "/api/v4/workshop/complete",
+        "/api/v4/decisions/current/respond",
+    }
+    app.router.routes.extend(
+        route
+        for route in router.routes
+        if not participant_runtime
+        or (
+            route.path not in excluded
+            and not route.path.startswith("/api/v4/voice/")
+        )
+    )
     _install_raw_contract_definitions(app)
 
 

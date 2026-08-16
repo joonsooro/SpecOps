@@ -14,25 +14,32 @@ export function formulationEnabled(phase: ConversationPhase, revisionLocked: boo
 }
 
 export function proposalControlPayload(
-  intent: ProposalIntent,
-  proposalRef: string,
-  editInstruction: string,
+  clientActionId: string,
+  binding: {
+    proposal_ref: string;
+    proposal_version: number;
+    base_case_revision: number;
+    payload_hash: string;
+  },
 ) {
   return {
-    intent,
-    proposal_ref: proposalRef,
-    edit_instruction: intent === "EDIT" ? editInstruction : null,
-    acknowledgement: intent === "CONFIRM" ? "Confirmed" : null,
+    client_action_id: clientActionId,
+    binding,
   } as const;
 }
 
-export function reduceLiveProjection(
-  state: { callState: string; partial: string; failure: string | null },
-  event: Record<string, unknown>,
+export function typedResponsePayload(
+  clientSubmissionId: string,
+  question: { question_id: string; question_version: number },
+  text: string,
+  correctionOfResponseId: string | null = null,
 ) {
-  if (event.type === "CALL_STATE") return { ...state, callState: String(event.state) };
-  if (event.type === "TRANSCRIPT_PARTIAL") return { ...state, partial: String(event.text ?? "") };
-  if (event.type === "TRANSCRIPT_FINAL") return { ...state, partial: "" };
-  if (event.type === "ERROR") return { ...state, failure: `Voice control failed: ${String(event.code)}` };
-  return state;
+  return {
+    client_submission_id: clientSubmissionId,
+    question_id: question.question_id,
+    expected_question_version: question.question_version,
+    text,
+    correction_of_response_id: correctionOfResponseId,
+    edit_target: null,
+  } as const;
 }

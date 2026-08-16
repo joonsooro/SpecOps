@@ -378,22 +378,33 @@ def test_production_factory_uses_stored_conversation_v4_path_and_replays_duplica
         analyzer_adapter=adapter,
     )
     with TestClient(app) as client:
+        for _ in range(200):
+            if client.get("/api/workshop/preparation").json()["phase"] == "READY":
+                break
+            time.sleep(0.01)
+        context = client.get("/api/workshop").json()
+        question = context["question_runway"]["questions"][0]
         payload = {
-            "turn_sequence": 1,
+            "client_submission_id": "14141414-1414-4414-8414-141414141414",
+            "question_id": question["question_id"],
+            "expected_question_version": question["question_version"],
             "text": "Thanks, let us continue.",
-            "provider_request_id": "http-final-1",
-            "correction_of_version": None,
+            "correction_of_response_id": None,
+            "edit_target": None,
         }
-        first = client.post("/api/session/final-turn", json=payload)
-        replay = client.post("/api/session/final-turn", json=payload)
+        first = client.post("/api/workshop/responses", json=payload)
+        replay = client.post("/api/workshop/responses", json=payload)
         for _ in range(100):
-            if client.get("/api/workshop").json()["analyzer_jobs"][0]["state"] == "COMPLETED":
+            jobs = app.state.workshop_protocol_foundation.analyzer_jobs(
+                app.state.bootstrap.case_id
+            )
+            if jobs and jobs[0]["state"] == "COMPLETED":
                 break
             time.sleep(0.01)
     assert first.status_code == 200, first.text
     assert replay.status_code == 200, replay.text
-    assert first.json()["duplicate"] is False
-    assert replay.json()["duplicate"] is True
+    assert first.json()["replayed"] is False
+    assert replay.json()["replayed"] is True
     assert adapter.operations == [
         c.AnalyzerOperation.BOOTSTRAP,
         c.AnalyzerOperation.TURN_ANALYSIS,

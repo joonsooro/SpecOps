@@ -224,6 +224,10 @@ class DurableAnalyzerWorker:
             job["state"] == "PROVIDER_REQUESTED"
             and job["attempt_count"] > 1
             and not (job["last_error_code"] or "").startswith("PROVIDER_RETRYABLE_")
+            and not (
+                job["operation"] == c.AnalyzerOperation.GUIDANCE.value
+                and self.orchestrator.chatbot_guidance is not None
+            )
         ):
             tracked = next(
                 (
@@ -245,7 +249,15 @@ class DurableAnalyzerWorker:
             if correction_partition is not None:
                 self._validate_correction_candidate(candidate, correction_partition)
         elif correction_partition is None:
-            candidate = await self.orchestrator._execute_provider(request, context=context)
+            if (
+                isinstance(request, c.ReplenishGuidanceRequest)
+                and self.orchestrator.chatbot_guidance is not None
+            ):
+                candidate = await self.orchestrator.execute_chatbot_guidance(request)
+            else:
+                candidate = await self.orchestrator._execute_provider(
+                    request, context=context
+                )
         else:
             candidate = await self.orchestrator._execute_turn_analysis_correction(
                 request,

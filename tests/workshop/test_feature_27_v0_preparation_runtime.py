@@ -373,7 +373,7 @@ def _seed_invalid_turn_correction(foundation):
     return context, correction
 
 
-def test_real_0004_database_upgrades_additively_to_0008(tmp_path):
+def test_real_0004_database_upgrades_additively_through_task28(tmp_path):
     url, original = _runtime(tmp_path)
     original_case = original.get_case(CASE_ID)
     config = Config("alembic.ini")
@@ -386,7 +386,7 @@ def test_real_0004_database_upgrades_additively_to_0008(tmp_path):
         assert "workshop_preparations" not in engine_for(url).dialect.get_table_names(connection)
     migrate(url)
     with engine_for(url).connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0008"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0009"
         tables = set(engine_for(url).dialect.get_table_names(connection))
     assert {
         "workshop_preparations",
@@ -394,6 +394,8 @@ def test_real_0004_database_upgrades_additively_to_0008(tmp_path):
         "workshop_runway_items",
         "workshop_analyzer_jobs",
         "workshop_provider_responses",
+        "workshop_typed_responses",
+        "workshop_visual_proposal_actions",
     }.issubset(tables)
     restarted = type(original)(url, now=lambda: NOW)
     restarted.register_case(
@@ -3218,10 +3220,7 @@ def test_presence_websocket_starts_grace_only_after_last_browser_page_closes(tmp
     with TestClient(app) as client:
         with client.websocket_connect("/ws/presence"):
             assert app.state.client_presence.has_active_clients() is True
-            with client.websocket_connect("/ws/live") as live:
-                assert live.receive_json() == {"type": "CALL_STATE", "state": "CONNECTING"}
-                assert live.receive_json()["state"] == "DISCONNECTED"
-                live.send_json({"type": "END"})
+            assert "/ws/live" not in {route.path for route in app.routes}
             assert app.state.workshop_protocol_foundation.preparation_projection(
                 app.state.bootstrap.case_id
             )["cleanup_state"] == "NOT_REQUIRED"
@@ -3756,26 +3755,31 @@ def test_button_completion_endpoint_is_durable_idempotent_and_closes_new_turns(t
     )
     with TestClient(app) as client:
         for _ in range(200):
-            if client.get("/api/workshop").json()["preparation"]["phase"] == "READY":
+            if client.get("/api/workshop/preparation").json()["phase"] == "READY":
                 break
             import time
 
             time.sleep(0.01)
-        first = client.post(
-            "/api/v4/workshop/complete",
-            json={"operation_key": "browser-finish-first"},
-        )
+        before = client.get("/api/workshop").json()
+        finish_body = {
+            "client_action_id": str(uuid4()),
+            "expected_case_revision": before["case_revision"],
+        }
+        first = client.post("/api/workshop/finish", json=finish_body)
         replay = client.post(
-            "/api/v4/workshop/complete",
-            json={"operation_key": "browser-finish-repeated"},
+            "/api/workshop/finish",
+            json=finish_body,
         )
+        question = before["question_runway"]["questions"][0]
         rejected = client.post(
-            "/api/session/final-turn",
+            "/api/workshop/responses",
             json={
-                "turn_sequence": 1,
+                "client_submission_id": str(uuid4()),
+                "question_id": question["question_id"],
+                "expected_question_version": question["question_version"],
                 "text": "This must not reopen a completed Workshop.",
-                "provider_request_id": "post-completion-turn",
-                "correction_of_version": None,
+                "correction_of_response_id": None,
+                "edit_target": None,
             },
         )
         projection = client.get("/api/workshop").json()
@@ -3788,10 +3792,13 @@ def test_button_completion_endpoint_is_durable_idempotent_and_closes_new_turns(t
     ]["command_id"]
     assert replay.json()["replayed"] is True
     assert rejected.status_code == 409
-    assert rejected.json()["detail"]["code"] == "INVALID_TRANSITION"
-    assert projection["session"]["conversation_phase"] == "COMPLETE"
-    assert projection["session"]["revision_locked"] is True
-    assert projection["completion"]["completed_at"] is not None
+    assert rejected.json()["detail"]["code"] == "WORKSHOP_LOCKED"
+    assert projection["workshop_state"] in {"FINISHING", "COMPLETED"}
+    assert projection["completion_status"] in {
+        "FINISHING_ANALYSIS",
+        "FINISH_FAILED",
+        "HANDOFF_READY",
+    }
 
 
 def test_explicit_voice_completion_binds_final_transcript_and_finishes_analysis(tmp_path):

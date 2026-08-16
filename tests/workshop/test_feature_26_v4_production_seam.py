@@ -9,7 +9,9 @@ from uuid import UUID
 import json
 import hashlib
 
+import pytest
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 from pydantic import SecretStr
 
 from specops_contracts import workshop_v1 as c
@@ -28,11 +30,52 @@ from specops_workshop.v4.orchestrator import (
     ProviderOperationAdmission,
     V4ProductionOrchestrator,
 )
+from specops_workshop.v4.api import ArtifactSynthesisIntent, synthesize_artifact
+from specops_workflow.workshop_protocol import FoundationProtocolError
 
 
 ROOT = next(
     parent for parent in Path(__file__).resolve().parents if parent.name == "Spec_Eng"
 )
+
+
+def test_synthesis_http_error_preserves_only_foundation_safe_pointers():
+    class RejectingOrchestrator:
+        @staticmethod
+        async def synthesize_artifact(artifact_type, *, operation_key):
+            assert artifact_type == "SPEC_PACKAGE"
+            assert operation_key == "diagnose-identity-plan"
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                safe_diagnostic_pointers=(
+                    "/evidence_support_proposals/0/claim_pointer",
+                ),
+            )
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                workshop_protocol_orchestrator=RejectingOrchestrator()
+            )
+        )
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            synthesize_artifact(
+                request,
+                "SPEC_PACKAGE",
+                ArtifactSynthesisIntent(operation_key="diagnose-identity-plan"),
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {
+        "code": "IDENTITY_PLAN_FAILED",
+        "diagnostic_pointers": [
+            "/evidence_support_proposals/0/claim_pointer",
+        ],
+    }
 
 
 class DeterministicAdapter:

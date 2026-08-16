@@ -309,7 +309,10 @@ async def synthesize_artifact(
             detail=exc.receipt.model_dump(mode="json"),
         ) from None
     except FoundationProtocolError as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.code.value}) from None
+        detail: dict[str, object] = {"code": exc.code.value}
+        if exc.safe_diagnostic_pointers:
+            detail["diagnostic_pointers"] = list(exc.safe_diagnostic_pointers)
+        raise HTTPException(status_code=409, detail=detail) from None
     except ValueError as exc:
         raise HTTPException(status_code=409, detail={"code": str(exc)}) from None
 

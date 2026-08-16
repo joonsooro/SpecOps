@@ -64,6 +64,20 @@ def turn_correction_parent_job_id(subject_id: str) -> str:
     if not is_turn_correction_subject(subject_id):
         raise ValueError("Analyzer job is not a TURN_ANALYSIS correction")
     return subject_id.removeprefix(TURN_CORRECTION_SUBJECT_PREFIX)
+
+
+def _schema_error_pointers(errors: list[Any]) -> tuple[str, ...]:
+    pointers = {
+        "/"
+        + "/".join(
+            str(part).replace("~", "~0").replace("/", "~1")
+            for part in error.absolute_path
+        )
+        for error in errors
+    }
+    return tuple(sorted(pointers))[:32]
+
+
 from .artifact_projection import (
     artifact_envelope,
     build_review_view,
@@ -3509,7 +3523,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED) from exc
         errors = list(_payload_validator(schema_name).iter_errors(payload))
         if errors:
-            raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED)
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED,
+                safe_diagnostic_pointers=_schema_error_pointers(errors),
+            )
         assignment_map: tuple[c.ArtifactIdentityAssignment, ...] = ()
         if artifact_type == "SPEC_PACKAGE":
             try:

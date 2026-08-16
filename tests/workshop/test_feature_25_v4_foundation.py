@@ -2000,6 +2000,68 @@ def test_foundation_materializes_and_retains_exact_evidence_revision_once(tmp_pa
     assert foundation.case_revision(CASE_ID) == 6
 
 
+def test_artifact_admission_exposes_content_safe_schema_error_pointers(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID, "SPEC_PACKAGE", tuple(identity_kinds.values())
+    )
+    payload = bind_planned_identities(
+        payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities,
+                strict=True,
+            )
+        },
+    )
+    payload.update(foundation._server_owned_spec_records((), plan))
+    payload["requirements"][0]["behaviour"] = []
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.2",
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        confirmed_decision_bindings=(),
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+
+    with pytest.raises(FoundationProtocolError) as exc:
+        foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
+
+    assert exc.value.code is c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+    assert exc.value.safe_diagnostic_pointers == ("/requirements/0/behaviour",)
+    assert "[]" not in repr(exc.value.safe_diagnostic_pointers)
+    assert foundation.case_revision(CASE_ID) == 4
+    with engine_for(url).connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(
+                WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+            )
+        ).scalar_one() == 0
+
+
 def test_artifact_admission_rejects_reference_to_unused_planned_identity(tmp_path):
     url, foundation = _runtime(tmp_path)
     _activate(foundation)

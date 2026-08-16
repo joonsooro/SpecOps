@@ -1259,18 +1259,22 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 view_items = {
                     UUID(item["pending_decision_id"]): item for item in view["items"]
                 }
-                transcript_event = connection.execute(
-                    select(events)
-                    .where(
-                        events.c.case_id == str(case_id),
-                        events.c.event_sequence < event["event_sequence"],
-                        events.c.event_type == "RECORD_FINAL_TRANSCRIPT_APPLIED",
-                    )
-                    .order_by(events.c.event_sequence.desc())
-                    .limit(1)
-                ).mappings().one()
-                transcript_receipt = json.loads(transcript_event["event_json"])
                 command = receipt["command"]
+                transcript_event_id = receipt.get("response_transcript_event_id")
+                if transcript_event_id is None:
+                    transcript_event = connection.execute(
+                        select(events)
+                        .where(
+                            events.c.case_id == str(case_id),
+                            events.c.event_sequence < event["event_sequence"],
+                            events.c.event_type == "RECORD_FINAL_TRANSCRIPT_APPLIED",
+                        )
+                        .order_by(events.c.event_sequence.desc())
+                        .limit(1)
+                    ).mappings().one()
+                    transcript_event_id = json.loads(transcript_event["event_json"])[
+                        "transcript_event_id"
+                    ]
                 for item in receipt["item_results"]:
                     if item["outcome"] != c.DecisionItemOutcome.COMMITTED.value:
                         continue
@@ -1295,9 +1299,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                         confirmed_case_revision=command["resulting_case_revision"],
                         actor_ref=actor_ref,
                         authority_validation_id=UUID(command["command_id"]),
-                        transcript_event_id=UUID(
-                            transcript_receipt["transcript_event_id"]
-                        ),
+                        transcript_event_id=UUID(transcript_event_id),
                         confirmed_at=datetime.fromisoformat(
                             command["occurred_at"].replace("Z", "+00:00")
                         ),
@@ -3467,6 +3469,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             receipt_type="DECISION_BATCH_RESPONSE",
             command=self._base_receipt(command, prior_revision),
             decision_batch_view_id=command.decision_batch_view_id,
+            response_transcript_event_id=command.response_transcript_event_id,
             item_results=tuple(results),
             resulting_readiness=c.Readiness.FORMULATING,
             resulting_review_obligation=c.ReviewObligation.NONE,

@@ -166,7 +166,7 @@ def test_participant_turn_ingress_waits_for_prior_analysis_before_next_turn(tmp_
     assert projector.project().turn_submission_status == "READY"
 
 
-def test_completed_turn_analysis_materializes_pending_visual_proposal(tmp_path):
+def test_typed_turn_visual_confirm_binds_exact_transcript_for_synthesis(tmp_path):
     foundation, ingress, projector = _ready(tmp_path)
     turn = ingress.submit_typed(_intent(foundation, text="Use UTC for the export timestamp."))
     context = foundation.active_analyzer_context(CASE_ID)
@@ -227,6 +227,26 @@ def test_completed_turn_analysis_materializes_pending_visual_proposal(tmp_path):
     )
     assert foundation.case_revision(CASE_ID) == revision_after_materialization
     assert foundation.current_decision_view(CASE_ID) == view
+
+    confirmed = VisualProposalActionService(projector, orchestrator).confirm(
+        VisualProposalActionIntent(
+            client_action_id=uuid4(), binding=proposals[0].binding
+        )
+    )
+    assert confirmed.status.value == "COMMITTED"
+    with foundation.engine.connect() as connection:
+        protocol_events = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_events"]
+        assert connection.execute(
+            select(func.count()).select_from(protocol_events).where(
+                protocol_events.c.case_id == str(CASE_ID),
+                protocol_events.c.event_type == "RECORD_FINAL_TRANSCRIPT_APPLIED",
+            )
+        ).scalar_one() == 0
+    bindings = foundation.confirmed_decision_synthesis_bindings(CASE_ID)
+    assert len(bindings) == len(pending_decision_ids)
+    assert {item.transcript_event_id for item in bindings} == {
+        turn.snapshot.response_id
+    }
 
 
 def test_ingress_idempotency_correction_and_channel_provenance_survive_restart(tmp_path):

@@ -2473,6 +2473,7 @@ class DecisionBatchResponseReceipt(ContractModel):
     receipt_type: Literal["DECISION_BATCH_RESPONSE"]
     command: FoundationCommandReceipt
     decision_batch_view_id: UUID
+    response_transcript_event_id: UUID | None = None
     item_results: Annotated[tuple[DecisionBatchItemReceipt, ...], Field(min_length=1, max_length=26)]
     resulting_readiness: Readiness
     resulting_review_obligation: ReviewObligation

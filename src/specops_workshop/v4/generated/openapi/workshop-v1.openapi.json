@@ -791,6 +791,18 @@
             "title": "Receipt Type",
             "type": "string"
           },
+          "response_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Transcript Event Id"
+          },
           "resulting_readiness": {
             "$ref": "#/components/schemas/Readiness"
           },

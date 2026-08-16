@@ -587,6 +587,7 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
     command = c.ApplyDecisionBatchResponseCommand(**response_values)
     receipt = foundation.execute(command)
     assert [item.outcome for item in receipt.item_results] == ["COMMITTED", "REVISION_REQUESTED"]
+    assert receipt.response_transcript_event_id == confirmation.transcript.event_id
     assert foundation.execute(command) == receipt
     problem = next(item for item in foundation.semantic_snapshot(CASE_ID).problems)
     assert problem.status is c.SemanticRecordStatus.RESOLVED
@@ -616,6 +617,21 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
     snapshot = foundation.semantic_snapshot(CASE_ID)
     assert snapshot.evidence_findings == (finding,)
 
+    protocol_events = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_events"]
+    with engine.begin() as connection:
+        legacy_event = connection.execute(
+            select(protocol_events).where(
+                protocol_events.c.case_id == str(CASE_ID),
+                protocol_events.c.event_type == "APPLY_DECISION_BATCH_RESPONSE_APPLIED",
+            )
+        ).mappings().one()
+        legacy_receipt = json.loads(legacy_event["event_json"])
+        legacy_receipt.pop("response_transcript_event_id")
+        connection.execute(
+            update(protocol_events)
+            .where(protocol_events.c.event_id == legacy_event["event_id"])
+            .values(event_json=json.dumps(legacy_receipt, sort_keys=True, separators=(",", ":")))
+        )
     bindings = foundation.confirmed_decision_synthesis_bindings(CASE_ID)
     assert len(bindings) == 1
     omitted_payload = PayloadFactory().payload("spec-package-payload.schema.json")

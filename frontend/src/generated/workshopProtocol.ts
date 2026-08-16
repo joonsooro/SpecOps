@@ -555,6 +555,8 @@ export interface components {
              * @enum {string}
              */
             receipt_type: "DECISION_BATCH_RESPONSE";
+            /** Response Transcript Event Id */
+            response_transcript_event_id?: string | null;
             resulting_readiness: components["schemas"]["Readiness"];
             resulting_review_obligation: components["schemas"]["ReviewObligation"];
         };

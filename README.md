@@ -1,44 +1,135 @@
-# Deterministic Workflow Foundation
+# SpecOps
 
-This package is a headless, in-process Python policy and state kernel. Callers submit strict Pydantic commands to `WorkflowService`; the service validates authority, exact artifact bindings, registered evidence, projection shape, operation confirmation, and derived workflow state. It performs no network requests and does not read registered source paths.
+SpecOps is an AI-assisted specification workshop that turns an ambiguous product request into an evidence-backed, reviewable specification package. It combines a conversational interface with a deterministic workflow foundation so that AI can propose product semantics without silently controlling identity, authority, approval, or release readiness.
 
-## Requirements
+The central design rule is:
+
+> AI proposes. Deterministic code validates, records, and decides what may advance.
+
+This repository is the implementation artifact for the SpecOps Capstone project. It contains the web application, API, workflow foundation, persistence model, provider adapters, generated contracts, migrations, and verification suite.
+
+## The problem
+
+AI product-building workflows often move too quickly from an underspecified request to generated code. The model fills gaps, assumptions become invisible, and reviewers cannot reliably trace a technical decision back to its supporting evidence.
+
+SpecOps inserts a governed specification layer before downstream delivery. The workshop captures product intent, identifies ambiguity, proposes requirements and technical decisions, binds claims to registered sources, and requires explicit confirmation before producing a handoff-ready package.
+
+## What the Capstone demonstrates
+
+- A live voice and text workshop for refining a product request.
+- Evidence-grounded analysis of registered product and technical sources.
+- Structured proposals for requirements, decisions, checks, and delivery items.
+- Explicit confirmation, edit, rejection, and finish controls.
+- Deterministic enforcement of authority, identity, revision, and readiness rules.
+- Persistent recovery across browser refreshes and process restarts.
+- Contract-first boundaries between probabilistic AI providers and trusted application state.
+- A release suite covering schemas, migrations, API behavior, browser behavior, and workflow invariants.
+
+The included `resources/` directory contains the source material used by the Capstone demonstration.
+
+## Architecture
+
+```text
+PM voice or text
+       |
+       v
+React workshop UI
+       |
+       | HTTP + WebSocket
+       v
+FastAPI application boundary
+       |
+       +--------------------+----------------------+
+       |                    |                      |
+       v                    v                      v
+Live voice provider   Analyzer / evaluator   V4 orchestrator
+       |                    |                      |
+       +-------- AI proposals and transcripts ----+
+                                                    |
+                                                    v
+                                      Deterministic foundation
+                                      - authority and identity
+                                      - schema validation
+                                      - confirmation controls
+                                      - revisions and replay
+                                      - readiness and handoff
+                                                    |
+                                                    v
+                                             SQLite storage
+```
+
+### Frontend
+
+The React and TypeScript frontend in `frontend/` presents the workshop, captures microphone audio, communicates over HTTP and WebSocket, and renders server-owned projections. It does not hold provider credentials or own canonical workflow state.
+
+### Application boundary
+
+The FastAPI application in `src/specops_workshop/` coordinates browser sessions, voice transport, source registration, AI-provider calls, recovery, and the versioned V4 workshop protocol.
+
+### AI adapters
+
+Gemini Live supplies the conversational voice channel. OpenAI Responses adapters produce bounded semantic proposals and independent quality evaluations. Provider output is treated as untrusted input: it must satisfy strict schemas and workflow rules before it can affect committed state.
+
+### Deterministic foundation
+
+The packages in `src/specops_workflow/` and `src/specops_contracts/` form the trusted core. They enforce command contracts, authority, immutable source bindings, idempotent replay, explicit confirmation, derived readiness, audit history, and typed read models.
+
+### Persistence and contracts
+
+SQLite and Alembic provide local persistence and migrations. JSON Schema, generated OpenAPI artifacts, Pydantic models, and generated TypeScript types keep the provider, server, and browser boundaries aligned.
+
+## Repository map
+
+```text
+frontend/                 React/TypeScript workshop interface
+migrations/               Alembic database migrations
+resources/                Capstone demonstration sources
+scripts/                  Contract generation and release verification
+src/specops_contracts/    Versioned schemas and protocol contracts
+src/specops_workflow/     Deterministic policy and state foundation
+src/specops_workshop/     FastAPI runtime and AI-provider orchestration
+tests/                    Foundation, workshop, contract, and release tests
+```
+
+## Technology
 
 - Python 3.12
-- SQLite
+- FastAPI and Uvicorn
+- Pydantic and JSON Schema
+- SQLAlchemy, Alembic, and SQLite
+- React, TypeScript, and Vite
+- Gemini Live and OpenAI Responses APIs
+- Pytest, Vitest, and Playwright
 
-Create an environment and install the package with its test dependencies:
+## Local foundation setup
+
+Create a Python 3.12 environment and install the deterministic foundation with its test dependencies:
 
 ```bash
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[test]'
 ```
 
-`SPECOPS_DATABASE_URL` is read when `WorkflowService` is constructed, never at import time. An explicit `database_url=` overrides it and is the preferred deterministic-test boundary.
-
-## Anonymous public workflow
-
-The executable example generates all actor, case, command, source, and package UUIDs. It migrates a previously nonexistent temporary SQLite path, creates the immutable authority slots, demonstrates an unauthorized participant command returning `AUTHORITY_REQUIRED`, registers evidence, creates and approves a package in both scopes, and reads the workflow view.
+Run the anonymous workflow example:
 
 ```bash
 .venv/bin/python examples/anonymous_workflow.py
 ```
 
-The expected milestones are:
+The example uses generated identities and a temporary SQLite database. It demonstrates both an authorized command and an authority rejection without calling an external AI provider.
 
-```text
-permitted_command=create_case 1
-blocked_command=add_participant AUTHORITY_REQUIRED
-```
+## Verification
 
-The final JSON view is at `JIRA_REVIEW`: the package is approved, while no projection plan has been supplied yet. Missing future-stage work is not itself a health failure.
-
-## Release verification
-
-Run the complete bar from the repository root:
+Run the deterministic test suite from the repository root:
 
 ```bash
 .venv/bin/pytest -q
 ```
 
-The full-suite pytest plug-in requires the exact EV-001 through EV-042 marker inventory, rejects skips/failures/not-run evidence, and prints every EV ID with its exercising node and outcome. The checked-in snapshots cover all 21 command DTOs, 11 mutation results, six read/page models, and generic `ReplayResult`; every schema forbids unknown fields. The EV-042 test independently migrates a fresh SQLite path and inspects metadata, foreign keys, Alembic head, UTC round-trip, and both append-only audit triggers.
+The release suite exercises the workflow contracts, schema snapshots, authority boundaries, SQLite migrations, append-only audit protections, recovery behavior, generated API contracts, and browser integration. Live provider verification is intentionally separate because it requires external credentials and network access.
+
+## Scope and limitations
+
+SpecOps is a local Capstone demonstration, not a production SaaS release. The current scope does not claim production authentication, multi-tenant isolation, managed cloud deployment, or direct Jira/GitHub execution. AI-backed behavior also depends on provider availability and valid credentials. The deterministic foundation reduces workflow drift; it cannot make probabilistic model output fully deterministic.
+
+Secrets belong only in a local `.env` file and must never be committed. Runtime databases, generated build output, test reports, and local environment files are excluded through `.gitignore`.

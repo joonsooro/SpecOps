@@ -1,17 +1,38 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 .venv/
+venv/
+*.egg-info/
+
+# JavaScript / frontend
 node_modules/
 *.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
-*.db
-*.sqlite*
-dist/
-build/
-*.egg-info/
 frontend/test-results/
 frontend/playwright-report/
+
+# Local runtime state
+*.db
+*.sqlite*
+
+# Generated build output
+dist/
+build/
+
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log

@@ -42,7 +42,8 @@ FastAPI application boundary
        +--------------------+----------------------+
        |                    |                      |
        v                    v                      v
-Live voice provider   Analyzer / evaluator   V4 orchestrator
+Live voice provider   GPT-5.6 Terra          V4 orchestrator
+                      Analyzer / evaluator
        |                    |                      |
        +-------- AI proposals and transcripts ----+
                                                     |
@@ -68,7 +69,7 @@ The FastAPI application in `src/specops_workshop/` coordinates browser sessions,
 
 ### AI adapters
 
-Gemini Live supplies the conversational voice channel. OpenAI Responses adapters produce bounded semantic proposals and independent quality evaluations. Provider output is treated as untrusted input: it must satisfy strict schemas and workflow rules before it can affect committed state.
+Gemini Live supplies the conversational voice channel. **The SpecOps Analyzer is OpenAI GPT-5.6 Terra, configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. Provider output is treated as untrusted input: it must satisfy strict schemas and workflow rules before it can affect committed state.
 
 ### Deterministic foundation
 
@@ -98,7 +99,8 @@ tests/                    Foundation, workshop, contract, and release tests
 - Pydantic and JSON Schema
 - SQLAlchemy, Alembic, and SQLite
 - React, TypeScript, and Vite
-- Gemini Live and OpenAI Responses APIs
+- Gemini Live for the voice channel
+- OpenAI GPT-5.6 Terra for the Analyzer and artifact-quality evaluator
 - Pytest, Vitest, and Playwright
 
 ## Local foundation setup

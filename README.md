@@ -37,26 +37,29 @@ React workshop UI
        |
        | HTTP + WebSocket
        v
-FastAPI application boundary
+FastAPI boundary + live transport
        |
-       +--------------------+----------------------+
-       |                    |                      |
-       v                    v                      v
-Gemini 3.1 Flash      GPT-5.6 Terra          V4 orchestrator
-Live Voice Agent      Analyzer / evaluator
-       |                    |                      |
-       +-------- AI proposals and transcripts ----+
-                                                    |
-                                                    v
-                                      Deterministic foundation
-                                      - authority and identity
-                                      - schema validation
-                                      - confirmation controls
-                                      - revisions and replay
-                                      - readiness and handoff
-                                                    |
-                                                    v
-                                             SQLite storage
+       +<------ real-time audio ------> Gemini 3.1 Flash Live Voice Agent
+       |
+       | final transcripts and user controls
+       v
+Deterministic V4 orchestrator
+       |
+       +------ typed, hash-bound request ------> GPT-5.6 Terra
+       |                                         Analyzer / evaluator
+       |<------------- candidate proposal --------------+
+       |
+       | Foundation commands and candidate admission
+       v
+Deterministic foundation
+       - authority and identity
+       - schema and evidence validation
+       - confirmation controls
+       - revisions and idempotent replay
+       - readiness and handoff
+       |
+       v
+SQLite storage
 ```
 
 ### Frontend
@@ -65,15 +68,23 @@ The React and TypeScript frontend in `frontend/` presents the workshop, captures
 
 ### Application boundary
 
-The FastAPI application in `src/specops_workshop/` coordinates browser sessions, voice transport, source registration, AI-provider calls, recovery, and the versioned V4 workshop protocol.
+The FastAPI application in `src/specops_workshop/` exposes the HTTP and WebSocket boundary. The live transport manages the real-time Gemini connection and passes finalized transcripts and mapped user controls into the V4 orchestrator.
+
+### Deterministic orchestrator
+
+The V4 orchestrator is **deterministic application logic, not an orchestrator agent or another AI model**. It does not invent requirements, choose product semantics, or autonomously pursue goals. Its rule-bound control flow selects the operation, constructs a typed and hash-bound request from committed state, derives stable command identities, applies revision and idempotency checks, and routes the resulting candidate through the corresponding Foundation command.
+
+Its job is to coordinate the trusted sequence around probabilistic provider calls: load the current Foundation snapshot, manage the Analyzer context, call the appropriate Terra operation, receive a candidate proposal, and ask the Foundation to admit or reject it. For artifact generation it also triggers a separate quality-evaluation context and records the resulting audit through the Foundation.
+
+“Deterministic” describes this orchestration and admission path—not the content returned by Gemini or Terra. Provider responses remain probabilistic.
 
 ### AI adapters
 
-**The SpecOps Voice Agent is Google Gemini 3.1 Flash Live Preview** (`gemini-3.1-flash-live-preview`), which supplies the real-time conversational voice channel. **The SpecOps Analyzer is OpenAI GPT-5.6 Terra, configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. Provider output is treated as untrusted input: it must satisfy strict schemas and workflow rules before it can affect committed state.
+**The SpecOps Voice Agent is Google Gemini 3.1 Flash Live Preview** (`gemini-3.1-flash-live-preview`), which supplies the real-time conversational voice channel. **The SpecOps Analyzer is OpenAI GPT-5.6 Terra, configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. The orchestrator treats provider output as untrusted input and submits it to the Foundation; it cannot directly become committed application state.
 
 ### Deterministic foundation
 
-The packages in `src/specops_workflow/` and `src/specops_contracts/` form the trusted core. They enforce command contracts, authority, immutable source bindings, idempotent replay, explicit confirmation, derived readiness, audit history, and typed read models.
+The packages in `src/specops_workflow/` and `src/specops_contracts/` form the trusted state and policy core. Unlike the orchestrator, which coordinates use-case steps, the Foundation owns the canonical workflow rules and decides whether a command or AI-generated candidate is admissible. It enforces command contracts, authority, immutable source bindings, idempotent replay, explicit confirmation, derived readiness, audit history, and typed read models.
 
 ### Persistence and contracts
 

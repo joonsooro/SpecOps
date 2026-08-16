@@ -14,6 +14,7 @@ from specops_workflow.artifact_quality_revision import (
     apply_quality_revision_candidate,
     normalize_quality_revision_candidate_wire,
     prepare_quality_revision_request,
+    quality_revision_enum_constraints,
     quality_revision_pointer_closure,
     require_monotonic_quality_improvement,
 )
@@ -75,6 +76,33 @@ def test_technical_closure_revision_opens_nested_architecture_and_owned_records(
         "/interfaces",
         "/interfaces/0",
     )
+
+
+def test_revision_enum_constraints_resolve_reusable_artifact_definitions():
+    schema = {
+        "type": "object",
+        "properties": {
+            "interfaces": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/interface"},
+            }
+        },
+        "$defs": {
+            "interface": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["api", "event", "internal"]},
+                    "status": {"$ref": "#/$defs/status"},
+                },
+            },
+            "status": {"type": "string", "enum": ["open", "closed"]},
+        },
+    }
+
+    assert quality_revision_enum_constraints(schema) == {
+        "/interfaces/*/kind": ("api", "event", "internal"),
+        "/interfaces/*/status": ("open", "closed"),
+    }
 
 
 def test_technical_revision_recovers_only_hash_bound_confirmed_spec_lineage():
@@ -217,6 +245,108 @@ def test_bounded_revision_repairs_existing_payload_with_only_allocated_identitie
     assert len(revised["requirements"]) == len(payload["requirements"]) + 1
     assert revised["actors"] == payload["actors"]
     assert revised["decisions"] == payload["decisions"]
+
+
+def test_bounded_revision_treats_allocated_identities_as_a_capacity_ceiling():
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    request = prepare_quality_revision_request(
+        artifact_id=uuid4(),
+        artifact_version=3,
+        record_revision=2,
+        based_on_case_revision=8,
+        payload=payload,
+        audit_id=uuid4(),
+        finding_ids=(uuid4(),),
+        failed_rule_ids=("SPEC-Q-007",),
+        canonical_artifact_pointers=("/requirements",),
+        allocated_identity_kinds=("REQUIREMENT", "REQUIREMENT"),
+    )
+    replacement = [dict(item) for item in payload["requirements"]]
+    added = dict(replacement[0])
+    added["id"] = str(request.allocated_identities[0].foundation_id)
+    replacement.append(added)
+    candidate = q.ArtifactQualityRevisionCandidate(
+        protocol_version="1.0.0",
+        output_type="ARTIFACT_QUALITY_REVISION_CANDIDATE",
+        revision_request_id=request.revision_request_id,
+        revision_request_version=1,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        attempt=1,
+        patches=(
+            q.ArtifactRevisionPatch(
+                pointer="/requirements",
+                replacement_value_json=json.dumps(replacement),
+            ),
+        ),
+    )
+
+    revised = apply_quality_revision_candidate(
+        payload=payload,
+        request=request,
+        candidate=candidate,
+        identity_kinds=WorkshopFoundationService._artifact_identity_kinds,
+    )
+
+    assert revised["requirements"][-1]["id"] == str(
+        request.allocated_identities[0].foundation_id
+    )
+    assert str(request.allocated_identities[1].foundation_id) not in json.dumps(revised)
+
+
+@pytest.mark.parametrize("mode", ("unallocated", "wrong_kind"))
+def test_revision_capacity_ceiling_still_rejects_unallocated_or_wrong_kind_ids(mode):
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    collection = "requirements" if mode == "unallocated" else "acceptance_checks"
+    request = prepare_quality_revision_request(
+        artifact_id=uuid4(),
+        artifact_version=3,
+        record_revision=2,
+        based_on_case_revision=8,
+        payload=payload,
+        audit_id=uuid4(),
+        finding_ids=(uuid4(),),
+        failed_rule_ids=("SPEC-Q-007",),
+        canonical_artifact_pointers=(f"/{collection}",),
+        allocated_identity_kinds=("REQUIREMENT",),
+    )
+    replacement = [dict(item) for item in payload[collection]]
+    added = dict(replacement[0])
+    added["id"] = (
+        str(uuid4())
+        if mode == "unallocated"
+        else str(request.allocated_identities[0].foundation_id)
+    )
+    replacement.append(added)
+    candidate = q.ArtifactQualityRevisionCandidate(
+        protocol_version="1.0.0",
+        output_type="ARTIFACT_QUALITY_REVISION_CANDIDATE",
+        revision_request_id=request.revision_request_id,
+        revision_request_version=1,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        attempt=1,
+        patches=(
+            q.ArtifactRevisionPatch(
+                pointer=f"/{collection}",
+                replacement_value_json=json.dumps(replacement),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="allocation ceiling"):
+        apply_quality_revision_candidate(
+            payload=payload,
+            request=request,
+            candidate=candidate,
+            identity_kinds=WorkshopFoundationService._artifact_identity_kinds,
+        )
 
 
 def test_bounded_revision_rejects_unscoped_patch_and_requires_monotonic_audit():

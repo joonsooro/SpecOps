@@ -165,6 +165,65 @@ def quality_revision_pointer_closure(
     return tuple(sorted(result))
 
 
+def quality_revision_enum_constraints(
+    schema: dict[str, Any],
+) -> dict[str, tuple[str | int | float | bool | None, ...]]:
+    """Project canonical enum vocabularies for JSON-in-string revision patches.
+
+    Structured Outputs can validate the revision envelope but cannot inspect a
+    JSON document encoded inside ``replacement_value_json``.  This compact,
+    deterministic projection gives the provider the canonical vocabulary while
+    the unmodified artifact schema remains authoritative during admission.
+    """
+
+    definitions = schema.get("$defs", {})
+    if not isinstance(definitions, dict):
+        raise ValueError("artifact schema definitions are invalid")
+    result: dict[str, tuple[str | int | float | bool | None, ...]] = {}
+
+    def walk(value: Any, pointer: str, resolving: frozenset[str]) -> None:
+        if not isinstance(value, dict):
+            return
+        reference = value.get("$ref")
+        if isinstance(reference, str):
+            prefix = "#/$defs/"
+            if not reference.startswith(prefix):
+                raise ValueError("artifact enum projection has an external reference")
+            name = reference[len(prefix) :]
+            target = definitions.get(name)
+            if not isinstance(target, dict):
+                raise ValueError("artifact enum projection reference is unresolved")
+            if name not in resolving:
+                walk(target, pointer, resolving | {name})
+        enum = value.get("enum")
+        if isinstance(enum, list):
+            if not pointer or not enum or any(
+                not isinstance(item, (str, int, float, bool)) and item is not None
+                for item in enum
+            ):
+                raise ValueError("artifact enum projection contains an invalid enum")
+            projected = tuple(enum)
+            existing = result.get(pointer)
+            if existing is not None and existing != projected:
+                raise ValueError("artifact enum projection is ambiguous")
+            result[pointer] = projected
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            for name, child in properties.items():
+                walk(child, f"{pointer}/{_escape_pointer_token(name)}", resolving)
+        items = value.get("items")
+        if isinstance(items, dict):
+            walk(items, f"{pointer}/*", resolving)
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            variants = value.get(keyword)
+            if isinstance(variants, list):
+                for child in variants:
+                    walk(child, pointer, resolving)
+
+    walk(schema, "", frozenset())
+    return dict(sorted(result.items()))
+
+
 def prepare_quality_revision_request(
     *,
     artifact_id: UUID,
@@ -293,7 +352,7 @@ def apply_quality_revision_candidate(
         for item in revised_actors[len(original_actors) :]
         if isinstance(item, dict)
     }
-    if appended_actor_ids != allocated_actor_ids or any(
+    if not appended_actor_ids.issubset(allocated_actor_ids) or any(
         not isinstance(item, dict)
         for item in revised_actors[len(original_actors) :]
     ):
@@ -305,10 +364,10 @@ def apply_quality_revision_candidate(
         str(item.foundation_id): item.entity_kind for item in request.allocated_identities
     }
     new_identities = set(updated) - set(original)
-    if new_identities != set(allocated) or any(
+    if not new_identities.issubset(allocated) or any(
         updated[identity] != allocated[identity] for identity in new_identities
     ):
-        raise ValueError("quality revision used identities outside its exact allocation")
+        raise ValueError("quality revision used identities outside its allocation ceiling")
     if any(updated.get(identity) != kind for identity, kind in original.items()):
         raise ValueError("quality revision removed or retyped an existing identity")
     return revised

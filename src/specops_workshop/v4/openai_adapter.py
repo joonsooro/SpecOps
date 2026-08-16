@@ -208,24 +208,59 @@ _KNOWN_SCHEMA_PATHS = frozenset(
     }
 )
 
+_SAFE_ROOT_INVARIANT_PATHS = {
+    "candidate keys must be unique across the brief": (
+        "graph",
+        "candidate_key_uniqueness",
+    ),
+    "problem references unknown evidence candidate": (
+        "graph",
+        "problem_evidence_reference",
+    ),
+    "cluster references unknown problem": (
+        "graph",
+        "cluster_problem_reference",
+    ),
+    "question references unknown problem": (
+        "graph",
+        "question_problem_reference",
+    ),
+    "runway references unknown question": (
+        "graph",
+        "runway_question_reference",
+    ),
+    "checkpoint references unknown cluster": (
+        "graph",
+        "checkpoint_cluster_reference",
+    ),
+}
+
 
 def safe_validation_diagnostics(error: Exception) -> tuple[contracts.SafeValidationDiagnostic, ...]:
     if not isinstance(error, ValidationError):
         return ()
     result: list[contracts.SafeValidationDiagnostic] = []
-    for item in error.errors(include_url=False, include_context=False, include_input=False):
-        path: list[str] = []
-        for segment in item.get("loc", ())[:16]:
-            if isinstance(segment, int) and 0 <= segment <= 9_999:
-                path.append(str(segment))
-            elif isinstance(segment, str) and segment in _KNOWN_SCHEMA_PATHS:
-                path.append(segment)
-            elif isinstance(segment, str):
-                path.append("$unknown")
-                break
-            else:
-                path.append("$unknown")
-                break
+    for item in error.errors(include_url=False, include_context=True, include_input=False):
+        location = item.get("loc", ())
+        context_error = item.get("ctx", {}).get("error")
+        safe_root_path = (
+            _SAFE_ROOT_INVARIANT_PATHS.get(str(context_error))
+            if not location
+            else None
+        )
+        path: list[str] = list(safe_root_path or ())
+        if safe_root_path is None:
+            for segment in location[:16]:
+                if isinstance(segment, int) and 0 <= segment <= 9_999:
+                    path.append(str(segment))
+                elif isinstance(segment, str) and segment in _KNOWN_SCHEMA_PATHS:
+                    path.append(segment)
+                elif isinstance(segment, str):
+                    path.append("$unknown")
+                    break
+                else:
+                    path.append("$unknown")
+                    break
         raw_code = str(item.get("type", ""))
         if raw_code == "missing":
             code = contracts.SafeValidationCode.MISSING

@@ -13,6 +13,7 @@ import pytest
 import httpx
 from jsonschema import Draft202012Validator
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 from specops_contracts import artifact_quality_v1 as q
 
 from specops_workshop.v4 import contracts as c
@@ -22,6 +23,7 @@ from specops_workshop.v4.openai_adapter import (
     ProviderAdapterError,
     ProviderSourceUpload,
     StoredConversationOpenAIAdapter,
+    safe_validation_diagnostics,
 )
 from specops_workshop.v4.schema_compiler import (
     NATIVE_SCHEMA_SPECS,
@@ -1807,6 +1809,84 @@ def test_bootstrap_unknown_question_problem_reference_exposes_only_safe_correcti
         assert "private PM source" not in dumped
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("failure_case", "safe_path"),
+    (
+        ("duplicate_candidate_key", ("graph", "candidate_key_uniqueness")),
+        ("unknown_problem_evidence", ("graph", "problem_evidence_reference")),
+        ("unknown_cluster_problem", ("graph", "cluster_problem_reference")),
+        ("unknown_question_problem", ("graph", "question_problem_reference")),
+        ("unknown_runway_question", ("graph", "runway_question_reference")),
+        ("unknown_checkpoint_cluster", ("graph", "checkpoint_cluster_reference")),
+    ),
+)
+def test_bootstrap_root_graph_invariants_have_distinct_content_safe_diagnostics(
+    failure_case, safe_path
+):
+    adapter = StoredConversationOpenAIAdapter(
+        api_key="unused", client=SimpleNamespace()
+    )
+    sources = (
+        _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+        _source(
+            c.SourceRole.TECHNICAL_CONTRACT,
+            11,
+            "technical-contract.md",
+            b"private technical source",
+        ),
+    )
+    prepared = adapter.prepared_from_ids(
+        sources, ("file_pm", "file_technical"), "conv_background"
+    )
+    payload = _brief(_bootstrap_request(prepared)).model_dump(mode="json")
+    private_key = "private-missing-relationship"
+
+    if failure_case == "duplicate_candidate_key":
+        payload["problems"][0]["candidate_key"] = "evidence-export"
+    elif failure_case == "unknown_problem_evidence":
+        payload["problems"][0]["evidence_candidate_keys"] = [private_key]
+    elif failure_case == "unknown_cluster_problem":
+        payload["problem_clusters"] = [
+            {
+                "candidate_key": "cluster-export",
+                "title": "Export decisions",
+                "problem_keys": ["problem-format", private_key],
+                "coupling_type": "SHARED_OUTCOME",
+                "coupling_reason": "Both choices affect the exported result.",
+                "suggested_confirmation_mode": "TOGETHER",
+            }
+        ]
+    elif failure_case == "unknown_question_problem":
+        payload["questions"][0]["addresses_problem_keys"] = [private_key]
+    elif failure_case == "unknown_runway_question":
+        payload["initial_runway"]["recommended_question_key"] = private_key
+    elif failure_case == "unknown_checkpoint_cluster":
+        payload["confirmation_checkpoints"] = [
+            {
+                "candidate_key": "checkpoint-export",
+                "cluster_keys": [private_key],
+                "trigger_description": "Confirm the export decisions together.",
+            }
+        ]
+    else:  # pragma: no cover - parametrization is closed above.
+        raise AssertionError(failure_case)
+
+    with pytest.raises(ValidationError) as captured:
+        c.InterviewBriefCandidate.model_validate_json(json.dumps(payload))
+
+    diagnostics = safe_validation_diagnostics(captured.value)
+
+    assert diagnostics == (
+        c.SafeValidationDiagnostic(
+            path=safe_path,
+            code=c.SafeValidationCode.INVARIANT_FAILED,
+        ),
+    )
+    assert private_key not in json.dumps(
+        [item.model_dump(mode="json") for item in diagnostics]
+    )
 
 
 def test_cancelled_background_wait_resumes_the_same_response_without_recreate():

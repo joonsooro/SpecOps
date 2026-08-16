@@ -136,6 +136,114 @@ def test_revision_enum_constraints_resolve_reusable_artifact_definitions():
     }
 
 
+def test_revision_wire_normalizes_unambiguous_collection_append():
+    raw = json.dumps(
+        {
+            "protocol_version": "1.0.0",
+            "output_type": "ARTIFACT_QUALITY_REVISION_CANDIDATE",
+            "revision_request_id": str(uuid4()),
+            "revision_request_version": 1,
+            "request_hash": "sha256:" + "1" * 64,
+            "artifact_id": str(uuid4()),
+            "artifact_version": 1,
+            "record_revision": 2,
+            "payload_hash": "sha256:" + "2" * 64,
+            "attempt": 1,
+            "patches": [
+                {
+                    "pointer": "/interfaces/-",
+                    "replacement_value_json": json.dumps({"id": "allocated"}),
+                }
+            ],
+        }
+    )
+
+    candidate, normalization = normalize_quality_revision_candidate_wire(
+        raw_candidate_json=raw,
+        payload={"interfaces": [{"id": "existing"}]},
+    )
+
+    assert candidate.patches[0].pointer == "/interfaces"
+    assert json.loads(candidate.patches[0].replacement_value_json) == [
+        {"id": "existing"},
+        {"id": "allocated"},
+    ]
+    assert normalization["normalized_append_pointers"] == ("/interfaces",)
+
+
+def test_revision_wire_coalesces_children_into_an_admitted_parent():
+    raw = json.dumps(
+        {
+            "protocol_version": "1.0.0",
+            "output_type": "ARTIFACT_QUALITY_REVISION_CANDIDATE",
+            "revision_request_id": str(uuid4()),
+            "revision_request_version": 1,
+            "request_hash": "sha256:" + "1" * 64,
+            "artifact_id": str(uuid4()),
+            "artifact_version": 1,
+            "record_revision": 2,
+            "payload_hash": "sha256:" + "2" * 64,
+            "attempt": 1,
+            "patches": [
+                {
+                    "pointer": "/components/0/owner",
+                    "replacement_value_json": json.dumps("Foundation"),
+                },
+                {
+                    "pointer": "/components/0/refs",
+                    "replacement_value_json": json.dumps(["one", "two"]),
+                },
+            ],
+        }
+    )
+
+    candidate, normalization = normalize_quality_revision_candidate_wire(
+        raw_candidate_json=raw,
+        payload={"components": [{"owner": "Old", "refs": ["one"]}]},
+        canonical_parent_pointers=("/components", "/components/0"),
+    )
+
+    assert candidate.patches[0].pointer == "/components/0"
+    assert json.loads(candidate.patches[0].replacement_value_json) == {
+        "owner": "Foundation",
+        "refs": ["one", "two"],
+    }
+    assert normalization["normalized_parent_pointers"] == ("/components/0",)
+
+
+def test_revision_wire_rejects_append_overlapping_a_child_patch():
+    raw = json.dumps(
+        {
+            "protocol_version": "1.0.0",
+            "output_type": "ARTIFACT_QUALITY_REVISION_CANDIDATE",
+            "revision_request_id": str(uuid4()),
+            "revision_request_version": 1,
+            "request_hash": "sha256:" + "1" * 64,
+            "artifact_id": str(uuid4()),
+            "artifact_version": 1,
+            "record_revision": 2,
+            "payload_hash": "sha256:" + "2" * 64,
+            "attempt": 1,
+            "patches": [
+                {
+                    "pointer": "/interfaces/-",
+                    "replacement_value_json": json.dumps({"id": "allocated"}),
+                },
+                {
+                    "pointer": "/interfaces/0",
+                    "replacement_value_json": json.dumps({"id": "changed"}),
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="append overlaps"):
+        normalize_quality_revision_candidate_wire(
+            raw_candidate_json=raw,
+            payload={"interfaces": [{"id": "existing"}]},
+        )
+
+
 def test_technical_revision_recovers_only_hash_bound_confirmed_spec_lineage():
     spec_payload = PayloadFactory().payload("spec-package-payload.schema.json")
     binding = json.dumps(
@@ -194,6 +302,8 @@ def test_wire_normalization_is_exactly_string_typed_and_focus_bounded():
     assert receipt == {
         "excluded_pointers": ("/deferred/value",),
         "normalized_string_pointers": ("/kept",),
+        "normalized_append_pointers": (),
+        "normalized_parent_pointers": (),
     }
 
 

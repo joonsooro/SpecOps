@@ -17,6 +17,7 @@ def normalize_quality_revision_candidate_wire(
     raw_candidate_json: str,
     payload: dict,
     excluded_pointer_prefixes: tuple[str, ...] = (),
+    canonical_parent_pointers: tuple[str, ...] = (),
 ) -> tuple[q.ArtifactQualityRevisionCandidate, dict[str, tuple[str, ...]]]:
     """Normalize only JSON-in-string wire values at known string leaves.
 
@@ -56,10 +57,113 @@ def normalize_quality_revision_candidate_wire(
             patch = {**patch, "replacement_value_json": json.dumps(replacement)}
             normalized.append(pointer)
         retained.append(patch)
-    value["patches"] = retained
+
+    append_groups: dict[str, list[tuple[int, dict[str, Any], Any]]] = {}
+    for index, patch in enumerate(retained):
+        pointer = patch["pointer"]
+        if not pointer.endswith("/-"):
+            continue
+        parent_pointer = pointer[:-2]
+        parent = _resolve_pointer(payload, parent_pointer)
+        if not isinstance(parent, list):
+            raise ValueError("quality revision append parent is not a collection")
+        appended = json.loads(patch["replacement_value_json"])
+        append_groups.setdefault(parent_pointer, []).append((index, patch, appended))
+    for parent_pointer in append_groups:
+        if any(
+            patch["pointer"] != parent_pointer + "/-"
+            and (
+                patch["pointer"] == parent_pointer
+                or patch["pointer"].startswith(parent_pointer + "/")
+            )
+            for patch in retained
+        ):
+            raise ValueError("quality revision append overlaps another patch")
+
+    normalized_appends: list[str] = []
+    rewritten: list[dict[str, Any]] = []
+    emitted_append_parents: set[str] = set()
+    for patch in retained:
+        pointer = patch["pointer"]
+        if not pointer.endswith("/-"):
+            rewritten.append(patch)
+            continue
+        parent_pointer = pointer[:-2]
+        if parent_pointer in emitted_append_parents:
+            continue
+        parent = _resolve_pointer(payload, parent_pointer)
+        appended = [item[2] for item in append_groups[parent_pointer]]
+        rewritten.append(
+            {
+                **patch,
+                "pointer": parent_pointer,
+                "replacement_value_json": json.dumps(
+                    [*parent, *appended],
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+            }
+        )
+        emitted_append_parents.add(parent_pointer)
+        normalized_appends.append(parent_pointer)
+    allowed_parents = tuple(
+        sorted(set(canonical_parent_pointers), key=lambda item: (-len(item), item))
+    )
+    parent_groups: dict[str, list[dict[str, Any]]] = {}
+    retained_exact: list[dict[str, Any]] = []
+    for patch in rewritten:
+        pointer = patch["pointer"]
+        parent_pointer = next(
+            (
+                parent
+                for parent in allowed_parents
+                if pointer != parent and pointer.startswith(parent + "/")
+            ),
+            None,
+        )
+        if parent_pointer is None:
+            retained_exact.append(patch)
+        else:
+            parent_groups.setdefault(parent_pointer, []).append(patch)
+    normalized_parents: list[str] = []
+    for parent_pointer, patches in parent_groups.items():
+        if any(patch["pointer"] == parent_pointer for patch in rewritten):
+            raise ValueError("quality revision child patch overlaps its parent")
+        child_pointers = [patch["pointer"] for patch in patches]
+        if any(
+            left != right
+            and (left.startswith(right + "/") or right.startswith(left + "/"))
+            for index, left in enumerate(child_pointers)
+            for right in child_pointers[index + 1 :]
+        ):
+            raise ValueError("quality revision child patches overlap")
+        parent_value = deepcopy(_resolve_pointer(payload, parent_pointer))
+        wrapped = {"value": parent_value}
+        for patch in patches:
+            relative = patch["pointer"][len(parent_pointer) :]
+            _replace_pointer(
+                wrapped,
+                "/value" + relative,
+                json.loads(patch["replacement_value_json"]),
+            )
+        retained_exact.append(
+            {
+                **patches[0],
+                "pointer": parent_pointer,
+                "replacement_value_json": json.dumps(
+                    wrapped["value"],
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+            }
+        )
+        normalized_parents.append(parent_pointer)
+    value["patches"] = retained_exact
     return q.ArtifactQualityRevisionCandidate.model_validate_json(json.dumps(value)), {
         "excluded_pointers": tuple(excluded),
         "normalized_string_pointers": tuple(normalized),
+        "normalized_append_pointers": tuple(normalized_appends),
+        "normalized_parent_pointers": tuple(sorted(normalized_parents)),
     }
 
 

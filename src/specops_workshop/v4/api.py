@@ -12,7 +12,7 @@ from specops_contracts import workshop_v1 as c
 from specops_contracts import artifact_quality_v1 as q
 from specops_workflow.workshop_protocol import FoundationProtocolError, WorkshopFoundationService
 
-from .openai_adapter import safe_validation_diagnostics
+from .openai_adapter import ProviderAdapterError, safe_validation_diagnostics
 from .artifact_quality_adapter import ArtifactQualityEvaluatorError
 from .orchestrator import WorkshopCompletionOutcome
 
@@ -307,6 +307,21 @@ async def synthesize_artifact(
         raise HTTPException(
             status_code=503,
             detail=exc.receipt.model_dump(mode="json"),
+        ) from None
+    except ProviderAdapterError as exc:
+        provider_failure = exc.receipt
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": provider_failure.code.value,
+                "stage": provider_failure.stage.value,
+                "status_code": provider_failure.status_code,
+                "retryable": provider_failure.retryable,
+                "validation_diagnostics": [
+                    item.model_dump(mode="json")
+                    for item in provider_failure.validation_diagnostics
+                ],
+            },
         ) from None
     except FoundationProtocolError as exc:
         detail: dict[str, object] = {"code": exc.code.value}

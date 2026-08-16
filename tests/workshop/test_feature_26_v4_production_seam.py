@@ -23,6 +23,7 @@ from specops_workshop.sources import SourceCatalog
 from specops_workshop.v4.openai_adapter import (
     BootstrapResult,
     PreparedProviderContext,
+    ProviderAdapterError,
     ProviderSourceUpload,
 )
 from specops_workshop.v4.artifact_quality_adapter import ArtifactEvidenceSupportEvaluation
@@ -76,6 +77,54 @@ def test_synthesis_http_error_preserves_only_foundation_safe_pointers():
             "/evidence_support_proposals/0/claim_pointer",
         ],
     }
+
+
+def test_synthesis_provider_error_preserves_only_safe_failure_fields():
+    class RejectingOrchestrator:
+        @staticmethod
+        async def synthesize_artifact(artifact_type, *, operation_key):
+            assert artifact_type == "SPEC_PACKAGE"
+            assert operation_key == "diagnose-provider-failure"
+            raise ProviderAdapterError(
+                c.ProviderFailureReceipt(
+                    provider=c.ProviderName.OPENAI,
+                    stage=c.ProviderProcessingStage.SPEC_PACKAGE_SYNTHESIS,
+                    client_request_id="client-private-provider-identity",
+                    provider_request_id="req_private_provider_identity",
+                    status_code=None,
+                    code=c.ProviderFailureCode.UNKNOWN_SAFE,
+                    retryable=False,
+                    validation_diagnostics=(),
+                    occurred_at=datetime.now(timezone.utc),
+                )
+            )
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                workshop_protocol_orchestrator=RejectingOrchestrator()
+            )
+        )
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            synthesize_artifact(
+                request,
+                "SPEC_PACKAGE",
+                ArtifactSynthesisIntent(operation_key="diagnose-provider-failure"),
+            )
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "UNKNOWN_SAFE",
+        "stage": "SPEC_PACKAGE_SYNTHESIS",
+        "status_code": None,
+        "retryable": False,
+        "validation_diagnostics": [],
+    }
+    assert "private_provider_identity" not in repr(error.value.detail)
 
 
 class DeterministicAdapter:

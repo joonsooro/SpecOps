@@ -216,24 +216,33 @@ class ChatbotGuidanceCoordinator:
             (UUID(row["foundation_id"]), row["record_version"]): row
             for row in askable
         }
-        selected_refs = (
-            selection.recommended_question_ref,
-            *selection.safe_alternate_refs,
+
+        def bounded_refs(refs, *, excluded=()):
+            seen = set(excluded)
+            result = []
+            for ref in refs:
+                identity = (ref.question_id, ref.question_version)
+                if identity not in supplied or identity in seen:
+                    continue
+                seen.add(identity)
+                result.append(ref)
+            return tuple(result)
+
+        selected_refs = bounded_refs(
+            (
+                selection.recommended_question_ref,
+                *selection.safe_alternate_refs,
+            )
         )
-        selected_keys = [
+        if not selected_refs:
+            selected_refs = (bounded.askable_question_refs[0],)
+        selected_keys = {
             (item.question_id, item.question_version) for item in selected_refs
-        ]
-        blocked_keys = [
-            (item.question_id, item.question_version)
-            for item in selection.do_not_ask_question_refs
-        ]
-        if (
-            len(selected_keys) != len(set(selected_keys))
-            or len(blocked_keys) != len(set(blocked_keys))
-            or set(selected_keys).intersection(blocked_keys)
-            or any(key not in supplied for key in (*selected_keys, *blocked_keys))
-        ):
-            raise ValueError("Luna selected a ref outside the supplied ASKABLE set")
+        }
+        blocked_refs = bounded_refs(
+            selection.do_not_ask_question_refs,
+            excluded=selected_keys,
+        )
 
         def question(ref: ChatbotQuestionRef) -> c.GuidanceQuestion:
             row = supplied[(ref.question_id, ref.question_version)]
@@ -273,15 +282,15 @@ class ChatbotGuidanceCoordinator:
             request_hash=analyzer_request.request_hash,
             source_set_hash=analyzer_request.source_set_hash,
             based_on_case_revision=analyzer_request.based_on_case_revision,
-            recommended_question=question(selection.recommended_question_ref),
-            safe_alternates=tuple(question(ref) for ref in selection.safe_alternate_refs),
+            recommended_question=question(selected_refs[0]),
+            safe_alternates=tuple(question(ref) for ref in selected_refs[1:]),
             do_not_ask_question_refs=tuple(
                 c.FoundationEntityRef(
                     ref_kind="FOUNDATION_ID",
                     foundation_id=ref.question_id,
                     expected_version=ref.question_version,
                 )
-                for ref in selection.do_not_ask_question_refs
+                for ref in blocked_refs
             ),
             dependencies=tuple(dependencies),
             acknowledgement_suggestion=selection.acknowledgement_suggestion,

@@ -25,6 +25,7 @@ from specops_workshop.chat_application import (
 from specops_workshop.chat_contracts import (
     ChatbotGuidanceRequest,
     ChatbotGuidanceSelection,
+    ChatbotQuestionRef,
     CommittedParticipantTurn,
     InputChannel,
     SubmitTypedResponseIntent,
@@ -439,6 +440,83 @@ def test_luna_selection_is_materialized_from_exact_supplied_foundation_questions
     ]
     assert candidate.recommended_question.exact_text == selected.text
     assert candidate.recommended_question.reason == selected.rationale
+
+
+def test_luna_unknown_and_duplicate_refs_fall_back_to_supplied_askable_questions(tmp_path):
+    foundation, _, _ = _ready(tmp_path)
+    context = foundation.active_analyzer_context(CASE_ID)
+    captured = {}
+
+    class SelectionFixture:
+        async def select_guidance(self, request):
+            captured["request"] = request
+            supplied = request.askable_question_refs
+            unknown = ChatbotQuestionRef(question_id=uuid4(), question_version=1)
+            return ChatbotGuidanceSelection(
+                recommended_question_ref=unknown,
+                safe_alternate_refs=(supplied[1], supplied[1], supplied[2]),
+                do_not_ask_question_refs=(unknown, supplied[1], supplied[3]),
+                acknowledgement_suggestion="The next admitted question is ready.",
+            )
+
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=SimpleNamespace(
+            source_set_hash=lambda _: foundation.get_case(CASE_ID).source_set_hash
+        ),
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    request = DurableAnalyzerWorker(orchestrator)._build_request(
+        {"operation": "GUIDANCE", "job_id": str(uuid4())}, context
+    )
+    candidate = asyncio.run(
+        ChatbotGuidanceCoordinator(
+            foundation,
+            SelectionFixture(),
+            case_id=CASE_ID,
+            session_id=context.session_id,
+        ).execute(request)
+    )
+
+    supplied = {
+        (item.question_id, item.question_version)
+        for item in captured["request"].askable_question_refs
+    }
+    selected = (
+        candidate.recommended_question,
+        *candidate.safe_alternates,
+    )
+    selected_keys = [
+        (item.question_ref.foundation_id, item.question_ref.expected_version)
+        for item in selected
+    ]
+    blocked_keys = [
+        (item.foundation_id, item.expected_version)
+        for item in candidate.do_not_ask_question_refs
+    ]
+    assert selected_keys == [
+        (
+            captured["request"].askable_question_refs[1].question_id,
+            captured["request"].askable_question_refs[1].question_version,
+        ),
+        (
+            captured["request"].askable_question_refs[2].question_id,
+            captured["request"].askable_question_refs[2].question_version,
+        ),
+    ]
+    assert blocked_keys == [
+        (
+            captured["request"].askable_question_refs[3].question_id,
+            captured["request"].askable_question_refs[3].question_version,
+        )
+    ]
+    assert set(selected_keys).issubset(supplied)
+    assert set(blocked_keys).issubset(supplied)
+    assert set(selected_keys).isdisjoint(blocked_keys)
 
 
 def test_v0_runtime_exposes_only_chat_ingress_and_read_only_exact_playback(tmp_path):

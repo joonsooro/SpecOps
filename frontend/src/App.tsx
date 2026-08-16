@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { WorkshopPresenceClient } from "./presenceClient";
-import { turnSubmissionEnabled, type TurnSubmissionStatus } from "./uiModel";
+import { turnSubmissionEnabled, type TurnSubmissionStatus, zeroRunwayMessage } from "./uiModel";
 
 type Bootstrap = {
   case_id: string;
@@ -164,6 +164,9 @@ export function App() {
   }, []);
 
   const nextQuestion = context?.question_runway.questions[0] ?? null;
+  const runwayMessage = context
+    ? zeroRunwayMessage(context.question_runway.runway_depth, context.turn_submission_status)
+    : null;
   const latestByTurn = useMemo(() => {
     const result = new Map<number, string>();
     for (const turn of context?.committed_turns ?? []) {
@@ -373,8 +376,8 @@ export function App() {
             </button>
           </article>
         )}
-        {!nextQuestion && preparation?.phase === "READY" && !correction && (
-          <div className="recovery-card">No admitted question is available. Retry question preparation.</div>
+        {runwayMessage && preparation?.phase === "READY" && !correction && (
+          <div className="recovery-card" role="status">{runwayMessage}</div>
         )}
 
         <form className="text-fallback composer" onSubmit={submitResponse}>

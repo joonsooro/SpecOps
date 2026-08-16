@@ -18,6 +18,17 @@ export function turnSubmissionEnabled(status: TurnSubmissionStatus, busy: string
   return status === "READY" && busy === null;
 }
 
+export function zeroRunwayMessage(runwayDepth: number, status: TurnSubmissionStatus): string | null {
+  if (runwayDepth !== 0) return null;
+  if (status === "ANALYSIS_PENDING") {
+    return "No questions are available right now. The analyzer is checking for new ambiguities. This may take a moment.";
+  }
+  if (status === "ANALYSIS_FAILED") {
+    return "No questions are available because analysis needs attention. You can still review proposals and finish the workshop.";
+  }
+  return "No more questions are available. Review any proposals, then finish the workshop.";
+}
+
 export function proposalControlPayload(
   clientActionId: string,
   binding: {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { INITIAL_RUNWAY_DEPTH, formulationEnabled, proposalControlPayload, turnSubmissionEnabled, typedResponsePayload, workshopStartEnabled } from "./uiModel";
+import { INITIAL_RUNWAY_DEPTH, formulationEnabled, proposalControlPayload, turnSubmissionEnabled, typedResponsePayload, workshopStartEnabled, zeroRunwayMessage } from "./uiModel";
 
 describe("Workshop server-projection UI rules", () => {
   it("fails closed until the server admits the exact four-question runway", () => {
@@ -20,6 +20,16 @@ describe("Workshop server-projection UI rules", () => {
     expect(turnSubmissionEnabled("ANALYSIS_PENDING", null)).toBe(false);
     expect(turnSubmissionEnabled("ANALYSIS_FAILED", null)).toBe(false);
     expect(turnSubmissionEnabled("READY", "send")).toBe(false);
+  });
+
+  it("shows wait copy only when zero runway has real Analyzer work pending", () => {
+    expect(zeroRunwayMessage(1, "ANALYSIS_PENDING")).toBeNull();
+    expect(zeroRunwayMessage(0, "ANALYSIS_PENDING")).toBe(
+      "No questions are available right now. The analyzer is checking for new ambiguities. This may take a moment.",
+    );
+    expect(zeroRunwayMessage(0, "READY")).toBe(
+      "No more questions are available. Review any proposals, then finish the workshop.",
+    );
   });
 
   it("keeps proposal control shapes exact", () => {

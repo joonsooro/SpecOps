@@ -138,6 +138,24 @@ test("keeps the next draft local while prior turn analysis is pending", async ({
   expect(responseCalls).toBe(0);
 });
 
+test("keeps the Workshop usable while zero-runway analysis looks for ambiguities", async ({ page }) => {
+  const zeroRunwayWorkshop = {
+    ...workshop,
+    question_runway: { questions: [], runway_depth: 0 },
+    turn_submission_status: "ANALYSIS_PENDING",
+    proposal_statuses: [],
+  };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: zeroRunwayWorkshop }));
+
+  await page.goto("/");
+  await expect(page.getByText("No questions are available right now. The analyzer is checking for new ambiguities. This may take a moment.")).toBeVisible();
+  await expect(page.getByText(question.exact_text)).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Play exact question" })).not.toBeVisible();
+  await expect(page.getByLabel("Your typed response")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Finish Workshop" })).toBeEnabled();
+});
+
 test("playback is user-triggered, exact-text, and does not open a live input socket", async ({ page }) => {
   let playback: Record<string, unknown> | null = null;
   const sockets: string[] = [];

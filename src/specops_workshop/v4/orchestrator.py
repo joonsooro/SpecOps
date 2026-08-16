@@ -1585,7 +1585,7 @@ class V4ProductionOrchestrator:
         *,
         operation_key: str,
     ) -> ProviderOperationAdmission:
-        if self._shallow_runway_blocks_synthesis():
+        if self._shallow_runway_blocks_synthesis(artifact_type):
             raise ValueError("active interview runway is endangered")
         context = await self.ensure_context()
         snapshot = self.foundation.semantic_snapshot(self.case_id)
@@ -1776,7 +1776,11 @@ class V4ProductionOrchestrator:
             evaluation.execution,
         )
 
-    def _shallow_runway_blocks_synthesis(self) -> bool:
+    def _shallow_runway_blocks_synthesis(
+        self, artifact_type: Literal["SPEC_PACKAGE", "TECHNICAL_CONTRACT"]
+    ) -> bool:
+        if artifact_type == "SPEC_PACKAGE":
+            return False
         if self.foundation.runway_projection(self.case_id)["depth"] >= 3:
             return False
         snapshot = self.foundation.semantic_snapshot(self.case_id)

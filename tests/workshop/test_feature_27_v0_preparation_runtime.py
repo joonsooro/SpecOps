@@ -1834,11 +1834,11 @@ def test_zero_runway_instruction_is_fixed_and_never_invents_a_question(tmp_path)
     assert "preparing the next clarification area" in instruction
 
 
-def test_endangered_runway_blocks_spec_synthesis(tmp_path):
+def test_shallow_runway_is_advisory_for_v0_spec_synthesis(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     _admit_brief(foundation)
-    for sequence in range(1, 3):
+    for sequence in range(1, c.INITIAL_RUNWAY_DEPTH + 1):
         foundation.execute(
             _transcript_command(
                 foundation.case_revision(CASE_ID), sequence, f"Final answer {sequence}."
@@ -1854,11 +1854,12 @@ def test_endangered_runway_blocks_spec_synthesis(tmp_path):
         analyzer_contract=context.analyzer_contract,
         now=lambda: NOW,
     )
-    with pytest.raises(ValueError, match="runway is endangered"):
-        asyncio.run(orchestrator.synthesize_artifact("SPEC_PACKAGE", operation_key="blocked"))
+    assert foundation.runway_projection(CASE_ID)["depth"] == 0
+    assert orchestrator._shallow_runway_blocks_synthesis("SPEC_PACKAGE") is False
+    assert orchestrator._shallow_runway_blocks_synthesis("TECHNICAL_CONTRACT") is True
 
 
-def test_shallow_runway_allows_synthesis_only_after_every_problem_is_resolved(tmp_path):
+def test_shallow_runway_allows_technical_synthesis_only_after_every_problem_is_resolved(tmp_path):
     _, foundation = _runtime(tmp_path)
     _activate(foundation)
     _admit_brief(foundation)
@@ -1879,7 +1880,7 @@ def test_shallow_runway_allows_synthesis_only_after_every_problem_is_resolved(tm
         now=lambda: NOW,
     )
     assert foundation.runway_projection(CASE_ID)["depth"] == 2
-    assert orchestrator._shallow_runway_blocks_synthesis() is True
+    assert orchestrator._shallow_runway_blocks_synthesis("TECHNICAL_CONTRACT") is True
 
     records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
     with foundation.engine.begin() as connection:
@@ -1889,7 +1890,7 @@ def test_shallow_runway_allows_synthesis_only_after_every_problem_is_resolved(tm
             .values(status=c.SemanticRecordStatus.RESOLVED.value)
         )
 
-    assert orchestrator._shallow_runway_blocks_synthesis() is False
+    assert orchestrator._shallow_runway_blocks_synthesis("TECHNICAL_CONTRACT") is False
 
 
 def test_voice_provider_is_not_created_before_ready():

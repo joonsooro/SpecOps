@@ -76,6 +76,13 @@ _REFERENCE_KEYS = {
     "failure_ref",
     "component_ref",
 }
+_ACTOR_REFERENCE_KEYS = {
+    "primary_customer",
+    "beneficiary_actor_ref",
+    "primary_actor_ref",
+    "actor_ref",
+    "actor_refs",
+}
 
 
 @dataclass(frozen=True)
@@ -243,6 +250,14 @@ def materialize_spec_identities(
             return
         if value in consumed:
             _replace_at(payload, path, str(consumed[value].foundation_id))
+        elif (
+            value in all_slots
+            and key in _ACTOR_REFERENCE_KEYS
+            and all_slots[value].entity_kind == "ACTOR"
+            and all_slots[value].owner == "FOUNDATION"
+            and all_slots[value].allocation_mode == "BOUND_EXISTING"
+        ):
+            _replace_at(payload, path, str(all_slots[value].foundation_id))
         elif value in all_slots:
             unresolved.append(_pointer(path))
         elif value in new_entity_ids:

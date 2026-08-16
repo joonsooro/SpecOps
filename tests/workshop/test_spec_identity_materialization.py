@@ -227,6 +227,36 @@ def test_foundation_assigns_distinct_typed_ids_and_rewrites_local_graph():
     assert replay_map == assignment_map
 
 
+def test_foundation_rewrites_bound_existing_actor_handle_references():
+    actor = _slot(
+        "ACTOR",
+        1,
+        "00000000-0000-4000-8000-000000000116",
+        owner="FOUNDATION",
+        allocation_mode="BOUND_EXISTING",
+    )
+    package = _slot(
+        "PACKAGE_ITEM", 1, "00000000-0000-4000-8000-000000000117"
+    )
+    plan = _plan(actor, package)
+    payload = _payload()
+    payload["package_items"] = {
+        package.slot_key: {"primary_actor_ref": actor.slot_key}
+    }
+    payload["product_thesis"] = {"primary_customer": actor.slot_key}
+
+    canonical, _, _ = materialize_spec_identities(
+        payload=payload,
+        proposals=(),
+        identity_plan=plan,
+    )
+
+    assert canonical["package_items"][0]["primary_actor_ref"] == str(
+        actor.foundation_id
+    )
+    assert canonical["product_thesis"]["primary_customer"] == str(actor.foundation_id)
+
+
 def test_foundation_fails_closed_on_wrong_path_missing_and_over_capacity():
     scope = _kind_slots("SCOPE_ITEM", 16, 400)
     plan = _plan(*scope)

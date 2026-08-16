@@ -1348,7 +1348,7 @@ TECHNICAL_CLOSURE_RULE_LAYOUT = (
     (
         "DELIVERY_GOVERNANCE_CLOSURE",
         "DELIVERY_GOVERNANCE",
-        "Assign rollout ownership; keep only concrete evidence-backed choices in engineering decisions and place unresolved choices in review obligations with an owner, required evidence, and downstream effect.",
+        "Assign rollout ownership; materialize every Ask First obligation as one owned approval interface, durable receipt, lifecycle, fail-closed control, audit record, verification, and exact trace; keep only concrete evidence-backed choices in engineering decisions and place unresolved choices in review obligations with an owner, required evidence, and downstream effect.",
     ),
 )
 

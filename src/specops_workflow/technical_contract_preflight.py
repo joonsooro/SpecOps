@@ -166,6 +166,269 @@ def _coverage_index(technical_payload: dict[str, Any]) -> dict[str, set[str]]:
     return result
 
 
+def _implements(item: dict[str, Any], source_ref: str) -> bool:
+    refs = item.get("implements_spec_refs", [])
+    return isinstance(refs, list) and source_ref in refs
+
+
+def _governed_change_bundle_coverage(
+    *, spec_payload: dict[str, Any], technical_payload: dict[str, Any]
+) -> tuple[dict[str, set[str]], tuple[TechnicalSanityIssue, ...]]:
+    """Require one coherent executable bundle for every Ask First obligation.
+
+    A bare ``implements_spec_refs`` mention is intentionally insufficient.  The
+    same exact Spec identity must close through an owner, approval interface,
+    durable receipt, lifecycle, fail-closed control, verification, audit record,
+    and typed trace edges.  One shared bundle may implement several Ask First
+    obligations; no product wording is inspected.
+    """
+
+    behaviour = spec_payload.get("behaviour_contract", {})
+    ask_first = behaviour.get("ask_first", []) if isinstance(behaviour, dict) else []
+    if not isinstance(ask_first, list):
+        return {}, ()
+
+    components = _identified_items(technical_payload, "components")
+    interfaces = _identified_items(technical_payload, "interfaces")
+    data_contracts = _identified_items(technical_payload, "data_contracts")
+    workflows = _identified_items(technical_payload, "workflows")
+    security = technical_payload.get("security_privacy_contract", {})
+    controls = (
+        [item for item in security.get("controls", []) if isinstance(item, dict)]
+        if isinstance(security, dict) and isinstance(security.get("controls", []), list)
+        else []
+    )
+    verifications = _identified_items(technical_payload, "verification_plan")
+    observability = technical_payload.get("observability_audit", {})
+    audit_records = (
+        [
+            item
+            for item in observability.get("audit_records", [])
+            if isinstance(item, dict)
+        ]
+        if isinstance(observability, dict)
+        and isinstance(observability.get("audit_records", []), list)
+        else []
+    )
+    traceability = technical_payload.get("traceability", [])
+    traceability = (
+        [item for item in traceability if isinstance(item, dict)]
+        if isinstance(traceability, list)
+        else []
+    )
+
+    trace_index: dict[tuple[str, str, str], int] = {}
+    for index, edge in enumerate(traceability):
+        values = (edge.get("from_ref"), edge.get("relation"), edge.get("to_ref"))
+        if all(isinstance(value, str) for value in values):
+            trace_index[(str(values[0]), str(values[1]), str(values[2]))] = index
+
+    coverage: dict[str, set[str]] = {}
+    issues: set[tuple[str, str, str]] = set()
+
+    def add(code: str, pointer: str, section: str) -> None:
+        issues.add((code, pointer, section))
+
+    for ask_index, obligation in enumerate(ask_first):
+        if not isinstance(obligation, dict) or not isinstance(obligation.get("id"), str):
+            continue
+        source_ref = obligation["id"]
+        source_pointer = f"/behaviour_contract/ask_first/{ask_index}"
+
+        component_candidates = [
+            (index, item)
+            for index, item in enumerate(components)
+            if _implements(item, source_ref) and isinstance(item.get("id"), str)
+        ]
+        if not component_candidates:
+            add("MISSING_GOVERNED_CHANGE_OWNER", source_pointer, "RESPONSIBILITY")
+
+        receipt_candidates: list[tuple[int, dict[str, Any], int, dict[str, Any]]] = []
+        for component_index, component in component_candidates:
+            component_id = component["id"]
+            for data_index, data_contract in enumerate(data_contracts):
+                if (
+                    _implements(data_contract, source_ref)
+                    and data_contract.get("owner_component_ref") == component_id
+                    and isinstance(data_contract.get("id"), str)
+                    and isinstance(data_contract.get("name"), str)
+                ):
+                    receipt_candidates.append(
+                        (component_index, component, data_index, data_contract)
+                    )
+        if not receipt_candidates:
+            add("MISSING_GOVERNED_CHANGE_RECEIPT", source_pointer, "DATA")
+
+        interface_candidates: list[
+            tuple[int, dict[str, Any], int, dict[str, Any], int, dict[str, Any]]
+        ] = []
+        for component_index, component, data_index, data_contract in receipt_candidates:
+            schemas = {data_contract["id"], data_contract["name"]}
+            for interface_index, interface in enumerate(interfaces):
+                input_contract = interface.get("input", {})
+                output_contract = interface.get("output", {})
+                schema_refs = {
+                    item.get("schema_ref")
+                    for item in (input_contract, output_contract)
+                    if isinstance(item, dict)
+                }
+                if (
+                    _implements(interface, source_ref)
+                    and interface.get("producer_ref") == component["id"]
+                    and isinstance(interface.get("id"), str)
+                    and bool(interface.get("errors"))
+                    and bool(schemas.intersection(schema_refs))
+                ):
+                    interface_candidates.append(
+                        (
+                            component_index,
+                            component,
+                            data_index,
+                            data_contract,
+                            interface_index,
+                            interface,
+                        )
+                    )
+        if not interface_candidates:
+            add("MISSING_GOVERNED_CHANGE_INTERFACE", source_pointer, "INTERFACE")
+
+        workflow_candidates: list[tuple[Any, ...]] = []
+        for chain in interface_candidates:
+            interface = chain[-1]
+            for workflow_index, workflow in enumerate(workflows):
+                if (
+                    _implements(workflow, source_ref)
+                    and workflow.get("trigger_interface_ref") == interface["id"]
+                    and isinstance(workflow.get("id"), str)
+                ):
+                    workflow_candidates.append((*chain, workflow_index, workflow))
+        if not workflow_candidates:
+            add("MISSING_GOVERNED_CHANGE_LIFECYCLE", source_pointer, "WORKFLOW")
+
+        control_candidates: list[tuple[Any, ...]] = []
+        for chain in workflow_candidates:
+            for control_index, control in enumerate(controls):
+                if (
+                    _implements(control, source_ref)
+                    and isinstance(control.get("id"), str)
+                    and bool(control.get("verification_refs"))
+                ):
+                    control_candidates.append((*chain, control_index, control))
+        if not control_candidates:
+            add(
+                "MISSING_GOVERNED_CHANGE_FAIL_CLOSED_CONTROL",
+                source_pointer,
+                "DELIVERY_GOVERNANCE",
+            )
+
+        verification_candidates: list[tuple[Any, ...]] = []
+        for chain in control_candidates:
+            component, data_contract, interface, workflow, control = (
+                chain[1],
+                chain[3],
+                chain[5],
+                chain[7],
+                chain[9],
+            )
+            required_technical_refs = {
+                component["id"],
+                data_contract["id"],
+                interface["id"],
+                workflow["id"],
+                control["id"],
+            }
+            control_verification_refs = set(control.get("verification_refs", []))
+            for verification_index, verification in enumerate(verifications):
+                technical_refs = set(verification.get("technical_refs", []))
+                if (
+                    isinstance(verification.get("id"), str)
+                    and verification["id"] in control_verification_refs
+                    and required_technical_refs.issubset(technical_refs)
+                ):
+                    verification_candidates.append(
+                        (*chain, verification_index, verification)
+                    )
+        if not verification_candidates:
+            add(
+                "MISSING_GOVERNED_CHANGE_VERIFICATION",
+                source_pointer,
+                "DELIVERY_GOVERNANCE",
+            )
+
+        audited_candidates: list[tuple[Any, ...]] = []
+        for chain in verification_candidates:
+            workflow, control, verification = chain[7], chain[9], chain[11]
+            technical_refs = set(verification.get("technical_refs", []))
+            for audit_index, audit_record in enumerate(audit_records):
+                audit_id = audit_record.get("id")
+                if not isinstance(audit_id, str) or audit_id not in technical_refs:
+                    continue
+                for producer_id in (workflow["id"], control["id"]):
+                    edge_key = (producer_id, "produces", audit_id)
+                    edge_index = trace_index.get(edge_key)
+                    if edge_index is not None:
+                        audited_candidates.append(
+                            (*chain, audit_index, audit_record, edge_index)
+                        )
+                        break
+        if not audited_candidates:
+            add(
+                "MISSING_GOVERNED_CHANGE_AUDIT_RECORD",
+                source_pointer,
+                "DELIVERY_GOVERNANCE",
+            )
+
+        complete_candidates: list[tuple[Any, ...]] = []
+        for chain in audited_candidates:
+            component, data_contract, interface, workflow, control, verification = (
+                chain[1],
+                chain[3],
+                chain[5],
+                chain[7],
+                chain[9],
+                chain[11],
+            )
+            required_edges = (
+                (component["id"], "implements", source_ref),
+                (interface["id"], "realizes", source_ref),
+                (data_contract["id"], "realizes", source_ref),
+                (workflow["id"], "realizes", source_ref),
+                (control["id"], "mitigates", source_ref),
+                (verification["id"], "verifies", source_ref),
+            )
+            edge_indexes = tuple(trace_index.get(edge) for edge in required_edges)
+            if all(index is not None for index in edge_indexes):
+                complete_candidates.append((*chain, edge_indexes))
+        if not complete_candidates:
+            add(
+                "MISSING_GOVERNED_CHANGE_TRACEABILITY",
+                source_pointer,
+                "DELIVERY_GOVERNANCE",
+            )
+            continue
+
+        chain = complete_candidates[0]
+        coverage[source_ref] = {
+            f"/components/{chain[0]}/implements_spec_refs",
+            f"/data_contracts/{chain[2]}/implements_spec_refs",
+            f"/interfaces/{chain[4]}/implements_spec_refs",
+            f"/workflows/{chain[6]}/implements_spec_refs",
+            (
+                "/security_privacy_contract/controls/"
+                f"{chain[8]}/implements_spec_refs"
+            ),
+            f"/verification_plan/{chain[10]}/technical_refs",
+            f"/observability_audit/audit_records/{chain[12]}",
+            f"/traceability/{chain[14]}",
+            *(f"/traceability/{index}" for index in chain[15]),
+        }
+
+    return coverage, tuple(
+        TechnicalSanityIssue(code=code, pointer=pointer, section=section)
+        for code, pointer, section in sorted(issues)
+    )
+
+
 def _identified_items(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
     values = payload.get(key, [])
     return [item for item in values if isinstance(item, dict)] if isinstance(values, list) else []
@@ -365,6 +628,27 @@ def _sanity_issues(technical_payload: dict[str, Any]) -> tuple[TechnicalSanityIs
     rollout = technical_payload.get("rollout_migration_recovery")
     if not isinstance(rollout, dict) or not isinstance(rollout.get("owner"), str):
         add("MISSING_ROLLOUT_OWNER", "/rollout_migration_recovery", "DELIVERY_GOVERNANCE")
+    open_review_refs = {
+        str(identity)
+        for obligation in _identified_items(technical_payload, "review_obligations")
+        if obligation.get("status") == "open"
+        for identity in obligation.get("related_refs", [])
+        if isinstance(identity, str)
+    }
+    for identity, (index, dependency) in dependency_index.items():
+        status = dependency.get("status")
+        if status == "approved" and not dependency.get("evidence_refs"):
+            add(
+                "UNEVIDENCED_APPROVED_SUBSTRATE_DEPENDENCY",
+                f"/substrate_dependencies/{index}/evidence_refs",
+                "DELIVERY_GOVERNANCE",
+            )
+        if status in {"open", "validation_required", "unavailable"} and identity not in open_review_refs:
+            add(
+                "UNGOVERNED_UNRESOLVED_SUBSTRATE_DEPENDENCY",
+                f"/substrate_dependencies/{index}",
+                "DELIVERY_GOVERNANCE",
+            )
     for index, decision in enumerate(_identified_items(technical_payload, "engineering_decisions")):
         status = decision.get("status")
         if status in {"validation_required", "deferred"}:
@@ -399,6 +683,16 @@ def technical_contract_preflight(
     """Build exact coverage plus the shared six-rule Technical closure report."""
 
     coverage = _coverage_index(technical_payload)
+    governed_coverage, governed_issues = _governed_change_bundle_coverage(
+        spec_payload=spec_payload,
+        technical_payload=technical_payload,
+    )
+    behaviour = spec_payload.get("behaviour_contract", {})
+    ask_first = behaviour.get("ask_first", []) if isinstance(behaviour, dict) else []
+    if isinstance(ask_first, list):
+        for item in ask_first:
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                coverage[item["id"]] = governed_coverage.get(item["id"], set())
     checklist = tuple(
         TechnicalCoverageItem(
             category=category,
@@ -408,7 +702,7 @@ def technical_contract_preflight(
         )
         for category, identity, pointer in _spec_obligations(spec_payload)
     )
-    issues = _sanity_issues(technical_payload)
+    issues = tuple(sorted((*_sanity_issues(technical_payload), *governed_issues), key=lambda item: (item.code, item.pointer, item.section)))
     uncovered_by_section: dict[str, set[str]] = {}
     category_sections = {
         "requirement": "RESPONSIBILITY",

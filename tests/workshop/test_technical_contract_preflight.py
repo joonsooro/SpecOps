@@ -129,6 +129,64 @@ def _technical():
     }
 
 
+def _with_governed_change_bundle():
+    spec = _spec()
+    technical = _technical()
+    ask_ref = "00000000-0000-4000-8000-000000000107"
+    spec["behaviour_contract"]["ask_first"] = [{"id": ask_ref}]
+
+    component = technical["components"][0]
+    interface = technical["interfaces"][0]
+    data_contract = technical["data_contracts"][0]
+    workflow = technical["workflows"][0]
+    verification = technical["verification_plan"][0]
+    workflow_id = "00000000-0000-4000-8000-000000000207"
+    control_id = "00000000-0000-4000-8000-000000000208"
+    audit_id = "00000000-0000-4000-8000-000000000209"
+
+    component["implements_spec_refs"].append(ask_ref)
+    data_contract["implements_spec_refs"].append(ask_ref)
+    interface["implements_spec_refs"] = [ask_ref]
+    interface["errors"] = [{"code": "APPROVAL_REQUIRED"}]
+    workflow.update({"id": workflow_id, "implements_spec_refs": [ask_ref]})
+    technical["security_privacy_contract"] = {
+        "controls": [
+            {
+                "id": control_id,
+                "implements_spec_refs": [ask_ref],
+                "verification_refs": [verification["id"]],
+            }
+        ]
+    }
+    verification["technical_refs"] = [
+        component["id"],
+        interface["id"],
+        data_contract["id"],
+        workflow_id,
+        control_id,
+        audit_id,
+    ]
+    technical["observability_audit"] = {"audit_records": [{"id": audit_id}]}
+    technical["traceability"] = [
+        {"from_ref": component["id"], "relation": "implements", "to_ref": ask_ref},
+        {"from_ref": interface["id"], "relation": "realizes", "to_ref": ask_ref},
+        {
+            "from_ref": data_contract["id"],
+            "relation": "realizes",
+            "to_ref": ask_ref,
+        },
+        {"from_ref": workflow_id, "relation": "realizes", "to_ref": ask_ref},
+        {"from_ref": control_id, "relation": "mitigates", "to_ref": ask_ref},
+        {
+            "from_ref": verification["id"],
+            "relation": "verifies",
+            "to_ref": ask_ref,
+        },
+        {"from_ref": workflow_id, "relation": "produces", "to_ref": audit_id},
+    ]
+    return spec, technical, ask_ref
+
+
 def test_complete_generic_mapping_is_ready_for_semantic_audit():
     report = technical_contract_preflight(
         spec_payload=_spec(), technical_payload=_technical()
@@ -146,6 +204,143 @@ def test_complete_generic_mapping_is_ready_for_semantic_audit():
         "ready_for_semantic_audit": True,
     }
     assert all(item.satisfied for item in report.closure_rules)
+
+
+def test_ask_first_reference_alone_does_not_claim_technical_coverage():
+    spec = _spec()
+    technical = _technical()
+    ask_ref = "00000000-0000-4000-8000-000000000107"
+    spec["behaviour_contract"]["ask_first"] = [{"id": ask_ref}]
+    technical["components"][0]["implements_spec_refs"].append(ask_ref)
+
+    report = technical_contract_preflight(
+        spec_payload=spec, technical_payload=technical
+    )
+
+    item = next(item for item in report.checklist if item.source_id == ask_ref)
+    assert not item.covered
+    assert item.covered_by == ()
+    assert {
+        issue.code for issue in report.sanity_issues
+    } >= {
+        "MISSING_GOVERNED_CHANGE_RECEIPT",
+        "MISSING_GOVERNED_CHANGE_INTERFACE",
+        "MISSING_GOVERNED_CHANGE_LIFECYCLE",
+        "MISSING_GOVERNED_CHANGE_FAIL_CLOSED_CONTROL",
+        "MISSING_GOVERNED_CHANGE_VERIFICATION",
+        "MISSING_GOVERNED_CHANGE_AUDIT_RECORD",
+        "MISSING_GOVERNED_CHANGE_TRACEABILITY",
+    }
+
+
+def test_complete_governed_change_bundle_closes_exact_ask_first_identity():
+    spec, technical, ask_ref = _with_governed_change_bundle()
+
+    report = technical_contract_preflight(
+        spec_payload=spec, technical_payload=technical
+    )
+
+    assert report.ready_for_semantic_audit
+    item = next(item for item in report.checklist if item.source_id == ask_ref)
+    assert item.covered
+    assert item.source_pointer == "/behaviour_contract/ask_first/0"
+    assert len(item.covered_by) == 14
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    (
+        (
+            lambda technical: technical["components"][0]["implements_spec_refs"].pop(),
+            "MISSING_GOVERNED_CHANGE_OWNER",
+        ),
+        (
+            lambda technical: technical["data_contracts"][0]["implements_spec_refs"].pop(),
+            "MISSING_GOVERNED_CHANGE_RECEIPT",
+        ),
+        (
+            lambda technical: technical["interfaces"][0].update(errors=[]),
+            "MISSING_GOVERNED_CHANGE_INTERFACE",
+        ),
+        (
+            lambda technical: technical["workflows"][0].update(
+                trigger_interface_ref=None
+            ),
+            "MISSING_GOVERNED_CHANGE_LIFECYCLE",
+        ),
+        (
+            lambda technical: technical["security_privacy_contract"].update(
+                controls=[]
+            ),
+            "MISSING_GOVERNED_CHANGE_FAIL_CLOSED_CONTROL",
+        ),
+        (
+            lambda technical: technical["verification_plan"][0].update(
+                technical_refs=[]
+            ),
+            "MISSING_GOVERNED_CHANGE_VERIFICATION",
+        ),
+        (
+            lambda technical: technical["observability_audit"].update(
+                audit_records=[]
+            ),
+            "MISSING_GOVERNED_CHANGE_AUDIT_RECORD",
+        ),
+        (
+            lambda technical: technical.update(traceability=[]),
+            "MISSING_GOVERNED_CHANGE_TRACEABILITY",
+        ),
+    ),
+)
+def test_incomplete_governed_change_bundle_fails_closed(mutation, expected_code):
+    spec, technical, ask_ref = _with_governed_change_bundle()
+    mutation(technical)
+
+    report = technical_contract_preflight(
+        spec_payload=spec, technical_payload=technical
+    )
+
+    item = next(item for item in report.checklist if item.source_id == ask_ref)
+    assert not item.covered
+    assert expected_code in {issue.code for issue in report.sanity_issues}
+
+
+def test_one_shared_bundle_may_close_multiple_ask_first_identities():
+    spec, technical, first_ref = _with_governed_change_bundle()
+    second_ref = "00000000-0000-4000-8000-000000000108"
+    spec["behaviour_contract"]["ask_first"].append({"id": second_ref})
+    for collection in (
+        technical["components"],
+        technical["interfaces"],
+        technical["data_contracts"],
+        technical["workflows"],
+        technical["security_privacy_contract"]["controls"],
+    ):
+        collection[0]["implements_spec_refs"].append(second_ref)
+    relations = (
+        (technical["components"][0]["id"], "implements"),
+        (technical["interfaces"][0]["id"], "realizes"),
+        (technical["data_contracts"][0]["id"], "realizes"),
+        (technical["workflows"][0]["id"], "realizes"),
+        (
+            technical["security_privacy_contract"]["controls"][0]["id"],
+            "mitigates",
+        ),
+        (technical["verification_plan"][0]["id"], "verifies"),
+    )
+    technical["traceability"].extend(
+        {"from_ref": source, "relation": relation, "to_ref": second_ref}
+        for source, relation in relations
+    )
+
+    report = technical_contract_preflight(
+        spec_payload=spec, technical_payload=technical
+    )
+
+    assert report.ready_for_semantic_audit
+    assert {
+        item.source_id for item in report.checklist if item.covered
+    } >= {first_ref, second_ref}
 
 
 def test_manifest_is_exactly_bound_to_confirmed_spec_obligations():
@@ -358,6 +553,68 @@ def test_closure_manifest_exposes_structural_and_governance_gaps_without_settlin
     }
     assert report.governance_notices[0].code == "OPEN_BLOCKING_REVIEW_OBLIGATION"
     assert not report.ready_for_semantic_audit
+
+
+def test_decision_and_substrate_hygiene_never_promotes_unproven_choices():
+    technical = deepcopy(_technical())
+    dependency_id = "00000000-0000-4000-8000-000000000290"
+    technical["substrate_dependencies"] = [
+        {
+            "id": dependency_id,
+            "status": "approved",
+            "evidence_refs": [],
+        }
+    ]
+    technical["engineering_decisions"] = [
+        {
+            "status": "accepted",
+            "evidence_refs": [],
+        }
+    ]
+
+    report = technical_contract_preflight(
+        spec_payload=_spec(), technical_payload=technical
+    )
+
+    assert {
+        item.code for item in report.sanity_issues
+    } >= {
+        "UNEVIDENCED_APPROVED_SUBSTRATE_DEPENDENCY",
+        "UNEVIDENCED_ENGINEERING_DECISION",
+    }
+
+
+def test_unresolved_substrate_is_honest_only_when_bound_to_open_review():
+    technical = deepcopy(_technical())
+    dependency_id = "00000000-0000-4000-8000-000000000290"
+    technical["substrate_dependencies"] = [
+        {
+            "id": dependency_id,
+            "status": "validation_required",
+            "evidence_refs": [],
+        }
+    ]
+
+    ungoverned = technical_contract_preflight(
+        spec_payload=_spec(), technical_payload=technical
+    )
+    assert "UNGOVERNED_UNRESOLVED_SUBSTRATE_DEPENDENCY" in {
+        item.code for item in ungoverned.sanity_issues
+    }
+
+    technical["review_obligations"] = [
+        {
+            "status": "open",
+            "blocking": True,
+            "related_refs": [dependency_id],
+        }
+    ]
+    governed = technical_contract_preflight(
+        spec_payload=_spec(), technical_payload=technical
+    )
+    assert "UNGOVERNED_UNRESOLVED_SUBSTRATE_DEPENDENCY" not in {
+        item.code for item in governed.sanity_issues
+    }
 
 
 def test_external_architecture_node_may_consume_an_interface_without_owning_a_component():

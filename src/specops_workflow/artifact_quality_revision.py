@@ -86,6 +86,8 @@ def quality_revision_pointer_closure(
         "DATA_CONTRACT": ("data_contracts",),
         "WORKFLOW": ("workflows",),
         "FAILURE_CONTRACT": ("failure_contracts",),
+        "SECURITY_CONTROL": ("security_privacy_contract", "controls"),
+        "AUDIT_RECORD": ("observability_audit", "audit_records"),
         "QUALITY_BUDGET": ("quality_budgets",),
         "SUBSTRATE_DEPENDENCY": ("substrate_dependencies",),
         "ROLLOUT_STEP": ("rollout_migration_recovery", "rollout_steps"),

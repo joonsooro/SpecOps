@@ -78,6 +78,37 @@ def test_technical_closure_revision_opens_nested_architecture_and_owned_records(
     )
 
 
+def test_governed_change_revision_opens_nested_control_and_audit_collections():
+    payload = {
+        "security_privacy_contract": {
+            "controls": [{"id": "00000000-0000-4000-8000-000000000021"}]
+        },
+        "observability_audit": {
+            "audit_records": [
+                {"id": "00000000-0000-4000-8000-000000000022"}
+            ]
+        },
+    }
+
+    pointers = quality_revision_pointer_closure(
+        payload=payload,
+        finding_pointers=(
+            "/security_privacy_contract/controls/0",
+            "/observability_audit/audit_records/0",
+        ),
+        allocated_identity_kinds=("SECURITY_CONTROL", "AUDIT_RECORD"),
+    )
+
+    assert pointers == (
+        "/observability_audit",
+        "/observability_audit/audit_records",
+        "/observability_audit/audit_records/0",
+        "/security_privacy_contract",
+        "/security_privacy_contract/controls",
+        "/security_privacy_contract/controls/0",
+    )
+
+
 def test_revision_enum_constraints_resolve_reusable_artifact_definitions():
     schema = {
         "type": "object",

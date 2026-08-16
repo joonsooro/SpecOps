@@ -300,6 +300,7 @@ class DurableAnalyzerWorker:
                 state="FOUNDATION_ADMITTED",
                 admission_receipt_json=receipt.model_dump_json(),
             )
+        self._materialize_decision_review(receipt)
         if partition is not None and partition.rejected_evidence_keys:
             if correction_partition is not None:
                 self.foundation.fail_analyzer_job(
@@ -314,6 +315,35 @@ class DurableAnalyzerWorker:
         self.foundation.checkpoint_analyzer_job(
             job["job_id"], worker_id=self.worker_id, state="COMPLETED"
         )
+
+    def _materialize_decision_review(
+        self, receipt: c.ProposalAdmissionReceipt | None
+    ) -> None:
+        if receipt is None:
+            return
+        pending_decision_ids = tuple(
+            item.foundation_id
+            for item in receipt.identity_mappings
+            if item.entity_kind == "DECISION"
+        )
+        if not pending_decision_ids:
+            return
+        derived_from_cluster_ids = tuple(
+            item.foundation_id
+            for item in receipt.identity_mappings
+            if item.entity_kind == "CLUSTER"
+        )
+        values = self.orchestrator._command_base(
+            "MATERIALIZE_DECISION_BATCH_REVIEW",
+            str(receipt.analyzer_run_id),
+            expected_revision=receipt.command.resulting_case_revision,
+        )
+        values.update(
+            command_type="MATERIALIZE_DECISION_BATCH_REVIEW",
+            pending_decision_ids=pending_decision_ids,
+            derived_from_cluster_ids=derived_from_cluster_ids,
+        )
+        self.foundation.execute(c.MaterializeDecisionBatchReviewCommand(**values))
 
     def _correction_partition(
         self, job: dict[str, Any]

@@ -39,7 +39,13 @@ from specops_workshop.sources import SourceCatalog
 from specops_workshop.v4.orchestrator import V4ProductionOrchestrator
 from specops_workshop.v4.scheduler import DurableAnalyzerWorker
 
-from test_feature_25_v4_foundation import CASE_ID, NOW, _activate, _runtime
+from test_feature_25_v4_foundation import (
+    CASE_ID,
+    NOW,
+    _activate,
+    _runtime,
+    _turn_candidate,
+)
 from test_feature_27_v0_preparation_runtime import _admit_brief
 from test_feature_26_v4_production_seam import ROOT, DeterministicAdapter, configured
 
@@ -103,6 +109,69 @@ def test_participant_turn_ingress_commits_every_authoritative_effect_atomically(
     context = projector.project()
     assert context.committed_turns[0].question.exact_text.startswith("Which confirmed")
     assert context.committed_turns[0].response == receipt.snapshot
+
+
+def test_completed_turn_analysis_materializes_pending_visual_proposal(tmp_path):
+    foundation, ingress, projector = _ready(tmp_path)
+    turn = ingress.submit_typed(_intent(foundation, text="Use UTC for the export timestamp."))
+    context = foundation.active_analyzer_context(CASE_ID)
+
+    class DecisionAdapter(DeterministicAdapter):
+        @staticmethod
+        def source_set_hash(_sources):
+            return foundation.get_case(CASE_ID).source_set_hash
+
+        async def execute(self, request, *, context):
+            candidate = _turn_candidate(
+                request.transcript.transcript_event_id,
+                request.based_on_case_revision,
+            )
+            return candidate.model_copy(
+                update={
+                    "analyzer_run_id": request.analyzer_run_id,
+                    "context_id": request.context_id,
+                    "request_hash": request.request_hash,
+                    "source_set_hash": request.source_set_hash,
+                }
+            )
+
+    orchestrator = V4ProductionOrchestrator(
+        foundation=foundation,
+        adapter=DecisionAdapter(),
+        case_id=CASE_ID,
+        session_id=context.session_id,
+        sources=(),
+        analyzer_contract=context.analyzer_contract,
+        now=lambda: NOW,
+    )
+    worker = DurableAnalyzerWorker(orchestrator, worker_id="task28-visual-proposal-worker")
+
+    assert asyncio.run(worker.run_once()) is True
+    job = next(
+        item
+        for item in foundation.analyzer_jobs(CASE_ID)
+        if item["job_id"] == str(turn.analyzer_job_id)
+    )
+    assert job["state"] == "COMPLETED"
+    pending_decision_ids = {
+        item.decision_id
+        for item in foundation.semantic_snapshot(CASE_ID).decisions
+        if item.status is c.SemanticRecordStatus.PENDING_CONFIRMATION
+    }
+    view = foundation.current_decision_view(CASE_ID)
+    assert view is not None
+    assert {item.pending_decision_id for item in view.items} == pending_decision_ids
+    proposals = projector.project().proposal_statuses
+    assert len(proposals) == 1
+    assert proposals[0].status.value == "PENDING"
+    assert proposals[0].view == view
+
+    revision_after_materialization = foundation.case_revision(CASE_ID)
+    worker._materialize_decision_review(
+        c.ProposalAdmissionReceipt.model_validate_json(job["admission_receipt_json"])
+    )
+    assert foundation.case_revision(CASE_ID) == revision_after_materialization
+    assert foundation.current_decision_view(CASE_ID) == view
 
 
 def test_ingress_idempotency_correction_and_channel_provenance_survive_restart(tmp_path):

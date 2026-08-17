@@ -567,7 +567,7 @@ class SqlAlchemyStore:
             # union and replay ledger.  They still share this canonical audit
             # sequence, but must not be coerced into the legacy command-result
             # models during restart hydration.
-            if row["command_name"].startswith("workshop."):
+            if row["command_name"].startswith("workshop.") or row["command_name"] == "commit_participant_turn":
                 continue
             result = result_models[row["command_name"]].model_validate_json(row["result"])
             case.command_results[UUID(row["command_id"])] = (row["command_fingerprint"], result)

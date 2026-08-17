@@ -29,6 +29,33 @@ export function zeroRunwayMessage(runwayDepth: number, status: TurnSubmissionSta
   return "No more questions are available. Review any proposals, then finish the workshop.";
 }
 
+export function turnAnalysisOutcomeMessage({
+  committedTurnCount,
+  status,
+  pendingProposalCount,
+  committedProposalCount,
+  hasNextQuestion,
+}: {
+  committedTurnCount: number;
+  status: TurnSubmissionStatus;
+  pendingProposalCount: number;
+  committedProposalCount: number;
+  hasNextQuestion: boolean;
+}): string | null {
+  if (
+    committedTurnCount === 0
+    || status !== "READY"
+    || pendingProposalCount > 0
+    || !hasNextQuestion
+  ) return null;
+  const finishSummary = committedProposalCount === 1
+    ? "finish with 1 confirmed decision"
+    : committedProposalCount > 1
+      ? `finish with ${committedProposalCount} confirmed decisions`
+      : "finish without another confirmed decision";
+  return `Analysis complete. No decision proposal is waiting for review. Luna needs another clarification. Continue with the next question, or ${finishSummary}.`;
+}
+
 export function proposalControlPayload(
   clientActionId: string,
   binding: {

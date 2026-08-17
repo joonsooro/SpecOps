@@ -73,6 +73,7 @@ h3, h4 { font-weight: 650; }
 .current-question-reason { line-height: 1.45; }
 .playback-button { margin-top: .65rem; border: 1px solid #8d9c98; background: transparent; padding: .42rem .6rem; font-size: .62rem; font-weight: 750; }
 .recovery-card { margin: 1rem 0; padding: .8rem; border-left: .25rem solid var(--decision-ochre); background: #f6e7dc; font-size: .72rem; }
+.turn-outcome-card { margin: .8rem 0 1rem; padding: .8rem; border: 1px solid #d6b18d; border-left: .25rem solid var(--decision-ochre); background: #fff7ef; color: #653817; font-size: .72rem; line-height: 1.5; }
 .chat-closed-state { margin: .8rem 0 .35rem; padding: 1rem; border: 1px solid #91a09c; background: #f7f9f8; }
 .chat-closed-state span, .chat-closed-state strong { display: block; }
 .chat-closed-state span { color: var(--governed-teal); font: 800 .55rem "SFMono-Regular", Menlo, monospace; letter-spacing: .08em; }

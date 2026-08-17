@@ -1,229 +1,176 @@
 # SpecOps
 
-SpecOps turns ambiguous product and technical documents into a governed, evidence-linked specification through a structured workshop.
+SpecOps is an AI-assisted specification workshop that turns an ambiguous product request into an evidence-backed, reviewable specification package. It combines a conversational interface with a deterministic workflow foundation so that AI can propose product semantics without silently controlling identity, authority, approval, or release readiness.
 
-The current product is a V0 text-authoritative Workshop: a participant chats with Luna, Terra analyzes each committed answer, and the deterministic Foundation owns every identity, revision, proposal decision, artifact, audit, and completion transition. Model output is always a candidate; it never becomes authoritative until Foundation validates and admits it.
+The central design rule is:
 
-This README describes the product code on `feature/v0-preparation-runway` at baseline commit `7a1a5fa`.
+> AI proposes. Deterministic code validates, records, and decides what may advance.
 
-## Current product
+This repository is the implementation artifact for the SpecOps Capstone project. It contains the web application, API, workflow foundation, persistence model, provider adapters, generated contracts, migrations, and verification suite.
 
-Working today:
+## The problem
 
-- A compact, scrollable Luna chat with the current question and participant composer in one pane.
-- Paid document preparation using a stored OpenAI Conversation and two uploaded project documents.
-- An exact initial runway of four Foundation-admitted questions.
-- Typed `CHAT` responses committed through one idempotent ingress.
-- One-turn-at-a-time analysis: a second submission waits while the previous turn is being analyzed.
-- Terra/medium for document bootstrap, turn analysis, artifact synthesis, narration, and audit work.
-- Luna/medium for stateless, selection-only Guidance over question references already admitted by Foundation.
-- Explicit visual proposal controls: Confirm, Edit, and Reject.
-- A clear clarification-only outcome when analysis completes without producing a proposal.
-- Deliberate Finish behavior that requires at least one committed turn and no pending proposal.
-- Durable SQLite reconstruction across refresh and server restart.
-- Tracked provider files, Conversations, and Responses with completion/disconnect cleanup.
-- Exact-text playback as an optional output aid; it has no input or authority.
+AI product-building workflows often move too quickly from an underspecified request to generated code. The model fills gaps, assumptions become invisible, and reviewers cannot reliably trace a technical decision back to its supporting evidence.
 
-Deliberately out of scope for V0:
+SpecOps inserts a governed specification layer before downstream delivery. The workshop captures product intent, identifies ambiguity, proposes requirements and technical decisions, binds claims to registered sources, and requires explicit confirmation before producing a handoff-ready package.
 
-- Microphone, ASR, continuous voice, or voice-confirmed input.
-- Multi-user authentication, tenant management, or arbitrary project selection.
-- Jira or GitHub delivery from the Workshop runtime.
-- Browser-side model calls or browser-held provider credentials.
+## What the Capstone demonstrates
 
-The current demo uses one fixed participant identity and one configured Workshop case. It is a focused prototype, not a production multi-tenant service.
+- A text-authoritative workshop presented as a compact, scrollable Luna chat.
+- Evidence-grounded analysis of registered product and technical sources.
+- Structured proposals for requirements, decisions, checks, and delivery items.
+- Explicit confirmation, edit, rejection, and finish controls.
+- Deterministic enforcement of authority, identity, revision, and readiness rules.
+- Persistent recovery across browser refreshes and process restarts.
+- Contract-first boundaries between probabilistic AI providers and trusted application state.
+- A release suite covering schemas, migrations, API behavior, browser behavior, and workflow invariants.
+
+The demonstration reads its registered project sources from the adjacent Spec Engineering workspace; provider credentials and runtime state remain server-side.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    UI[React Workshop UI] -->|typed intent / explicit review action| API[FastAPI application]
-    API --> INGRESS[ParticipantTurnIngress]
-    API --> REVIEW[VisualProposalActionService]
-    API --> PROJECTOR[WorkshopConversationProjector]
-
-    INGRESS --> FOUNDATION[(SQLite + Foundation protocol)]
-    REVIEW --> FOUNDATION
-    PROJECTOR --> FOUNDATION
-
-    FOUNDATION -->|durable leased job| WORKER[DurableAnalyzerWorker]
-    WORKER --> ORCH[V4ProductionOrchestrator]
-    ORCH -->|semantic candidates| TERRA[OpenAI · GPT-5.6 Terra]
-    ORCH -->|selection-only Guidance| LUNA[OpenAI · GPT-5.6 Luna]
-    TERRA --> ORCH
-    LUNA --> ORCH
-    ORCH -->|validated commands only| FOUNDATION
-
-    FOUNDATION --> PROJECTOR
-    PROJECTOR -->|canonical context| API
-    API --> UI
+```text
+Participant typed response or explicit review action
+       |
+       v
+React workshop UI
+  compact, scrollable Luna conversation
+       |
+       | HTTP + WebSocket
+       v
+FastAPI boundary + conversation projector
+       |
+       | idempotent CHAT ingress and review commands
+       v
+Deterministic foundation
+       - authority and identity
+       - schema and evidence validation
+       - confirmation controls
+       - revisions and idempotent replay
+       - readiness and handoff
+       |
+       +------ durable leased job ------> Durable Analyzer worker
+                                               |
+                                               v
+                                      Deterministic V4 orchestrator
+                                               |
+              +--------------------------------+-------------------------------+
+              |                                                                |
+              | supplied canonical question refs                               | typed, hash-bound request
+              v                                                                v
+     OpenAI GPT-5.6 Luna                                              OpenAI GPT-5.6 Terra
+     Guidance selector                                               Analyzer / evaluator
+              |                                                                |
+              | selected question ref                                          | semantic candidate
+              +--------------------------------+-------------------------------+
+                                               |
+                                               | validated Foundation commands only
+                                               v
+                                      Deterministic foundation
+                                               |
+                                               v
+                                         SQLite storage
 ```
 
-### Responsibility boundaries
+### Frontend
 
-| Component | Owns | Must not own |
-|---|---|---|
-| React UI | Chat presentation, local draft text, explicit participant actions | Canonical state, model calls, proposal authority |
-| FastAPI | HTTP/WebSocket boundary, DTO validation, content-safe errors | Semantic authority |
-| Participant ingress | Idempotent typed-turn transaction, question binding, transcript evidence, Analyzer job creation | Semantic interpretation |
-| Durable worker | Job leasing, resume, bounded retry/failure handling | Business decisions |
-| Terra adapter | Structured semantic candidates for bootstrap, analysis, synthesis, and audit | Identity, acceptance, readiness, completion |
-| Luna provider | Select/order supplied askable question references | Authoring canonical questions or mutating evidence |
-| Foundation protocol | Identity, revision, evidence, admission, governance, audit, readiness, handoff | Provider inference |
-| Conversation projector | Read-only canonical participant view | Mutation |
+The React and TypeScript frontend in `frontend/` presents the canonical workshop as a compact conversation, keeps Luna and participant messages in a scrollable history, and provides a composer at the bottom. It sends typed responses and explicit review actions to the server and renders server-owned projections. It does not hold provider credentials or own canonical workflow state.
 
-### Preparation flow
+### Application boundary
 
-1. Register the fixed case, delegation, and source identities.
-2. Upload the PM Spec and Technical Contract to OpenAI.
-3. Create one stored provider Conversation.
-4. Run one Terra `BOOTSTRAP` request.
-5. Validate the strict candidate and admit the Analyzer context and interview brief through Foundation.
-6. Expose exactly four canonical questions and mark preparation `READY`.
+The FastAPI application in `src/specops_workshop/` exposes the HTTP and WebSocket boundary. `ParticipantTurnIngress` commits an idempotent typed `CHAT` turn against the exact active question, while the conversation projector reconstructs the durable participant view. Committed typed text and explicit user controls are the only authoritative V0 input path.
 
-Preparation resource identities are checkpointed in SQLite before later work proceeds. Confirmed resources are cleaned after completion or the bounded last-client disconnect lifecycle. Uncertain deletion outcomes fail closed instead of pretending cleanup succeeded.
+### Deterministic orchestrator
 
-### Workshop turn flow
+The V4 orchestrator is **deterministic application logic, not an orchestrator agent or another AI model**. It does not invent requirements, choose product semantics, or autonomously pursue goals. Its rule-bound control flow selects the operation, constructs typed and hash-bound requests from committed state, derives stable command identities, applies revision and idempotency checks, and routes provider candidates through the corresponding Foundation command.
 
-1. The browser submits a typed response bound to the exact question ID and version.
-2. `ParticipantTurnIngress` atomically commits transcript evidence, consumes the question, advances the case revision, and queues `TURN_ANALYSIS`.
-3. Send is unavailable while that analysis is pending; local drafting remains possible.
-4. Terra returns semantic candidates. Foundation validates references and admits only supported findings, problems, questions, and decision proposals.
-5. When runway policy triggers Guidance, Luna may select only from Foundation-supplied askable references.
-6. The UI reconstructs the canonical context. A proposal requires an explicit Confirm, Edit, or Reject action.
-7. If analysis yields no proposal but a revised question exists, the UI explains that Luna needs another clarification and follows the question into view.
+Its job is to coordinate the trusted sequence around probabilistic provider calls: load the current Foundation snapshot, manage the Analyzer context, call the appropriate Terra operation, request bounded Luna Guidance when needed, and ask the Foundation to admit or reject the result. For artifact generation it also triggers a separate quality-evaluation context and records the resulting audit through the Foundation.
 
-### Completion flow
+“Deterministic” describes this orchestration and admission path—not provider-generated content. Luna and Terra responses remain probabilistic.
 
-Finish is a separate participant action. It is rejected for an untouched Workshop, stale revision, or pending proposal. The completion pipeline synthesizes the current Spec from confirmed evidence, applies Foundation admission and quality gates, records the completion receipt, projects `HANDOFF_READY`, and schedules provider-resource cleanup.
+### AI adapters
 
-The case revision shown in the UI is a monotonic concurrency version. It counts admitted state changes—not questions or model calls—and prevents stale actions from overwriting newer state.
+**The SpecOps Guidance model is OpenAI GPT-5.6 Luna, configured at medium reasoning effort.** Luna can select only from canonical question references already supplied by the Foundation. It cannot author evidence, mutate workflow state, or commit a decision.
 
-## Repository layout
+**The SpecOps Analyzer is OpenAI GPT-5.6 Terra, also configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. The orchestrator treats every provider response as untrusted input and submits it to the Foundation; it cannot directly become committed application state.
+
+The repository retains a Gemini live-voice transport, but microphone and voice-authoritative input are outside the current text-authoritative V0 demo path.
+
+### Deterministic foundation
+
+The packages in `src/specops_workflow/` and `src/specops_contracts/` form the trusted state and policy core. Unlike the orchestrator, which coordinates use-case steps, the Foundation owns the canonical workflow rules and decides whether a command or AI-generated candidate is admissible. It enforces command contracts, authority, immutable source bindings, idempotent replay, explicit confirmation, derived readiness, audit history, and typed read models.
+
+### Persistence and contracts
+
+SQLite and Alembic provide local persistence and migrations. JSON Schema, generated OpenAPI artifacts, Pydantic models, and generated TypeScript types keep the provider, server, and browser boundaries aligned.
+
+## Latest development update
+
+The active V0 branch now supports one focused specification-workshop cycle:
+
+- Luna and participant turns appear together in a compact chat, with the active composer fixed below the scrollable history.
+- Preparation admits an initial four-question runway from the registered product and technical sources.
+- Participant turns are serialized: the participant can keep drafting locally while Terra analyzes the previous committed turn, but Send remains pending until analysis finishes.
+- Luna Guidance is selection-only and bounded to exact Foundation-admitted question references.
+- A shallow or empty runway produces participant-facing waiting guidance instead of stopping the prototype.
+- Analysis that produces no decision proposal surfaces a clarification outcome and preserves the revised next question.
+- Finish requires at least one committed typed turn and no unresolved proposal.
+- Canonical conversation context and typed-turn audit receipts recover across refresh and server restart.
+
+A manual live V0 demo has completed successfully. The formal credentialed full-cycle evaluation remains postponed, so this README does not claim that the complete production-readiness scorecard has passed.
+
+## Repository map
 
 ```text
-frontend/                         React, TypeScript, Vite, Vitest, Playwright
-migrations/                       Additive SQLite/Alembic migrations
-scripts/                          Contract generation and release verification
-src/specops_contracts/            Strict DTOs, JSON Schemas, quality contract
-src/specops_workflow/             Deterministic Foundation and persistence
-src/specops_workshop/api.py       Production FastAPI composition root
-src/specops_workshop/chat_*       Text Workshop ingress, projection, Luna adapter
-src/specops_workshop/v4/          Terra adapter, orchestrator, scheduler, quality path
-tests/workshop/                   Protocol, runtime, provider, UI, and recovery evidence
+frontend/                 React/TypeScript workshop interface
+migrations/               Alembic database migrations
+scripts/                  Contract generation and release verification
+src/specops_contracts/    Versioned schemas and protocol contracts
+src/specops_workflow/     Deterministic policy and state foundation
+src/specops_workshop/     FastAPI runtime and AI-provider orchestration
+tests/                    Foundation, workshop, contract, and release tests
 ```
 
-The Workshop also expects its project documents from the adjacent Spec Engineering workspace used by `SourceCatalog`. Those source documents and live runtime databases are intentionally not embedded in this repository.
-
-## Requirements
+## Technology
 
 - Python 3.12
-- Node.js and npm
-- SQLite
-- OpenAI API credentials only for a real Workshop
+- FastAPI and Uvicorn
+- Pydantic and JSON Schema
+- SQLAlchemy, Alembic, and SQLite
+- React, TypeScript, and Vite
+- OpenAI GPT-5.6 Luna for bounded Guidance selection
+- OpenAI GPT-5.6 Terra for analysis and artifact-quality evaluation
+- Pytest, Vitest, and Playwright
 
-Install the backend and test dependencies:
+## Local foundation setup
+
+Create a Python 3.12 environment and install the deterministic foundation with its test dependencies:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -e '.[test,workshop,workshop-test]'
+.venv/bin/pip install -e '.[test]'
 ```
 
-Install the frontend:
-
-```bash
-cd frontend
-npm install
-cd ..
-```
-
-## Configuration
-
-The real application requires a server-only environment file containing:
-
-```text
-SPECOPS_DATABASE_URL
-WORKSHOP_DATABASE_URL
-OPENAI_API_KEY
-```
-
-The pinned defaults are:
-
-```text
-OPENAI_ANALYZER_MODEL=gpt-5.6-terra
-OPENAI_CHATBOT_MODEL=gpt-5.6-luna
-OPENAI_ANALYZER_REASONING_EFFORT=medium
-OPENAI_CHATBOT_REASONING_EFFORT=medium
-```
-
-`GEMINI_API_KEY` is optional and unused by the text-authoritative V0 path. Point `SPECOPS_ENV_FILE` at the environment file; if it is unset, the server looks for `.env` in the adjacent Spec Engineering workspace. The Workshop rejects any `JIRA_*` or `GITHUB_*` entry because external delivery is outside this runtime boundary. Secrets must remain server-side and must not be committed.
-
-## Run locally
-
-Create a dedicated, uncommitted Workshop environment file with isolated SQLite databases:
-
-```dotenv
-SPECOPS_DATABASE_URL=sqlite:///./specops-workshop.sqlite
-WORKSHOP_DATABASE_URL=sqlite:///./workshop-sessions.sqlite
-OPENAI_API_KEY=...
-```
-
-Then point the server at that file, build, and serve:
-
-```bash
-export SPECOPS_ENV_FILE='/absolute/path/to/.env.workshop'
-make dev
-```
-
-Open <http://127.0.0.1:8000>.
-
-> **Paid-operation warning:** a fresh real runtime can upload the two configured project documents and execute OpenAI requests. Use a new isolated database, obtain the required data-transfer authorization, and retain the cleanup receipt. Do not use `make dev` as a no-cost smoke test.
-
-## Verification
-
-Run the complete deterministic, no-provider release gate:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/verify_workshop_release.py
-```
-
-Or run the layers independently:
-
-```bash
-PYTHONPATH=src .venv/bin/pytest -q
-cd frontend && npm test
-cd frontend && npm run build
-cd frontend && npm run test:e2e
-cd frontend && npm run test:e2e:real
-```
-
-At `7a1a5fa`, the verified deterministic bar is:
-
-- 364 backend tests passed.
-- 7 Vitest checks passed.
-- Frontend production build passed.
-- 22 Playwright checks passed across desktop and narrow viewports.
-- 1 real built-frontend-to-FastAPI browser seam passed.
-- Provider calls, tokens, and cost for the deterministic gate: zero.
-
-## Current evaluation status
-
-A manual V0 demo cycle has been observed working, including typed chat and explicit proposal handling. That is useful product evidence, but it is not a replacement for the formal credentialed scorecard.
-
-The remaining focused evaluation is `SW-EV-024`: one complete real Workshop must prove, in a single run, Luna Guidance, Terra analysis, explicit proposal confirmation, Spec synthesis and admission, quality audit, Finish, `HANDOFF_READY`, usage receipts, and provider cleanup.
-
-The latest scored Run 19 reached Guidance and confirmation but Terra's Spec synthesis Response ended `incomplete` before a candidate existed. Consequently, schema admission, audit, and handoff were not reached. The historical reason is unrecoverable because its provider objects were correctly deleted.
-
-The separate branch `debug/run19-incomplete-reason` contains commit `4b0c835`, which retains only the provider's bounded `max_output_tokens` or `content_filter` reason in lifecycle telemetry. That diagnostic is tested but is not yet integrated into `feature/v0-preparation-runway`.
-
-No README statement should be interpreted as a full production-readiness claim until `SW-EV-024` passes end to end.
-
-## Deterministic Foundation example
-
-The original headless policy kernel remains independently executable:
+Run the anonymous workflow example:
 
 ```bash
 .venv/bin/python examples/anonymous_workflow.py
 ```
 
-It creates an anonymous case, exercises authority rejection, registers evidence, builds and approves the governed package and projection artifacts, and reads the resulting workflow state without making network requests.
+The example uses generated identities and a temporary SQLite database. It demonstrates both an authorized command and an authority rejection without calling an external AI provider.
+
+## Verification
+
+Run the deterministic test suite from the repository root:
+
+```bash
+.venv/bin/pytest -q
+```
+
+The release suite exercises the workflow contracts, schema snapshots, authority boundaries, SQLite migrations, append-only audit protections, recovery behavior, generated API contracts, and browser integration. Live provider verification is intentionally separate because it requires external credentials and network access.
+
+## Scope and limitations
+
+SpecOps is a local Capstone demonstration, not a production SaaS release. The current scope does not claim production authentication, multi-tenant isolation, managed cloud deployment, direct Jira/GitHub execution, or a voice-authoritative workshop. AI-backed behavior also depends on provider availability and valid credentials. The deterministic foundation reduces workflow drift; it cannot make probabilistic model output fully deterministic.
+
+Secrets belong only in a local `.env` file and must never be committed. Runtime databases, generated build output, test reports, and local environment files are excluded through `.gitignore`.

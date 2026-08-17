@@ -291,6 +291,11 @@ def create_app(
         if existing_completion is None:
             if value.expected_case_revision != context.case_revision:
                 raise HTTPException(status_code=409, detail={"code": "STALE_STATE"})
+            if not context.committed_turns:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "NO_COMMITTED_TURNS"},
+                )
             if any(
                 item.status.value in {"PENDING", "EDIT_REQUESTED"}
                 for item in context.proposal_statuses

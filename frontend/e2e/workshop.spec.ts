@@ -148,6 +148,26 @@ test("presents active and completed Workshop states as an honest chat", async ({
   await expect(page.getByRole("form", { name: "Workshop response" })).not.toBeVisible();
 });
 
+test("keeps an untouched Workshop active with Luna and the composer ready", async ({ page }) => {
+  const untouchedWorkshop = {
+    ...workshop,
+    case_revision: 7,
+    committed_turns: [],
+    proposal_statuses: [],
+  };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: untouchedWorkshop }));
+
+  await page.goto("/");
+
+  const conversation = page.getByRole("log", { name: "Workshop conversation" });
+  await expect(page.getByText("ACTIVE", { exact: true })).toBeVisible();
+  await expect(conversation.getByText(question.exact_text)).toBeVisible();
+  await expect(conversation.getByText("Luna · canonical question")).toBeVisible();
+  await expect(page.getByLabel("Your typed response")).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Finish Workshop" })).toBeDisabled();
+});
+
 test("correction control loads the exact latest response binding and text", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Correct response" }).click();

@@ -3929,16 +3929,35 @@ def test_button_completion_endpoint_is_durable_idempotent_and_closes_new_turns(t
 
             time.sleep(0.01)
         before = client.get("/api/workshop").json()
+        empty_finish = client.post(
+            "/api/workshop/finish",
+            json={
+                "client_action_id": str(uuid4()),
+                "expected_case_revision": before["case_revision"],
+            },
+        )
+        question = before["question_runway"]["questions"][0]
+        submitted = client.post(
+            "/api/workshop/responses",
+            json={
+                "client_submission_id": str(uuid4()),
+                "question_id": question["question_id"],
+                "expected_question_version": question["question_version"],
+                "text": "Use the organization timezone for the export boundary.",
+                "correction_of_response_id": None,
+                "edit_target": None,
+            },
+        )
+        after_turn = client.get("/api/workshop").json()
         finish_body = {
             "client_action_id": str(uuid4()),
-            "expected_case_revision": before["case_revision"],
+            "expected_case_revision": after_turn["case_revision"],
         }
         first = client.post("/api/workshop/finish", json=finish_body)
         replay = client.post(
             "/api/workshop/finish",
             json=finish_body,
         )
-        question = before["question_runway"]["questions"][0]
         rejected = client.post(
             "/api/workshop/responses",
             json={
@@ -3952,6 +3971,9 @@ def test_button_completion_endpoint_is_durable_idempotent_and_closes_new_turns(t
         )
         projection = client.get("/api/workshop").json()
 
+    assert empty_finish.status_code == 409
+    assert empty_finish.json()["detail"]["code"] == "NO_COMMITTED_TURNS"
+    assert submitted.status_code == 200, submitted.text
     assert first.status_code == 200, first.text
     assert replay.status_code == 200, replay.text
     assert first.json()["receipt"]["completion_source"] == "BUTTON"

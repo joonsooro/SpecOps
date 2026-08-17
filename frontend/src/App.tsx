@@ -489,8 +489,8 @@ export function App() {
         <section className="finish-zone" aria-labelledby="finish-title">
           <p className="eyebrow">Separate terminal action</p>
           <h3 id="finish-title">Finish Workshop</h3>
-          <p>Finishing is deliberate and independent of response text, model output, and playback.</p>
-          <button className="finish-button" type="button" onClick={() => void finishWorkshop()} disabled={context?.workshop_state !== "ACTIVE" || busy !== null || !!context?.proposal_statuses.some((item) => ["PENDING", "EDIT_REQUESTED"].includes(item.status))}>
+          <p>Finishing is deliberate and becomes available after your first committed chat response.</p>
+          <button className="finish-button" type="button" onClick={() => void finishWorkshop()} disabled={context?.workshop_state !== "ACTIVE" || !context.committed_turns.length || busy !== null || !!context?.proposal_statuses.some((item) => ["PENDING", "EDIT_REQUESTED"].includes(item.status))}>
             <span>{busy === "finish" ? "Finishing…" : "Finish Workshop"}</span><span>→</span>
           </button>
           {context?.completion_status && <strong className="completion-state">{context.completion_status.replace("_", " ")}</strong>}

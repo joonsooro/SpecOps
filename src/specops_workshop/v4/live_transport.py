@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import TypeAdapter
@@ -15,21 +17,55 @@ from specops_workshop.ports import LiveVoiceProvider, VoiceContext, VoiceEventTy
 from .orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
 
 
+VOICE_PROVIDER_CLOSE_TIMEOUT_SECONDS = 5.0
+VOICE_PROVIDER_TASK_CANCEL_TIMEOUT_SECONDS = 5.0
+_LOGGER = logging.getLogger("specops.workshop.voice")
+
+
+def _consume_task_result(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    task.exception()
+
+
 class V4LiveTransport:
-    def __init__(self, provider: LiveVoiceProvider, orchestrator: V4ProductionOrchestrator) -> None:
+    def __init__(
+        self,
+        provider: LiveVoiceProvider,
+        orchestrator: V4ProductionOrchestrator,
+        *,
+        provider_close_timeout_seconds: float = VOICE_PROVIDER_CLOSE_TIMEOUT_SECONDS,
+        provider_task_cancel_timeout_seconds: float = VOICE_PROVIDER_TASK_CANCEL_TIMEOUT_SECONDS,
+    ) -> None:
+        if provider_close_timeout_seconds <= 0 or provider_task_cancel_timeout_seconds <= 0:
+            raise ValueError("provider teardown timeouts must be positive")
         self.provider = provider
         self.orchestrator = orchestrator
+        self.provider_close_timeout_seconds = provider_close_timeout_seconds
+        self.provider_task_cancel_timeout_seconds = provider_task_cancel_timeout_seconds
 
     async def handle(self, websocket: WebSocket) -> None:
         await websocket.accept()
+        preparation = self.orchestrator.foundation.preparation_projection(
+            self.orchestrator.case_id
+        )
+        runway = self.orchestrator.foundation.runway_projection(self.orchestrator.case_id)
+        if preparation.get("workshop_complete_at") is not None:
+            await websocket.send_json({"type": "ERROR", "code": "WORKSHOP_COMPLETE"})
+            await websocket.close(code=4409)
+            return
+        if preparation["phase"] != "READY":
+            await websocket.send_json(
+                {"type": "ERROR", "code": "WORKSHOP_PREPARATION_NOT_READY"}
+            )
+            await websocket.close(code=4403)
+            return
         await websocket.send_json({"type": "CALL_STATE", "state": "CONNECTING"})
+        card = self.orchestrator.foundation.voice_session_card(self.orchestrator.case_id)
         try:
             session = await self.provider.connect(
                 VoiceContext(
-                    system_instruction=(
-                        "Facilitate the Workshop without interpreting confirmations. "
-                        "Return final transcripts and mechanical spoken selections only."
-                    ),
+                    system_instruction=self._voice_instruction(card, runway),
                     resume=ProviderResumeContext(
                         conversation_phase=ConversationPhase.WORKSHOP,
                         committed_package=None,
@@ -49,23 +85,170 @@ class V4LiveTransport:
             await self._text_only(websocket)
             return
         await websocket.send_json({"type": "CALL_STATE", "state": "LISTENING"})
-        client = asyncio.create_task(self._client(websocket, session))
+        voice_available = asyncio.Event()
+        voice_available.set()
+        client = asyncio.create_task(self._client(websocket, session, voice_available))
         provider = asyncio.create_task(self._provider(websocket, session))
+        provider_reader_started = time.monotonic()
+        self._emit_lifecycle("voice_provider_reader.started", provider_reader_started)
+        session_closed = False
+        end_requested = False
         try:
             done, pending = await asyncio.wait(
                 (client, provider), return_when=asyncio.FIRST_COMPLETED
             )
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            for task in done:
-                task.result()
+            provider_disconnected = False
+            if provider in done:
+                try:
+                    provider_disconnected = provider.result()
+                except Exception:
+                    provider_disconnected = True
+                    self._emit_lifecycle(
+                        "voice_provider_reader.failed", provider_reader_started
+                    )
+                else:
+                    self._emit_lifecycle(
+                        "voice_provider_reader.completed", provider_reader_started
+                    )
+            if client in done:
+                await self._cancel_pending_provider_tasks(
+                    {provider} if provider in pending else set()
+                )
+                end_requested = client.result()
+            else:
+                # The provider may finish a turn before the browser's END
+                # control arrives. Preserve the client task so END can still
+                # receive ENDED and later TEXT input uses Foundation fallback.
+                voice_available.clear()
+                if provider_disconnected:
+                    await websocket.send_json(
+                        {
+                            "type": "CALL_STATE",
+                            "state": "DISCONNECTED",
+                            "guidance": "Voice unavailable. Continue with text.",
+                        }
+                    )
+                await self._close_provider_session(session)
+                session_closed = True
+                end_requested = await client
         except WebSocketDisconnect:
             pass
         finally:
-            await session.close()
+            if not session_closed:
+                await self._close_provider_session(session)
+        if end_requested:
+            await websocket.send_json({"type": "CALL_STATE", "state": "ENDED"})
 
-    async def _commit(self, websocket: WebSocket, value: dict, *, provider_id: str) -> None:
+    def _emit_lifecycle(self, event: str, started: float) -> None:
+        _LOGGER.info(
+            json.dumps(
+                {
+                    "correlation_id": str(self.orchestrator.case_id),
+                    "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                    "event": event,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+
+    async def _cancel_pending_provider_tasks(
+        self, tasks: set[asyncio.Task]
+    ) -> None:
+        """Stop reading provider events without retaining the request handler."""
+
+        if not tasks:
+            return
+        started = time.monotonic()
+        correlation = str(self.orchestrator.case_id)
+
+        def emit(event: str) -> None:
+            _LOGGER.info(
+                json.dumps(
+                    {
+                        "correlation_id": correlation,
+                        "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                        "event": event,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+
+        emit("voice_provider_reader_cancel.started")
+        for task in tasks:
+            task.cancel()
+        try:
+            done, pending = await asyncio.wait(
+                tasks, timeout=self.provider_task_cancel_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+                task.add_done_callback(_consume_task_result)
+            emit("voice_provider_reader_cancel.cancelled")
+            raise
+        for task in done:
+            _consume_task_result(task)
+        if pending:
+            for task in pending:
+                task.add_done_callback(_consume_task_result)
+            emit("voice_provider_reader_cancel.timed_out")
+        else:
+            emit("voice_provider_reader_cancel.completed")
+
+    async def _close_provider_session(self, session) -> None:
+        """Bound teardown only after the client/provider turn has ended.
+
+        Model completion is never timed out here.  This bound prevents a
+        provider SDK close handshake from retaining the WebSocket handler after
+        Foundation has already stored the final transcript or the client has
+        explicitly ended the call.
+        """
+
+        started = time.monotonic()
+        correlation = str(self.orchestrator.case_id)
+
+        def emit(event: str) -> None:
+            _LOGGER.info(
+                json.dumps(
+                    {
+                        "correlation_id": correlation,
+                        "duration_ms": max(0, int((time.monotonic() - started) * 1000)),
+                        "event": event,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+
+        emit("voice_provider_close.started")
+        close_task = asyncio.create_task(session.close())
+
+        try:
+            done, _ = await asyncio.wait(
+                (close_task,), timeout=self.provider_close_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            close_task.cancel()
+            close_task.add_done_callback(_consume_task_result)
+            emit("voice_provider_close.cancelled")
+            raise
+        if not done:
+            close_task.cancel()
+            close_task.add_done_callback(_consume_task_result)
+            emit("voice_provider_close.timed_out")
+            return
+        try:
+            close_task.result()
+        except Exception:
+            emit("voice_provider_close.failed")
+        else:
+            emit("voice_provider_close.completed")
+
+    async def _commit(
+        self, websocket: WebSocket, value: dict, *, provider_id: str, session=None
+    ) -> bool:
         receipt = await self.orchestrator.record_final_transcript(
             FinalTranscriptInput(
                 turn_sequence=int(value["turn_sequence"]),
@@ -84,22 +267,79 @@ class V4LiveTransport:
                 "duplicate": receipt.duplicate,
             }
         )
+        completion = await self.orchestrator.complete_from_final_transcript(
+            receipt.transcript.transcript_event_id
+        )
+        if completion.action == "COMPLETE":
+            assert completion.completion is not None
+            await websocket.send_json(
+                {
+                    "type": "WORKSHOP_COMPLETE",
+                    "state": completion.completion.state,
+                    "replayed": completion.completion.replayed,
+                }
+            )
+            return True
+        if completion.action == "CONFIRMATION_REQUIRED":
+            await websocket.send_json({"type": "COMPLETION_CONFIRMATION_REQUIRED"})
+            if session is not None:
+                await session.send_text(
+                    "The PM may be signaling completion. Ask exactly: "
+                    "‘Would you like me to finish the Spec Workshop now?’ "
+                    "Do not ask a substantive question until the PM answers."
+                )
+            return False
+        if session is not None:
+            # This input-final callback is the conversational turn boundary.
+            # Only a fresh Foundation read may update Voice guidance.
+            card = self.orchestrator.foundation.voice_session_card(
+                self.orchestrator.case_id
+            )
+            runway = self.orchestrator.foundation.runway_projection(
+                self.orchestrator.case_id
+            )
+            await session.send_text(self._voice_instruction(card, runway))
+        return False
 
-    async def _client(self, websocket: WebSocket, session) -> None:
+    @staticmethod
+    def _voice_instruction(card: c.VoiceSessionCard, runway: dict) -> str:
+        if runway["depth"] == 0:
+            return (
+                "No substantive clarification question is currently admitted. "
+                "Summarize admitted information, invite corrections, and say exactly: "
+                "‘I’m preparing the next clarification area. You can correct anything already captured while I do that.’"
+            )
+        allowed = "\n".join(
+            f"{index + 1}. {item['exact_text']}" for index, item in enumerate(runway["questions"])
+        )
+        return (
+            "Facilitate the Workshop without interpreting confirmations. Ask only one of the "
+            "following Foundation-admitted questions, in order; do not invent, revise, or combine them. "
+            "A clear PM statement that the Spec Workshop is complete ends the Workshop; an ambiguous "
+            "completion statement requires one direct confirmation before any further substantive question. "
+            f"Runway health: {card.runway_health.value}.\n{allowed}"
+        )
+
+    async def _client(
+        self, websocket: WebSocket, session, voice_available: asyncio.Event
+    ) -> bool:
         while True:
             message = await websocket.receive()
             if message.get("bytes") is not None:
                 await session.send_audio(message["bytes"])
                 continue
             if message.get("text") is None:
-                return
+                return False
             value = json.loads(message["text"])
             if value.get("type") == "TEXT":
-                await self._commit(
+                completed = await self._commit(
                     websocket,
                     value,
                     provider_id=str(value["provider_request_id"]),
+                    session=session if voice_available.is_set() else None,
                 )
+                if completed:
+                    return False
             elif value.get("type") == "INTERRUPT":
                 await session.interrupt()
             elif value.get("type") == "DECISION_SELECTION":
@@ -119,12 +359,11 @@ class V4LiveTransport:
                     }
                 )
             elif value.get("type") == "END":
-                await websocket.send_json({"type": "CALL_STATE", "state": "ENDED"})
-                return
+                return True
             else:
                 await websocket.send_json({"type": "ERROR", "code": "INVALID_CONTROL"})
 
-    async def _provider(self, websocket: WebSocket, session) -> None:
+    async def _provider(self, websocket: WebSocket, session) -> bool:
         sequence = (
             1
             if self.orchestrator.foundation.latest_final_transcript(
@@ -142,18 +381,22 @@ class V4LiveTransport:
             elif event.type is VoiceEventType.INPUT_PARTIAL:
                 await websocket.send_json({"type": "TRANSCRIPT_PARTIAL", "text": event.text})
             elif event.type is VoiceEventType.INPUT_FINAL and event.text:
-                await self._commit(
+                completed = await self._commit(
                     websocket,
                     {"turn_sequence": sequence, "text": event.text},
                     provider_id=event.provider_request_id or f"gemini-turn-{sequence}",
+                    session=session,
                 )
                 sequence += 1
+                if completed:
+                    return False
             elif event.type is VoiceEventType.OUTPUT_TRANSCRIPT:
                 await websocket.send_json({"type": "AGENT_TRANSCRIPT", "text": event.text})
             elif event.type is VoiceEventType.INTERRUPTED:
                 await websocket.send_json({"type": "INTERRUPTED", "playback_cleared": True})
             elif event.type is VoiceEventType.DISCONNECTED:
-                return
+                return True
+        return False
 
     async def _text_only(self, websocket: WebSocket) -> None:
         while True:
@@ -162,11 +405,13 @@ class V4LiveTransport:
             except WebSocketDisconnect:
                 return
             if value.get("type") == "TEXT":
-                await self._commit(
+                completed = await self._commit(
                     websocket,
                     value,
                     provider_id=str(value["provider_request_id"]),
                 )
+                if completed:
+                    return
             elif value.get("type") == "END":
                 return
             else:

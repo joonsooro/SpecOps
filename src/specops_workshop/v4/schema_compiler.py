@@ -64,6 +64,12 @@ NATIVE_SCHEMA_SPECS: tuple[NativeSchemaSpec, ...] = (
 
 
 _PRESENTATION_KEYS = frozenset({"title", "description", "examples", "default", "$schema"})
+_QUESTION_DEFINITION_NAMES = frozenset(
+    {"QuestionCandidate", "TurnQuestionCandidate", "TurnQuestionRevisionCandidate"}
+)
+_PROVIDER_TYPES = frozenset(
+    {"string", "number", "boolean", "integer", "object", "array", "null"}
+)
 _UNSUPPORTED_KEYS = frozenset(
     {
         "allOf",
@@ -79,6 +85,7 @@ _UNSUPPORTED_KEYS = frozenset(
         "contains",
         "minContains",
         "maxContains",
+        "uniqueItems",
     }
 )
 
@@ -91,6 +98,15 @@ def _compile_node(value: Any) -> Any:
 
     compiled: dict[str, Any] = {}
     for key, item in value.items():
+        if key == "properties" and isinstance(item, dict):
+            # Keys inside a properties map are domain field names.  A field may
+            # legitimately be named "title" or "description" even though those
+            # same keys are presentation metadata on a schema node.
+            compiled[key] = {
+                property_name: _compile_node(property_schema)
+                for property_name, property_schema in item.items()
+            }
+            continue
         if key in _PRESENTATION_KEYS or key == "discriminator":
             continue
         translated = "anyOf" if key == "oneOf" else key
@@ -103,14 +119,147 @@ def _compile_node(value: Any) -> Any:
     return compiled
 
 
+def _question_branch(
+    properties: dict[str, Any],
+    *,
+    question_shape: dict[str, Any],
+    answer_minimum: int | None = None,
+    answer_maximum: int | None = None,
+    capture_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    branch_properties = deepcopy(properties)
+    branch_properties["question_shape"] = question_shape
+    if capture_policy is not None:
+        branch_properties["capture_policy"] = capture_policy
+    answer_options = branch_properties["answer_options"]
+    if answer_minimum is not None:
+        answer_options["minItems"] = answer_minimum
+    if answer_maximum is not None:
+        answer_options["maxItems"] = answer_maximum
+    return {
+        "type": "object",
+        "properties": branch_properties,
+        "required": list(branch_properties),
+        "additionalProperties": False,
+    }
+
+
+def _encode_question_invariants(schema: dict[str, Any]) -> None:
+    """Make provider structure enforce the local question-shape validator."""
+
+    definitions = schema.get("$defs", {})
+    for name in _QUESTION_DEFINITION_NAMES:
+        definition = definitions.get(name)
+        if not isinstance(definition, dict):
+            continue
+        properties = definition.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        definitions[name] = {
+            "anyOf": [
+                _question_branch(
+                    properties,
+                    question_shape={"const": "CLOSED_ENUM", "type": "string"},
+                    answer_minimum=2,
+                ),
+                _question_branch(
+                    properties,
+                    question_shape={"const": "OPEN_TEXT", "type": "string"},
+                    answer_maximum=0,
+                    capture_policy={
+                        "enum": ["CLARIFICATION_ONLY", "BINDING_DECISION"],
+                        "type": "string",
+                    },
+                ),
+                _question_branch(
+                    properties,
+                    question_shape={
+                        "enum": [
+                            "CLOSED_BOOLEAN",
+                            "CLOSED_INTEGER",
+                            "CLOSED_DECIMAL",
+                            "CLOSED_TEXT",
+                        ],
+                        "type": "string",
+                    },
+                    answer_maximum=0,
+                ),
+            ]
+        }
+
+
 def _walk(value: Any):
     if isinstance(value, dict):
         yield value
-        for child in value.values():
-            yield from _walk(child)
+        for key, child in value.items():
+            if key in {"properties", "$defs"} and isinstance(child, dict):
+                for nested_schema in child.values():
+                    yield from _walk(nested_schema)
+            else:
+                yield from _walk(child)
     elif isinstance(value, list):
         for child in value:
             yield from _walk(child)
+
+
+def _without_unsupported_keywords(value: Any) -> Any:
+    """Project a Foundation schema into the provider's structural subset."""
+
+    if isinstance(value, list):
+        return [_without_unsupported_keywords(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    projected: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {"properties", "$defs"} and isinstance(item, dict):
+            projected[key] = {
+                name: _without_unsupported_keywords(schema)
+                for name, schema in item.items()
+            }
+        elif key not in _UNSUPPORTED_KEYS:
+            projected[key] = _without_unsupported_keywords(item)
+    if "type" not in projected and ("const" in projected or "enum" in projected):
+        literals = (
+            [projected["const"]]
+            if "const" in projected
+            else projected["enum"]
+        )
+        if not isinstance(literals, list) or not literals:
+            raise ValueError("provider wire schema literal set must be non-empty")
+
+        def literal_type(literal: Any) -> str:
+            if literal is None:
+                return "null"
+            if isinstance(literal, bool):
+                return "boolean"
+            if isinstance(literal, str):
+                return "string"
+            if isinstance(literal, int):
+                return "integer"
+            if isinstance(literal, float):
+                return "number"
+            raise ValueError("provider wire schema literal has no scalar type")
+
+        literal_types = {literal_type(literal) for literal in literals}
+        if len(literal_types) != 1:
+            raise ValueError("provider wire schema literals must share one scalar type")
+        projected["type"] = literal_types.pop()
+    node_types = projected.get("type")
+    if isinstance(node_types, list):
+        if (
+            len(node_types) != 2
+            or "null" not in node_types
+            or any(not isinstance(node_type, str) for node_type in node_types)
+        ):
+            raise ValueError("provider wire schema has an unsupported type union")
+        constraints = {key: item for key, item in projected.items() if key != "type"}
+        projected = {
+            "anyOf": [
+                ({"type": node_type} if node_type == "null" else {"type": node_type, **constraints})
+                for node_type in node_types
+            ]
+        }
+    return projected
 
 
 def _resolved_depth(schema: dict[str, Any]) -> int:
@@ -130,11 +279,20 @@ def _resolved_depth(schema: dict[str, Any]) -> int:
             if target is None:
                 raise ValueError(f"unresolved native-schema reference: {reference}")
             return depth(target, level, resolving | {name})
-        next_level = level + (1 if value.get("type") in {"object", "array"} else 0)
-        return max(
-            (depth(child, next_level, resolving) for child in value.values()),
-            default=next_level,
+        node_type = value.get("type")
+        next_level = level + (
+            1 if isinstance(node_type, str) and node_type in {"object", "array"} else 0
         )
+        child_depths: list[int] = []
+        for key, child in value.items():
+            if key in {"properties", "$defs"} and isinstance(child, dict):
+                child_depths.extend(
+                    depth(nested_schema, next_level, resolving)
+                    for nested_schema in child.values()
+                )
+            else:
+                child_depths.append(depth(child, next_level, resolving))
+        return max(child_depths, default=next_level)
 
     return depth(schema, 0, frozenset())
 
@@ -152,6 +310,13 @@ def validate_openai_strict_schema(schema: dict[str, Any]) -> None:
         forbidden = _UNSUPPORTED_KEYS.intersection(node)
         if forbidden:
             raise ValueError(f"unsupported OpenAI schema keyword(s): {sorted(forbidden)}")
+        node_type = node.get("type")
+        if node_type is None and ("const" in node or "enum" in node):
+            raise ValueError("OpenAI literal schema nodes must declare one scalar type")
+        if node_type is not None and (
+            not isinstance(node_type, str) or node_type not in _PROVIDER_TYPES
+        ):
+            raise ValueError(f"unsupported OpenAI schema type: {node_type!r}")
         properties = node.get("properties")
         if isinstance(properties, dict):
             if node.get("additionalProperties") is not False:
@@ -185,6 +350,24 @@ def validate_openai_strict_schema(schema: dict[str, Any]) -> None:
 def compile_openai_strict_schema(model: type[ModelT]) -> dict[str, Any]:
     local_schema = model.model_json_schema(mode="validation")
     compiled = _compile_node(deepcopy(local_schema))
+    _encode_question_invariants(compiled)
+    validate_openai_strict_schema(compiled)
+    return compiled
+
+
+def compile_openai_strict_payload_schema(
+    local_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Compile one full Foundation payload schema for provider wire output.
+
+    Unsupported conditional and collection keywords are omitted only from this
+    provider-side structural projection. The unmodified normative schema remains
+    authoritative during local Foundation admission.
+    """
+
+    compiled = _compile_node(deepcopy(local_schema))
+    compiled.pop("$id", None)
+    compiled = _without_unsupported_keywords(compiled)
     validate_openai_strict_schema(compiled)
     return compiled
 
@@ -212,3 +395,15 @@ def artifact_quality_native_schema() -> dict[str, Any]:
     """
 
     return compile_openai_strict_schema(quality.ArtifactSemanticAttestationCandidate)
+
+
+def artifact_evidence_support_native_schema() -> dict[str, Any]:
+    """Compile the bounded exact-pair SUPPORTS assessment output."""
+
+    return compile_openai_strict_schema(quality.ArtifactEvidenceSupportCandidate)
+
+
+def artifact_quality_revision_native_schema() -> dict[str, Any]:
+    """Compile the one-attempt, pointer-bounded artifact revision output."""
+
+    return compile_openai_strict_schema(quality.ArtifactQualityRevisionCandidate)

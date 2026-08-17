@@ -1,4 +1,121 @@
 {
+  "$defs": {
+    "ArtifactIdentityAssignment": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_pointer": {
+          "maxLength": 2048,
+          "pattern": "^(?:/(?:[^~/]|~0|~1)*)+$",
+          "type": "string"
+        },
+        "entity_kind": {
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+          "type": "string"
+        },
+        "foundation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ordinal": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "slot_key": {
+          "maxLength": 69,
+          "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot_key",
+        "entity_kind",
+        "ordinal",
+        "foundation_id",
+        "canonical_pointer"
+      ],
+      "type": "object"
+    },
+    "SourceRole": {
+      "enum": [
+        "PM_SPEC",
+        "TECHNICAL_CONTRACT"
+      ],
+      "type": "string"
+    },
+    "SpecEvidenceSupportProposalCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "claim_pointer": {
+          "maxLength": 2048,
+          "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
+          "type": "string"
+        },
+        "claim_ref": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "maxLength": 69,
+              "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+              "type": "string"
+            }
+          ]
+        },
+        "evidence_ref": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "maxLength": 69,
+              "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+              "type": "string"
+            }
+          ]
+        },
+        "exact_excerpt": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "finding_ref": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "type": "string"
+            },
+            {
+              "maxLength": 69,
+              "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+              "type": "string"
+            }
+          ]
+        },
+        "locator": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_role": {
+          "$ref": "#/$defs/SourceRole"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "finding_ref",
+        "claim_ref",
+        "claim_pointer",
+        "source_role",
+        "locator",
+        "exact_excerpt"
+      ],
+      "type": "object"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "analyzer_run_id": {
@@ -19,9 +136,23 @@
       "format": "uuid",
       "type": "string"
     },
+    "evidence_support_proposals": {
+      "items": {
+        "$ref": "#/$defs/SpecEvidenceSupportProposalCandidate"
+      },
+      "maxItems": 1000,
+      "type": "array"
+    },
     "foundation_artifact_id": {
       "format": "uuid",
       "type": "string"
+    },
+    "identity_assignment_map": {
+      "items": {
+        "$ref": "#/$defs/ArtifactIdentityAssignment"
+      },
+      "maxItems": 10000,
+      "type": "array"
     },
     "identity_plan_id": {
       "format": "uuid",
@@ -41,7 +172,7 @@
       "type": "string"
     },
     "payload_schema_version": {
-      "const": "4.0.0",
+      "const": "4.0.2",
       "type": "string"
     },
     "request_hash": {
@@ -70,7 +201,9 @@
     "candidate_payload_json",
     "output_type",
     "payload_schema_id",
-    "payload_schema_version"
+    "payload_schema_version",
+    "evidence_support_proposals",
+    "identity_assignment_map"
   ],
   "type": "object"
 }

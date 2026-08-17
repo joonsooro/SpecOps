@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from jsonschema import Draft202012Validator
 from pydantic import TypeAdapter
@@ -33,7 +33,9 @@ from specops_contracts.canonical import (
 )
 
 from .persistence import (
-    WORKSHOP_PROTOCOL_TABLES,
+    EVIDENCE_ASSESSMENT_TABLES,
+    WORKSHOP_PROTOCOL_TABLES as V4_WORKSHOP_PROTOCOL_TABLES,
+    V0_RUNTIME_TABLES,
     audit_events,
     case_participants,
     cases as foundation_cases,
@@ -41,6 +43,41 @@ from .persistence import (
     engine_for,
     source_artifacts,
 )
+
+WORKSHOP_PROTOCOL_TABLES = {**V4_WORKSHOP_PROTOCOL_TABLES, **V0_RUNTIME_TABLES}
+
+
+RUNTIME_NAMESPACE = UUID("31bfc764-d069-4f27-b614-444d1f47da7a")
+TURN_CORRECTION_SUBJECT_PREFIX = "turn-correction:"
+POST_BOOTSTRAP_RUNWAY_TARGET = 5
+
+
+def _runtime_id(*parts: object) -> UUID:
+    return uuid5(RUNTIME_NAMESPACE, ":".join(str(part) for part in parts))
+
+
+def is_turn_correction_subject(subject_id: str) -> bool:
+    return subject_id.startswith(TURN_CORRECTION_SUBJECT_PREFIX)
+
+
+def turn_correction_parent_job_id(subject_id: str) -> str:
+    if not is_turn_correction_subject(subject_id):
+        raise ValueError("Analyzer job is not a TURN_ANALYSIS correction")
+    return subject_id.removeprefix(TURN_CORRECTION_SUBJECT_PREFIX)
+
+
+def _schema_error_pointers(errors: list[Any]) -> tuple[str, ...]:
+    pointers = {
+        "/"
+        + "/".join(
+            str(part).replace("~", "~0").replace("/", "~1")
+            for part in error.absolute_path
+        )
+        for error in errors
+    }
+    return tuple(sorted(pointers))[:32]
+
+
 from .artifact_projection import (
     artifact_envelope,
     build_review_view,
@@ -49,6 +86,14 @@ from .artifact_projection import (
     validate_exact,
 )
 from .artifact_quality_foundation import ArtifactQualityFoundationMixin
+from .artifact_reference_graph import validate_artifact_reference_graph
+from .spec_identity_materialization import (
+    SpecIdentityMaterializationError,
+    derive_materialized_assignment,
+    materialize_spec_identities,
+    validate_materialized_assignment,
+)
+from .workshop_completion import CompletionUtterance, classify_completion_utterance
 
 
 SCHEMA_ROOT = Path(__file__).resolve().parents[1] / "specops_contracts" / "schemas"
@@ -70,9 +115,19 @@ TURN_ENTITY_KINDS = (
 
 
 class FoundationProtocolError(RuntimeError):
-    def __init__(self, code: c.FoundationRejectionCode) -> None:
+    def __init__(
+        self,
+        code: c.FoundationRejectionCode,
+        *,
+        safe_diagnostic_pointers: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(code.value)
         self.code = code
+        self.safe_diagnostic_pointers = safe_diagnostic_pointers
+
+
+class _GuidanceBranchUnavailable(RuntimeError):
+    """One current question has an unresolved prerequisite or no open target."""
 
 
 @dataclass(frozen=True)
@@ -83,6 +138,105 @@ class ProtocolCase:
     active_context_id: UUID | None
     readiness: c.Readiness
     review_obligation: c.ReviewObligation
+
+
+@dataclass(frozen=True)
+class TurnAnalysisPartition:
+    """A source-verified subset plus the dependency closure held for correction."""
+
+    verified_candidate: c.TurnAnalysisCandidate | None
+    rejected_evidence_keys: tuple[str, ...]
+    quarantined_candidate_keys: tuple[str, ...]
+
+
+def _candidate_ref_keys(value: Any) -> set[str]:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="python", exclude_none=False)
+    if isinstance(value, dict):
+        found = (
+            {value["candidate_key"]}
+            if value.get("ref_kind") == "CANDIDATE_KEY"
+            else set()
+        )
+        for item in value.values():
+            found.update(_candidate_ref_keys(item))
+        return found
+    if isinstance(value, (list, tuple)):
+        found: set[str] = set()
+        for item in value:
+            found.update(_candidate_ref_keys(item))
+        return found
+    return set()
+
+
+def _partition_turn_candidate(
+    candidate: c.TurnAnalysisCandidate,
+    rejected_evidence_keys: tuple[str, ...],
+) -> TurnAnalysisPartition:
+    if not rejected_evidence_keys:
+        return TurnAnalysisPartition(candidate, (), ())
+
+    keyed_fields = (
+        "evidence_candidates",
+        "new_problems",
+        "new_problem_clusters",
+        "new_questions",
+        "low_risk_facts",
+        "decisions",
+        "evidence_findings",
+    )
+    quarantined = set(rejected_evidence_keys)
+    changed = True
+    while changed:
+        changed = False
+        for field_name in keyed_fields:
+            for item in getattr(candidate, field_name):
+                if item.candidate_key in quarantined:
+                    continue
+                if _candidate_ref_keys(item).intersection(quarantined):
+                    quarantined.add(item.candidate_key)
+                    changed = True
+
+    updates: dict[str, Any] = {
+        field_name: tuple(
+            item
+            for item in getattr(candidate, field_name)
+            if item.candidate_key not in quarantined
+        )
+        for field_name in keyed_fields
+    }
+    for field_name in (
+        "revised_problem_clusters",
+        "revised_questions",
+        "problem_assessments",
+    ):
+        updates[field_name] = tuple(
+            item
+            for item in getattr(candidate, field_name)
+            if not _candidate_ref_keys(item).intersection(quarantined)
+        )
+
+    semantic_fields = (
+        *keyed_fields,
+        "revised_problem_clusters",
+        "revised_questions",
+        "problem_assessments",
+    )
+    if not any(updates[field_name] for field_name in semantic_fields):
+        verified = None
+    else:
+        updates.update(
+            disposition=c.TurnDisposition.SUBSTANTIVE,
+            no_change_reason_code=None,
+        )
+        material = candidate.model_dump(mode="python", exclude_none=False)
+        material.update(updates)
+        verified = c.TurnAnalysisCandidate.model_validate(material)
+    return TurnAnalysisPartition(
+        verified_candidate=verified,
+        rejected_evidence_keys=tuple(sorted(rejected_evidence_keys)),
+        quarantined_candidate_keys=tuple(sorted(quarantined)),
+    )
 
 
 def _instant(value: datetime) -> str:
@@ -126,7 +280,10 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         source_set_hash: str,
     ) -> ProtocolCase:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_cases"]
+        preparation = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        resources = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
         now = _instant(self.now())
+        preparation_id = _runtime_id(case_id, "preparation", source_set_hash)
         with self.engine.begin() as connection:
             existing = connection.execute(
                 select(table).where(table.c.case_id == str(case_id))
@@ -149,6 +306,51 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 or existing["source_set_hash"] != source_set_hash
             ):
                 raise FoundationProtocolError(c.FoundationRejectionCode.DUPLICATE_CONFLICT)
+
+            # A 0004 database can already contain the canonical V4 case.  The
+            # 0005 operational rows are therefore backfilled idempotently when
+            # that case is registered after upgrade instead of assuming this is
+            # a brand-new case.
+            existing_preparation = connection.execute(
+                select(preparation.c.case_id).where(preparation.c.case_id == str(case_id))
+            ).scalar_one_or_none()
+            if existing_preparation is None:
+                connection.execute(
+                    insert(preparation).values(
+                        case_id=str(case_id),
+                        preparation_id=str(preparation_id),
+                        phase="VALIDATING_DOCUMENTS",
+                        started_at=now,
+                        updated_at=now,
+                        ready_at=None,
+                        failure_code=None,
+                        cleanup_state="NOT_REQUIRED",
+                        cleanup_reason=None,
+                        last_client_disconnected_at=None,
+                        restart_grace_until=None,
+                        workshop_complete_at=None,
+                        cleanup_available_at=None,
+                        cleanup_last_error_code=None,
+                    )
+                )
+            existing_resources = connection.execute(
+                select(resources.c.case_id).where(resources.c.case_id == str(case_id))
+            ).scalar_one_or_none()
+            if existing_resources is None:
+                connection.execute(
+                    insert(resources).values(
+                        case_id=str(case_id),
+                        source_set_hash=source_set_hash,
+                        pm_file_id=None,
+                        technical_file_id=None,
+                        provider_conversation_id=None,
+                        bootstrap_request_id=f"specops-bootstrap-{preparation_id}",
+                        bootstrap_response_id=None,
+                        bootstrap_candidate_json=None,
+                        context_json=None,
+                        updated_at=now,
+                    )
+                )
         return self.get_case(case_id)
 
     def get_case(self, case_id: UUID) -> ProtocolCase:
@@ -185,6 +387,22 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             ).scalar_one_or_none()
         return None if value is None else TypeAdapter(c.FoundationReceipt).validate_json(value)
 
+    def workshop_completion_receipt(
+        self, case_id: UUID
+    ) -> c.WorkshopCompletionReceipt | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_command_ledger"]
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(table.c.receipt_json)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.command_type == "CLAIM_WORKSHOP_COMPLETE",
+                )
+                .order_by(table.c.recorded_at)
+                .limit(1)
+            ).scalar_one_or_none()
+        return None if value is None else c.WorkshopCompletionReceipt.model_validate_json(value)
+
     def active_analyzer_context(self, case_id: UUID) -> c.AnalyzerContextBinding | None:
         """Recover the persisted provider binding; provider IDs never live in UI state."""
 
@@ -197,6 +415,43 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 )
             ).scalar_one_or_none()
         return None if row is None else c.AnalyzerContextBinding.model_validate_json(row)
+
+    def active_analyzer_context_id(self, case_id: UUID) -> UUID | None:
+        """Return only the canonical identity of an active historical context.
+
+        Cleanup must remain possible after an executable contract upgrade makes an
+        older binding body intentionally fail current model validation.  This
+        accessor reads the server-owned identity column and does not admit or reuse
+        any stale semantic content.
+        """
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(table.c.context_id).where(
+                    table.c.case_id == str(case_id),
+                    table.c.status == c.ContextStatus.ACTIVE.value,
+                )
+            ).scalar_one_or_none()
+        return None if value is None else UUID(value)
+
+    def active_analyzer_provider_conversation_id(self, case_id: UUID) -> str | None:
+        """Return only the stable provider identity from a historical active context."""
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.binding_json).where(
+                    table.c.case_id == str(case_id),
+                    table.c.status == c.ContextStatus.ACTIVE.value,
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        value = json.loads(row).get("provider_conversation_id")
+        if not isinstance(value, str) or not value:
+            raise ValueError("stored Analyzer context has no provider Conversation identity")
+        return value
 
     def latest_final_transcript(self, case_id: UUID) -> c.TranscriptFinalizedEvent | None:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"]
@@ -218,6 +473,572 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 .order_by(table.c.sequence_number)
             ).scalars().all()
         return tuple(c.TranscriptFinalizedEvent.model_validate_json(row) for row in rows)
+
+    def set_preparation_phase(
+        self,
+        case_id: UUID,
+        phase: str,
+        *,
+        failure_code: str | None = None,
+        cleanup_state: str | None = None,
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        values: dict[str, Any] = {
+            "phase": phase,
+            "updated_at": _instant(self.now()),
+            "failure_code": failure_code,
+        }
+        if phase == "READY":
+            values["ready_at"] = _instant(self.now())
+        if cleanup_state is not None:
+            values["cleanup_state"] = cleanup_state
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table).where(table.c.case_id == str(case_id)).values(**values)
+            )
+            if result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation")
+
+    def preparation_projection(self, case_id: UUID) -> dict[str, Any]:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table).where(table.c.case_id == str(case_id))
+            ).mappings().one()
+        started = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+        delayed = row["phase"] not in {"READY", "FAILED"} and (
+            self.now() - started
+        ).total_seconds() >= 30
+        messages = {
+            "VALIDATING_DOCUMENTS": "Validating the uploaded documents…",
+            "PREPARING_ANALYZER": "Preparing the SpecOps Analyzer…",
+            "ANALYZER_REVIEWING_DOCUMENTS": "SpecOps Analyzer is reviewing the documents…",
+            "FORMULATING_WORKSHOP_PLAN": "Formulating the Spec Workshop plan…",
+            "VALIDATING_INITIAL_RUNWAY": "Validating the initial clarification runway…",
+            "READY": "Your Spec Workshop is ready.",
+            "FAILED": "Workshop preparation could not establish a safe clarification runway.",
+        }
+        return {
+            "preparation_id": row["preparation_id"],
+            "phase": row["phase"],
+            "message": messages[row["phase"]],
+            "started_at": row["started_at"],
+            "updated_at": row["updated_at"],
+            "ready_at": row["ready_at"],
+            "failure_code": row["failure_code"],
+            "cleanup_state": row["cleanup_state"],
+            "cleanup_reason": row["cleanup_reason"],
+            "last_client_disconnected_at": row["last_client_disconnected_at"],
+            "restart_grace_until": row["restart_grace_until"],
+            "workshop_complete_at": row["workshop_complete_at"],
+            "cleanup_available_at": row["cleanup_available_at"],
+            "cleanup_last_error_code": row["cleanup_last_error_code"],
+            "delayed": delayed,
+            "delayed_message": (
+                "SpecOps Analyzer is taking a little longer to formulate your Workshop plan. "
+                "Your documents are safe, and preparation is continuing."
+                if delayed
+                else None
+            ),
+        }
+
+    def workshop_completion_projection(self, case_id: UUID) -> dict[str, Any]:
+        preparation = self.preparation_projection(case_id)
+        completed_at = preparation["workshop_complete_at"]
+        if completed_at is None:
+            return {"state": "ACTIVE", "completed_at": None}
+        jobs_terminal = all(
+            job["state"] in {"COMPLETED", "FAILED"}
+            for job in self.analyzer_jobs(case_id)
+        )
+        if not jobs_terminal:
+            state = c.WorkshopCompletionState.FINISHING_ANALYSIS.value
+        elif preparation["cleanup_state"] == "COMPLETED":
+            state = c.WorkshopCompletionState.COMPLETE.value
+        else:
+            state = c.WorkshopCompletionState.CLEANUP_PENDING.value
+        return {"state": state, "completed_at": completed_at}
+
+    def set_provider_resource_lifecycle(self, case_id: UUID, **values: Any) -> None:
+        """Persist content-free retention/release state independently of preparation."""
+
+        allowed = {
+            "cleanup_state",
+            "cleanup_reason",
+            "last_client_disconnected_at",
+            "restart_grace_until",
+            "workshop_complete_at",
+            "cleanup_available_at",
+            "cleanup_last_error_code",
+        }
+        if not values or not set(values).issubset(allowed):
+            raise ValueError("invalid provider resource lifecycle update")
+        values["updated_at"] = _instant(self.now())
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table).where(table.c.case_id == str(case_id)).values(**values)
+            )
+            if result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation")
+
+    def reset_preparation_after_provider_cleanup(self, case_id: UUID) -> None:
+        """Start a fresh provider context while retaining canonical Foundation state."""
+
+        now = _instant(self.now())
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        resources = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(table.c.case_id == str(case_id))
+                .values(
+                    phase="VALIDATING_DOCUMENTS",
+                    started_at=now,
+                    updated_at=now,
+                    ready_at=None,
+                    failure_code=None,
+                    cleanup_state="NOT_REQUIRED",
+                    cleanup_reason=None,
+                    last_client_disconnected_at=None,
+                    restart_grace_until=None,
+                    cleanup_available_at=None,
+                    cleanup_last_error_code=None,
+                )
+            )
+            if result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation")
+            resource_result = connection.execute(
+                update(resources)
+                .where(resources.c.case_id == str(case_id))
+                .values(
+                    bootstrap_candidate_json=None,
+                    context_json=None,
+                    updated_at=now,
+                )
+            )
+            if resource_result.rowcount != 1:
+                raise ValueError("unknown Workshop preparation resources")
+
+    def preparation_resources(self, case_id: UUID) -> dict[str, Any]:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
+        with self.engine.connect() as connection:
+            return dict(
+                connection.execute(
+                    select(table).where(table.c.case_id == str(case_id))
+                ).mappings().one()
+            )
+
+    def checkpoint_provider_response(
+        self,
+        case_id: UUID,
+        *,
+        client_request_id: str,
+        operation: str,
+        provider_response_id: str,
+    ) -> None:
+        """Durably retain one stored post-bootstrap Response until cleanup."""
+
+        table = V0_RUNTIME_TABLES["workshop_provider_responses"]
+        now = _instant(self.now())
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(table).where(
+                    table.c.case_id == str(case_id),
+                    table.c.client_request_id == client_request_id,
+                )
+            ).mappings().one_or_none()
+            if existing is not None:
+                if existing["operation"] != operation:
+                    raise RuntimeError("provider Response identity conflict")
+                if existing["provider_response_id"] == provider_response_id:
+                    return
+                if existing["provider_response_id"] is None:
+                    rebound = connection.execute(
+                        update(table)
+                        .where(
+                            table.c.case_id == str(case_id),
+                            table.c.client_request_id == client_request_id,
+                            table.c.provider_response_id.is_(None),
+                        )
+                        .values(
+                            provider_response_id=provider_response_id,
+                            recorded_at=now,
+                            cleared_at=None,
+                        )
+                    )
+                    if rebound.rowcount != 1:
+                        raise RuntimeError("provider Response rebind conflict")
+                    return
+                raise RuntimeError("provider Response identity conflict")
+            connection.execute(
+                insert(table).values(
+                    case_id=str(case_id),
+                    client_request_id=client_request_id,
+                    operation=operation,
+                    provider_response_id=provider_response_id,
+                    recorded_at=now,
+                    cleared_at=None,
+                )
+            )
+
+    def pending_provider_responses(self, case_id: UUID) -> tuple[dict[str, Any], ...]:
+        table = V0_RUNTIME_TABLES["workshop_provider_responses"]
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.provider_response_id.is_not(None),
+                )
+                .order_by(table.c.recorded_at, table.c.client_request_id)
+            ).mappings().all()
+        return tuple(dict(row) for row in rows)
+
+    def clear_provider_response(self, case_id: UUID, provider_response_id: str) -> None:
+        table = V0_RUNTIME_TABLES["workshop_provider_responses"]
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.provider_response_id == provider_response_id,
+                )
+                .values(
+                    provider_response_id=None,
+                    cleared_at=_instant(self.now()),
+                )
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("tracked provider Response was not found")
+
+    def checkpoint_preparation_resource(self, case_id: UUID, **values: Any) -> None:
+        allowed = {
+            "pm_file_id",
+            "technical_file_id",
+            "provider_conversation_id",
+            "bootstrap_response_id",
+            "bootstrap_candidate_json",
+            "context_json",
+        }
+        if not values or not set(values).issubset(allowed):
+            raise ValueError("invalid preparation resource checkpoint")
+        values["updated_at"] = _instant(self.now())
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_preparation_resources"]
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table).where(table.c.case_id == str(case_id)).values(**values)
+            )
+
+    def current_admitted_guidance(self, case_id: UUID) -> c.AdmittedGuidance | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(table.c.payload_json)
+                .where(table.c.case_id == str(case_id), table.c.valid == 1)
+                .order_by(table.c.admitted_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        return None if value is None else c.AdmittedGuidance.model_validate_json(value)
+
+    def runway_projection(self, case_id: UUID) -> dict[str, Any]:
+        guidance = self.current_admitted_guidance(case_id)
+        if guidance is None:
+            return {"guidance_id": None, "depth": 0, "questions": [], "asked": []}
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.guidance_id == str(guidance.guidance_id),
+                )
+                .order_by(table.c.position)
+            ).mappings().all()
+        questions = [
+            {
+                "question_id": row["question_id"],
+                "question_version": row["question_version"],
+                "position": row["position"],
+                "exact_text": row["exact_text"],
+                "reason": row["reason"],
+            }
+            for row in rows
+            if row["status"] == "AVAILABLE"
+        ]
+        return {
+            "guidance_id": str(guidance.guidance_id),
+            "guidance_version": guidance.guidance_version,
+            "depth": len(questions),
+            "questions": questions,
+            "asked": [row["question_id"] for row in rows if row["status"] == "ASKED"],
+        }
+
+    def voice_session_card(self, case_id: UUID) -> c.VoiceSessionCard:
+        case = self.get_case(case_id)
+        guidance = self.current_admitted_guidance(case_id)
+        depth = self.runway_projection(case_id)["depth"]
+        health = (
+            c.RunwayHealth.HEALTHY
+            if depth >= 3
+            else c.RunwayHealth.PRIORITIZE_RUNWAY_REPLENISHMENT
+            if depth == 2
+            else c.RunwayHealth.PAUSE_DEEP_SYNTHESIS
+            if depth == 1
+            else c.RunwayHealth.SAFE_RECOVERY_ONLY
+        )
+        return c.VoiceSessionCard(
+            protocol_version=c.PROTOCOL_VERSION,
+            view_type="VOICE_SESSION_CARD",
+            session_id=case.session_id,
+            case_revision=self.case_revision(case_id),
+            readiness=(c.Readiness.READY if depth else c.Readiness.NEEDS_CLARIFICATION),
+            review_obligation=case.review_obligation,
+            committed_summary=(),
+            admitted_guidance=guidance,
+            runway_health=health,
+            pending_decision_batch_view_id=None,
+            admitted_review_narration=None,
+            generated_at=self.now(),
+        )
+
+    def analyzer_jobs(self, case_id: UUID) -> tuple[dict[str, Any], ...]:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(table.c.case_id == str(case_id))
+                .order_by(table.c.created_at, table.c.priority, table.c.job_id)
+            ).mappings().all()
+        return tuple(dict(row) for row in rows)
+
+    def partition_turn_analysis_candidate(
+        self,
+        case_id: UUID,
+        context_id: UUID,
+        candidate: c.TurnAnalysisCandidate,
+    ) -> TurnAnalysisPartition:
+        """Verify every source locator before releasing independent branches."""
+
+        rejected: list[str] = []
+        with self.engine.connect() as connection:
+            active_context = self._active_context(connection, case_id, context_id)
+            if active_context is None:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.PROVIDER_REQUEST_BINDING_FAILED
+                )
+            for evidence in candidate.evidence_candidates:
+                try:
+                    self._admit_evidence_candidate(
+                        connection, case_id, evidence, active_context
+                    )
+                except FoundationProtocolError as exc:
+                    if exc.code is not c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED:
+                        raise
+                    rejected.append(evidence.candidate_key)
+        return _partition_turn_candidate(candidate, tuple(rejected))
+
+    def enqueue_turn_analysis_correction(
+        self,
+        parent_job_id: str,
+        *,
+        worker_id: str,
+    ) -> dict[str, Any]:
+        """Create the sole durable correction child for one completed primary turn."""
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        subject_id = f"{TURN_CORRECTION_SUBJECT_PREFIX}{parent_job_id}"
+        now = _instant(self.now())
+        with self.engine.begin() as connection:
+            parent = connection.execute(
+                select(table).where(
+                    table.c.job_id == parent_job_id,
+                    table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
+                    table.c.lease_owner == worker_id,
+                )
+            ).mappings().one_or_none()
+            if parent is None or is_turn_correction_subject(parent["subject_id"]):
+                raise RuntimeError("primary TURN_ANALYSIS lease was lost")
+            existing = connection.execute(
+                select(table).where(
+                    table.c.case_id == parent["case_id"],
+                    table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
+                    table.c.subject_id == subject_id,
+                )
+            ).mappings().one_or_none()
+            if existing is not None:
+                return dict(existing)
+            job_id = _runtime_id(
+                parent["case_id"], "TURN_ANALYSIS_CORRECTION", parent_job_id
+            )
+            connection.execute(
+                insert(table).values(
+                    job_id=str(job_id),
+                    case_id=parent["case_id"],
+                    session_id=parent["session_id"],
+                    operation=c.AnalyzerOperation.TURN_ANALYSIS.value,
+                    subject_id=subject_id,
+                    dedupe_key=f"turn-correction:{parent['case_id']}:{parent_job_id}",
+                    # Primary turns remain first; selection-only Guidance may use
+                    # the verified subset before this quarantined branch finishes.
+                    priority=30,
+                    state="ANALYSIS_PENDING",
+                    provider_request_id=f"specops-turn_analysis-{job_id}",
+                    request_json=None,
+                    candidate_json=None,
+                    admission_receipt_json=None,
+                    attempt_count=0,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    available_at=now,
+                    last_error_code=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            return dict(
+                connection.execute(select(table).where(table.c.job_id == str(job_id)))
+                .mappings()
+                .one()
+            )
+
+    def claim_analyzer_job(
+        self, case_id: UUID, *, worker_id: str, lease_seconds: int = 30
+    ) -> dict[str, Any] | None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        now = self.now()
+        now_text = _instant(now)
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.case_id == str(case_id),
+                    table.c.state != "COMPLETED",
+                    table.c.state != "FAILED",
+                    (table.c.lease_expires_at.is_(None) | (table.c.lease_expires_at <= now_text)),
+                    table.c.available_at <= now_text,
+                )
+                .order_by(table.c.priority, table.c.created_at, table.c.job_id)
+            ).mappings().all()
+            for row in rows:
+                if row["operation"] == c.AnalyzerOperation.GUIDANCE.value:
+                    older_turn_states = connection.execute(
+                        select(table.c.state, table.c.subject_id).where(
+                            table.c.case_id == str(case_id),
+                            table.c.operation == c.AnalyzerOperation.TURN_ANALYSIS.value,
+                            table.c.created_at <= row["created_at"],
+                        )
+                    ).all()
+                    older_primary_states = [
+                        state
+                        for state, subject_id in older_turn_states
+                        if not is_turn_correction_subject(subject_id)
+                    ]
+                    if any(
+                        state not in {"COMPLETED", "FAILED"}
+                        for state in older_primary_states
+                    ):
+                        continue
+                    if any(state == "FAILED" for state in older_primary_states):
+                        connection.execute(
+                            update(table)
+                            .where(
+                                table.c.job_id == row["job_id"],
+                                table.c.state.not_in(("COMPLETED", "FAILED")),
+                            )
+                            .values(
+                                state="FAILED",
+                                last_error_code="TURN_ANALYSIS_DEPENDENCY_FAILED",
+                                updated_at=now_text,
+                            )
+                        )
+                        continue
+                lease_until = _instant(now + timedelta(seconds=lease_seconds))
+                result = connection.execute(
+                    update(table)
+                    .where(
+                        table.c.job_id == row["job_id"],
+                        (table.c.lease_expires_at.is_(None) | (table.c.lease_expires_at <= now_text)),
+                    )
+                    .values(
+                        lease_owner=worker_id,
+                        lease_expires_at=lease_until,
+                        attempt_count=table.c.attempt_count + 1,
+                        updated_at=now_text,
+                    )
+                )
+                if result.rowcount == 1:
+                    claimed = dict(row)
+                    claimed.update(
+                        lease_owner=worker_id,
+                        lease_expires_at=lease_until,
+                        attempt_count=row["attempt_count"] + 1,
+                    )
+                    return claimed
+        return None
+
+    def checkpoint_analyzer_job(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        state: str,
+        request_json: str | None = None,
+        candidate_json: str | None = None,
+        admission_receipt_json: str | None = None,
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        values: dict[str, Any] = {"state": state, "updated_at": _instant(self.now())}
+        if request_json is not None:
+            values["request_json"] = request_json
+        if candidate_json is not None:
+            values["candidate_json"] = candidate_json
+        if admission_receipt_json is not None:
+            values["admission_receipt_json"] = admission_receipt_json
+        if state == "COMPLETED":
+            values.update(lease_owner=None, lease_expires_at=None)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(table)
+                .where(table.c.job_id == job_id, table.c.lease_owner == worker_id)
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("Analyzer job lease was lost")
+
+    def release_analyzer_job(
+        self, job_id: str, *, worker_id: str, error_code: str
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table)
+                .where(table.c.job_id == job_id, table.c.lease_owner == worker_id)
+                .values(
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    last_error_code=error_code[:128],
+                    available_at=_instant(self.now() + timedelta(seconds=1)),
+                    updated_at=_instant(self.now()),
+                )
+            )
+
+    def fail_analyzer_job(
+        self, job_id: str, *, worker_id: str, error_code: str
+    ) -> None:
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        with self.engine.begin() as connection:
+            connection.execute(
+                update(table)
+                .where(table.c.job_id == job_id, table.c.lease_owner == worker_id)
+                .values(
+                    state="FAILED",
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    last_error_code=error_code[:128],
+                    updated_at=_instant(self.now()),
+                )
+            )
 
     def case_actor(self, case_id: UUID, role: str) -> UUID:
         column = {
@@ -346,7 +1167,11 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     )
                 )
             elif kind == "FINDING":
-                findings.append(c.AdmittedSemanticEvidenceFinding.model_validate(payload))
+                findings.append(
+                    c.AdmittedSemanticEvidenceFinding.model_validate_json(
+                        row["payload_json"]
+                    )
+                )
             elif kind == "REVISION_REQUEST":
                 revision_requests.append(
                     c.FoundationRevisionRequestSnapshot(
@@ -410,11 +1235,100 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             canonical_payload_json=row["payload_json"],
         )
 
+    def confirmed_decision_synthesis_bindings(
+        self, case_id: UUID
+    ) -> tuple[c.ConfirmedDecisionSynthesisBinding, ...]:
+        """Project exact committed decision ceremonies for Spec synthesis."""
+
+        snapshot = self.semantic_snapshot(case_id)
+        confirmed = {
+            item.decision_id: item
+            for item in snapshot.decisions
+            if item.status is c.SemanticRecordStatus.CONFIRMED
+        }
+        if not confirmed:
+            return ()
+        events = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_events"]
+        views = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        actor_ref = self.case_actor(case_id, "PM")
+        result: dict[UUID, c.ConfirmedDecisionSynthesisBinding] = {}
+        with self.engine.connect() as connection:
+            applied = connection.execute(
+                select(events)
+                .where(
+                    events.c.case_id == str(case_id),
+                    events.c.event_type == "APPLY_DECISION_BATCH_RESPONSE_APPLIED",
+                )
+                .order_by(events.c.event_sequence.desc())
+            ).mappings().all()
+            for event in applied:
+                receipt = json.loads(event["event_json"])
+                view_row = connection.execute(
+                    select(views).where(
+                        views.c.case_id == str(case_id),
+                        views.c.view_id == receipt["decision_batch_view_id"],
+                    )
+                ).mappings().one()
+                view = json.loads(view_row["view_json"])
+                view_items = {
+                    UUID(item["pending_decision_id"]): item for item in view["items"]
+                }
+                command = receipt["command"]
+                transcript_event_id = receipt.get("response_transcript_event_id")
+                if transcript_event_id is None:
+                    transcript_event = connection.execute(
+                        select(events)
+                        .where(
+                            events.c.case_id == str(case_id),
+                            events.c.event_sequence < event["event_sequence"],
+                            events.c.event_type == "RECORD_FINAL_TRANSCRIPT_APPLIED",
+                        )
+                        .order_by(events.c.event_sequence.desc())
+                        .limit(1)
+                    ).mappings().one()
+                    transcript_event_id = json.loads(transcript_event["event_json"])[
+                        "transcript_event_id"
+                    ]
+                for item in receipt["item_results"]:
+                    if item["outcome"] != c.DecisionItemOutcome.COMMITTED.value:
+                        continue
+                    decision_id = UUID(item["committed_decision_id"])
+                    if decision_id not in confirmed or decision_id in result:
+                        continue
+                    decision = confirmed[decision_id]
+                    review_item = view_items[decision_id]
+                    result[decision_id] = c.ConfirmedDecisionSynthesisBinding(
+                        decision_id=decision.decision_id,
+                        decision_version=decision.decision_version,
+                        classification=decision.classification,
+                        statement=decision.statement,
+                        rationale=decision.rationale,
+                        alternatives_considered=decision.alternatives_considered,
+                        problem_ids=decision.problem_ids,
+                        evidence_ids=decision.evidence_ids,
+                        confirmation_id=UUID(command["command_id"]),
+                        decision_batch_view_id=UUID(view["view_id"]),
+                        decision_batch_view_hash=view["view_hash"],
+                        review_item_id=UUID(review_item["review_item_id"]),
+                        confirmed_case_revision=command["resulting_case_revision"],
+                        actor_ref=actor_ref,
+                        authority_validation_id=UUID(command["command_id"]),
+                        transcript_event_id=UUID(transcript_event_id),
+                        confirmed_at=datetime.fromisoformat(
+                            command["occurred_at"].replace("Z", "+00:00")
+                        ),
+                    )
+        if set(result) != set(confirmed):
+            raise ValueError("confirmed decision lacks an exact response ceremony")
+        return tuple(result[key] for key in sorted(result, key=str))
+
     def issue_artifact_identity_plan(
         self,
         case_id: UUID,
         artifact_type: str,
         entity_kinds: tuple[str, ...],
+        *,
+        construction_policy: tuple[tuple[str, str, str], ...] | None = None,
     ) -> c.ArtifactSynthesisIdentityPlan:
         """Mint a synthesis target/identity plan from current Foundation state.
 
@@ -452,6 +1366,66 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
         snapshot = self.semantic_snapshot(case_id)
         source_refs = self._artifact_plan_source_refs(snapshot)
+        canonical_identities: dict[str, list[tuple[UUID, int]]] = {}
+        if artifact_type == "SPEC_PACKAGE":
+            canonical_identities = {
+                "ACTOR": [(self.case_actor(case_id, "PM"), 1)],
+                "DECISION": [
+                    (item.decision_id, item.decision_version)
+                    for item in sorted(snapshot.decisions, key=lambda value: str(value.decision_id))
+                    if item.status is c.SemanticRecordStatus.CONFIRMED
+                ],
+            }
+
+        if construction_policy is not None and (
+            len(construction_policy) != len(entity_kinds)
+            or tuple(item[0] for item in construction_policy) != entity_kinds
+        ):
+            raise ValueError("construction policy must exactly match requested entity kinds")
+
+        def planned_identity(kind: str) -> tuple[UUID, int, bool]:
+            available = canonical_identities.get(kind, [])
+            if available:
+                identity, version = available.pop(0)
+                return identity, version, True
+            return self.new_id(), 1, False
+
+        identities: list[c.PlannedArtifactIdentity] = []
+        slots: list[c.ArtifactIdentitySlot] = []
+        ordinals: dict[str, int] = {}
+        for index, kind in enumerate(entity_kinds):
+            identity, version, bound_existing = planned_identity(kind)
+            owner = (
+                construction_policy[index][1]
+                if construction_policy is not None
+                else "FOUNDATION"
+                if bound_existing
+                else "ANALYZER"
+            )
+            if bound_existing and owner != "FOUNDATION":
+                raise ValueError("canonical identities require Foundation ownership")
+            ordinal = ordinals.get(kind, 0) + 1
+            ordinals[kind] = ordinal
+            identities.append(
+                c.PlannedArtifactIdentity(
+                    foundation_id=identity,
+                    foundation_version=version,
+                    entity_kind=kind,
+                )
+            )
+            slots.append(
+                c.ArtifactIdentitySlot(
+                    slot_key=f"{kind}:{ordinal:04d}",
+                    entity_kind=kind,
+                    ordinal=ordinal,
+                    owner=owner,
+                    foundation_id=identity,
+                    allocation_mode=(
+                        "BOUND_EXISTING" if bound_existing else "NEW_ENTITY"
+                    ),
+                )
+            )
+
         return c.ArtifactSynthesisIdentityPlan(
             identity_plan_id=self.new_id(),
             identity_plan_version=1,
@@ -460,15 +1434,9 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             semantic_state_hash=domain_hash(
                 "SPECOPS:SEMANTIC_STATE:v1", snapshot.model_dump(mode="json")
             ),
-            planned_identities=tuple(
-                c.PlannedArtifactIdentity(
-                    foundation_id=self.new_id(),
-                    foundation_version=1,
-                    entity_kind=kind,
-                    source_entity_refs=source_refs,
-                )
-                for kind in entity_kinds
-            ),
+            source_entity_refs=source_refs,
+            planned_identities=tuple(identities),
+            slots=tuple(slots),
         )
 
     @staticmethod
@@ -504,33 +1472,189 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
 
     @staticmethod
-    def artifact_identity_allocation_policy(artifact_type: str) -> tuple[str, ...]:
-        """Server-owned complete allocation policy derived from V4 payload paths."""
+    def artifact_construction_policy(
+        artifact_type: str,
+        *,
+        confirmed_decision_count: int = 0,
+        quality_rule_ids: tuple[str, ...] = (),
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Derive identity-bound construction work from the active quality manifest."""
 
-        policies = {
-            "SPEC_PACKAGE": (
-                "PACKAGE_ITEM", "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING", "ACTOR",
-                "GLOSSARY_TERM", "OUTCOME", "SCOPE_ITEM", "SCOPE_ITEM",
-                "SCOPE_BOUNDARY", "JOURNEY", "BEHAVIOUR_RULE", "BEHAVIOUR_RULE",
-                "BEHAVIOUR_RULE", "REQUIREMENT", "DATA_RULE", "EXPERIENCE_STATE",
-                "SCENARIO", "QUALITY_ATTRIBUTE", "CONSTRAINT", "DEPENDENCY", "RISK",
-                "DECISION", "OPEN_ITEM", "ACCEPTANCE_CHECK",
+        if artifact_type == "TECHNICAL_CONTRACT":
+            groups = (
+                ("EVIDENCE", 1, "Bind one exact technical evidence record."),
+                (
+                    "SEMANTIC_EVIDENCE_FINDING",
+                    1,
+                    "Bind one exact technical claim to supporting evidence.",
+                ),
+                (
+                    "ARCHITECTURE_NODE",
+                    6,
+                    "Represent one component, substrate dependency, actor, or system boundary node.",
+                ),
+                ("COMPONENT", 5, "Own one atomic technical responsibility."),
+                (
+                    "INTERFACE",
+                    6,
+                    "Define one independently executable operation and its complete contract.",
+                ),
+                ("DATA_CONTRACT", 4, "Define one owned material data contract."),
+                ("WORKFLOW", 3, "Define one complete state machine."),
+                ("FAILURE_CONTRACT", 4, "Define one detectable failure and recovery path."),
+                ("SECURITY_CONTROL", 3, "Define one enforceable security or privacy control."),
+                ("QUALITY_BUDGET", 4, "Bind one measurable Spec quality obligation."),
+                ("SUBSTRATE_DEPENDENCY", 4, "Declare one owned platform dependency."),
+                ("OBSERVABILITY_EVENT", 3, "Define one diagnostic event."),
+                ("OBSERVABILITY_METRIC", 3, "Define one measurable signal."),
+                ("OBSERVABILITY_TRACE", 2, "Define one correlation trace."),
+                ("AUDIT_RECORD", 2, "Define one durable audit record."),
+                ("OBSERVABILITY_ALERT", 2, "Define one actionable alert."),
+                ("ROLLOUT_STEP", 3, "Define one owned rollout step."),
+                ("BUILD_UNIT", 6, "Define one component-bound implementation unit."),
+                ("VERIFICATION_ITEM", 8, "Verify one independently executable obligation."),
+                (
+                    "ENGINEERING_DECISION",
+                    3,
+                    "Record one concrete, evidence-backed technical choice.",
+                ),
+                (
+                    "REVIEW_OBLIGATION",
+                    5,
+                    "Track one unresolved choice with owner, evidence requirement, and effect.",
+                ),
+            )
+            return tuple(
+                (kind, "ANALYZER", f"{purpose} Capacity slot {index + 1}.")
+                for kind, count, purpose in groups
+                for index in range(count)
+            )
+        if artifact_type != "SPEC_PACKAGE":
+            raise ValueError("unknown artifact type")
+        expected_rules = tuple(f"SPEC-Q-{index:03d}" for index in range(1, 27))
+        if quality_rule_ids and quality_rule_ids != expected_rules:
+            raise ValueError("Spec construction requires the exact ordered quality manifest")
+
+        requirement_count = max(14, confirmed_decision_count + 10)
+        evidence_count = max(8, confirmed_decision_count)
+        groups = (
+            ("PACKAGE_ITEM", 1, "ANALYZER", "Q020 complete package membership."),
+            ("EVIDENCE", evidence_count, "FOUNDATION", "Source-ground one atomic semantic claim."),
+            (
+                "SEMANTIC_EVIDENCE_FINDING",
+                evidence_count,
+                "FOUNDATION",
+                "Q026 locally bind one exact claim to supporting evidence.",
             ),
-            "TECHNICAL_CONTRACT": (
-                "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING", "ARCHITECTURE_NODE",
-                "COMPONENT", "INTERFACE", "DATA_CONTRACT",
-                "WORKFLOW", "FAILURE_CONTRACT", "SECURITY_CONTROL", "QUALITY_BUDGET",
-                "SUBSTRATE_DEPENDENCY",
-                "OBSERVABILITY_EVENT", "OBSERVABILITY_METRIC", "OBSERVABILITY_TRACE",
-                "AUDIT_RECORD", "OBSERVABILITY_ALERT",
-                "ROLLOUT_STEP", "BUILD_UNIT", "VERIFICATION_ITEM",
-                "ENGINEERING_DECISION", "REVIEW_OBLIGATION",
+            ("ACTOR", 1, "FOUNDATION", "Q004 project canonical actor authority."),
+            (
+                "GLOSSARY_TERM",
+                8,
+                "ANALYZER",
+                "Q005 operationally define one material dependent semantic, including "
+                "meaning, representation, scope, boundaries, and missing or invalid behavior.",
             ),
-        }
-        try:
-            return policies[artifact_type]
-        except KeyError as exc:
-            raise ValueError("unknown artifact type") from exc
+            ("OUTCOME", 2, "ANALYZER", "Define one measurable outcome."),
+            ("SCOPE_ITEM", 16, "ANALYZER", "Define one atomic scope inclusion or non-goal."),
+            ("SCOPE_BOUNDARY", 2, "ANALYZER", "Define one explicit scope boundary."),
+            ("JOURNEY", 3, "ANALYZER", "Trace one complete actor journey."),
+            ("BEHAVIOUR_RULE", 16, "ANALYZER", "Define one atomic behavior obligation."),
+            ("REQUIREMENT", requirement_count, "ANALYZER", "Q007 define one atomic requirement."),
+            (
+                "DATA_RULE",
+                8,
+                "ANALYZER",
+                "Q015 fully define one material data element's source, representation, "
+                "scope, temporal or numeric boundaries, null or invalid behavior, and retention.",
+            ),
+            (
+                "EXPERIENCE_STATE",
+                9,
+                "ANALYZER",
+                "Q014 define one distinct lifecycle, missing-input, invalid-input, or failure "
+                "state with truthful user-visible behavior and recovery.",
+            ),
+            (
+                "SCENARIO",
+                12,
+                "ANALYZER",
+                "Q012-Q013 cover one success, boundary, negative, recovery, or Ask First "
+                "path; an Ask First path proves blocked-without-approval and allowed-only-after-approval.",
+            ),
+            ("QUALITY_ATTRIBUTE", 4, "ANALYZER", "Define one measurable quality threshold."),
+            ("CONSTRAINT", 4, "ANALYZER", "Define one explicit delivery constraint."),
+            ("DEPENDENCY", 3, "ANALYZER", "Define one owned external dependency."),
+            ("RISK", 4, "ANALYZER", "Define one risk, trigger, mitigation, and owner."),
+            (
+                "DECISION",
+                confirmed_decision_count,
+                "FOUNDATION",
+                "Project one exact confirmed decision and ceremony.",
+            ),
+            ("OPEN_ITEM", 2, "ANALYZER", "Represent one genuine non-blocking open item."),
+            (
+                "ACCEPTANCE_CHECK",
+                requirement_count,
+                "ANALYZER",
+                "Q017 verify one independently executable obligation; approval-gated behavior "
+                "must verify the exact scope and durable approval receipt.",
+            ),
+        )
+        return tuple(
+            (kind, owner, f"{purpose} Slot {index + 1}.")
+            for kind, count, owner, purpose in groups
+            for index in range(count)
+        )
+
+    @staticmethod
+    def artifact_construction_blueprint(
+        plan: c.ArtifactSynthesisIdentityPlan,
+        policy: tuple[tuple[str, str, str], ...],
+    ) -> c.ArtifactConstructionBlueprint:
+        if len(policy) != len(plan.planned_identities):
+            raise ValueError("construction policy and identity plan lengths differ")
+        if len(plan.slots) != len(plan.planned_identities):
+            raise ValueError("identity plan lacks typed construction slots")
+        slots = []
+        for identity, identity_slot, (kind, owner, purpose) in zip(
+            plan.planned_identities, plan.slots, policy, strict=True
+        ):
+            if (
+                identity.entity_kind != kind
+                or identity_slot.entity_kind != kind
+                or identity_slot.owner != owner
+                or identity_slot.foundation_id != identity.foundation_id
+            ):
+                raise ValueError("construction policy and identity kind differ")
+            slots.append(
+                c.ArtifactConstructionSlot(
+                    slot_key=identity_slot.slot_key,
+                    foundation_id=identity.foundation_id,
+                    foundation_version=identity.foundation_version,
+                    entity_kind=kind,
+                    ordinal=identity_slot.ordinal,
+                    owner=owner,
+                    allocation_mode=identity_slot.allocation_mode,
+                    purpose=purpose,
+                )
+            )
+        return c.ArtifactConstructionBlueprint(
+            blueprint_version="1.0.0", slots=tuple(slots)
+        )
+
+    @staticmethod
+    def artifact_identity_allocation_policy(
+        artifact_type: str, *, confirmed_decision_count: int = 0
+    ) -> tuple[str, ...]:
+        """Compatibility projection of the rule-derived construction policy."""
+
+        return tuple(
+            kind
+            for kind, _, _ in WorkshopFoundationService.artifact_construction_policy(
+                artifact_type,
+                confirmed_decision_count=confirmed_decision_count,
+            )
+        )
 
     def execute(self, command: c.FoundationCommand) -> c.FoundationReceipt:
         case = self.get_case(command.case_id)
@@ -643,6 +1767,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             return self._invalidate_context(connection, command, prior_revision)
         if isinstance(command, c.RecordFinalTranscriptCommand):
             return self._record_transcript(connection, command, prior_revision)
+        if isinstance(command, c.ClaimWorkshopCompleteCommand):
+            return self._claim_workshop_complete(connection, command, prior_revision)
         if isinstance(command, c.AdmitInterviewBriefCommand):
             return self._admit_candidate(
                 connection,
@@ -769,6 +1895,14 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         )
 
     def _record_transcript(self, connection, command, prior_revision):
+        preparation = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        completed_at = connection.execute(
+            select(preparation.c.workshop_complete_at).where(
+                preparation.c.case_id == str(command.case_id)
+            )
+        ).scalar_one()
+        if completed_at is not None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
         table = WORKSHOP_PROTOCOL_TABLES["workshop_final_transcripts"]
         prior = connection.execute(
             select(func.max(table.c.sequence_number)).where(
@@ -796,12 +1930,208 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 recorded_at=_instant(self.now()),
             )
         )
+        # The transcript and its first eligible Analyzer work item deliberately
+        # share this Foundation transaction. A caller can acknowledge this
+        # receipt immediately; provider work begins only after commit.
+        jobs = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        event_id = command.transcript.event_id
+        now = _instant(self.now())
+        job_id = _runtime_id(command.case_id, "TURN_ANALYSIS", event_id)
+        connection.execute(
+            insert(jobs).values(
+                job_id=str(job_id),
+                case_id=str(command.case_id),
+                session_id=str(command.session_id),
+                operation=c.AnalyzerOperation.TURN_ANALYSIS.value,
+                subject_id=str(event_id),
+                dedupe_key=f"turn-analysis:{command.case_id}:{event_id}",
+                priority=10,
+                state="ANALYSIS_PENDING",
+                provider_request_id=f"specops-turn_analysis-{job_id}",
+                request_json=None,
+                candidate_json=None,
+                admission_receipt_json=None,
+                attempt_count=0,
+                lease_owner=None,
+                lease_expires_at=None,
+                available_at=now,
+                last_error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        decision_reviews = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        artifact_reviews = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"]
+        active_review = any(
+            connection.execute(
+                select(func.count()).select_from(table).where(
+                    table.c.case_id == str(command.case_id),
+                    table.c.current == 1,
+                )
+            ).scalar_one()
+            for table in (decision_reviews, artifact_reviews)
+        )
+        self._consume_runway_and_schedule_guidance(
+            connection,
+            command.case_id,
+            command.session_id,
+            now,
+            consume_question=not active_review,
+        )
         self._advance_revision(connection, command.case_id, prior_revision)
         return c.TranscriptRecordedReceipt(
             receipt_type="TRANSCRIPT_RECORDED",
             command=self._base_receipt(command, prior_revision),
             transcript_event_id=command.transcript.event_id,
             transcript_hash=command.transcript.transcript_hash,
+        )
+
+    def _claim_workshop_complete(self, connection, command, prior_revision):
+        preparations = WORKSHOP_PROTOCOL_TABLES["workshop_preparations"]
+        preparation = connection.execute(
+            select(preparations).where(preparations.c.case_id == str(command.case_id))
+        ).mappings().one()
+        if preparation["phase"] != "READY" or preparation["workshop_complete_at"] is not None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+        case = connection.execute(
+            select(foundation_cases).where(foundation_cases.c.id == str(command.case_id))
+        ).mappings().one()
+        if case["pm_actor_id"] != str(command.acting_actor_id):
+            raise FoundationProtocolError(c.FoundationRejectionCode.AUTHORITY_FAILED)
+        self._require_participant(connection, command.case_id, command.acting_actor_id)
+
+        if command.completion_source is not c.WorkshopCompletionSource.BUTTON:
+            assert command.completion_transcript_event_id is not None
+            completion = self._participant_transcript(
+                connection,
+                command.case_id,
+                command.completion_transcript_event_id,
+                command.acting_actor_id,
+            )
+            if completion is None:
+                raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+            classification = classify_completion_utterance(completion.text)
+            if command.completion_source is c.WorkshopCompletionSource.VOICE_EXPLICIT:
+                if classification is not CompletionUtterance.EXPLICIT:
+                    raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+            else:
+                assert command.confirmation_transcript_event_id is not None
+                confirmation = self._participant_transcript(
+                    connection,
+                    command.case_id,
+                    command.confirmation_transcript_event_id,
+                    command.acting_actor_id,
+                )
+                if (
+                    classification is not CompletionUtterance.AMBIGUOUS
+                    or confirmation is None
+                    or confirmation.sequence_number != completion.sequence_number + 1
+                    or classify_completion_utterance(confirmation.text)
+                    is not CompletionUtterance.AFFIRMATIVE
+                ):
+                    raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
+
+        completed_at = self.now()
+        connection.execute(
+            update(preparations)
+            .where(preparations.c.case_id == str(command.case_id))
+            .values(
+                workshop_complete_at=_instant(completed_at),
+                cleanup_state="FINISHING_ANALYSIS",
+                cleanup_reason="WORKSHOP_COMPLETE",
+                last_client_disconnected_at=None,
+                restart_grace_until=None,
+                cleanup_available_at=None,
+                cleanup_last_error_code=None,
+                updated_at=_instant(completed_at),
+            )
+        )
+        self._advance_revision(connection, command.case_id, prior_revision)
+        return c.WorkshopCompletionReceipt(
+            receipt_type="WORKSHOP_COMPLETION",
+            command=self._base_receipt(command, prior_revision),
+            completion_source=command.completion_source,
+            completed_at=completed_at,
+            completion_transcript_event_id=command.completion_transcript_event_id,
+            confirmation_transcript_event_id=command.confirmation_transcript_event_id,
+            state=c.WorkshopCompletionState.FINISHING_ANALYSIS,
+        )
+
+    def _consume_runway_and_schedule_guidance(
+        self,
+        connection,
+        case_id: UUID,
+        session_id: UUID,
+        now: str,
+        *,
+        consume_question: bool = True,
+    ) -> None:
+        runway = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        guidance = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        jobs = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_jobs"]
+        current_guidance = connection.execute(
+            select(guidance.c.guidance_id).where(
+                guidance.c.case_id == str(case_id),
+                guidance.c.valid == 1,
+            )
+        ).scalar_one_or_none()
+        if current_guidance is None:
+            return
+        current = connection.execute(
+            select(runway)
+            .where(
+                runway.c.case_id == str(case_id),
+                runway.c.guidance_id == current_guidance,
+                runway.c.status == "AVAILABLE",
+            )
+            .order_by(runway.c.position)
+        ).mappings().all()
+        if current and consume_question:
+            connection.execute(
+                update(runway)
+                .where(
+                    runway.c.case_id == str(case_id),
+                    runway.c.guidance_id == current_guidance,
+                    runway.c.question_id == current[0]["question_id"],
+                )
+                .values(status="ASKED", consumed_at=now)
+            )
+        depth = max(0, len(current) - (1 if current and consume_question else 0))
+        if depth > 2:
+            return
+        subject_id = str(current_guidance)
+        existing = connection.execute(
+            select(jobs.c.job_id).where(
+                jobs.c.case_id == str(case_id),
+                jobs.c.operation == c.AnalyzerOperation.GUIDANCE.value,
+                jobs.c.subject_id == subject_id,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return
+        job_id = _runtime_id(case_id, "GUIDANCE", subject_id)
+        connection.execute(
+            insert(jobs).values(
+                job_id=str(job_id),
+                case_id=str(case_id),
+                session_id=str(session_id),
+                operation=c.AnalyzerOperation.GUIDANCE.value,
+                subject_id=subject_id,
+                dedupe_key=f"guidance:{case_id}:{subject_id}",
+                priority=20,
+                state="ANALYSIS_PENDING",
+                provider_request_id=f"specops-guidance-{job_id}",
+                request_json=None,
+                candidate_json=None,
+                admission_receipt_json=None,
+                attempt_count=0,
+                lease_owner=None,
+                lease_expires_at=None,
+                available_at=now,
+                last_error_code=None,
+                created_at=now,
+                updated_at=now,
+            )
         )
 
     def _active_context(self, connection, case_id: UUID, context_id: UUID):
@@ -934,14 +2264,182 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if isinstance(command, c.AdmitTurnAnalysisCommand):
             self._apply_turn_revisions(connection, command, allocated)
             self._apply_problem_assessments(connection, command, allocated)
+        admitted_guidance_id = None
+        if isinstance(command, c.AdmitInterviewBriefCommand):
+            admitted_guidance_id = self._admit_initial_runway(
+                connection, command, allocated
+            )
         self._advance_revision(connection, command.case_id, prior_revision)
         return c.ProposalAdmissionReceipt(
             receipt_type="PROPOSAL_ADMISSION",
             command=self._base_receipt(command, prior_revision),
             analyzer_run_id=command.analyzer_run_id,
             identity_mappings=tuple(mappings),
-            admitted_guidance_id=None,
+            admitted_guidance_id=admitted_guidance_id,
         )
+
+    def _admit_initial_runway(self, connection, command, allocated):
+        """Map BOOTSTRAP-local question keys into one governed initial runway.
+
+        A short or unsafe candidate is still valid provisional semantic input,
+        but it never becomes guidance. Preparation therefore fails closed
+        without weakening the exact initial-runway Voice gate.
+        """
+
+        candidate = command.candidate
+        runway = candidate.initial_runway
+        keys = (
+            runway.recommended_question_key,
+            *runway.safe_alternate_question_keys,
+        )
+        if len(keys) != c.INITIAL_RUNWAY_DEPTH or len(set(keys)) != c.INITIAL_RUNWAY_DEPTH:
+            return None
+        questions = {item.candidate_key: item for item in candidate.questions}
+        if any(key not in questions for key in keys):
+            return None
+        if any(not questions[key].safe_without_current_turn_interpretation for key in keys):
+            return None
+        # Every BOOTSTRAP problem is newly OPEN. A question with a prerequisite
+        # therefore cannot yet be independently safe in the initial runway.
+        if any(questions[key].prerequisite_problem_keys for key in keys):
+            return None
+
+        def admitted_question(key):
+            entity_kind, foundation_id, version = allocated[key]
+            if entity_kind != "QUESTION":
+                raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+            question = questions[key]
+            # Every prerequisite is bound to an admitted, still-current problem.
+            for problem_key in (
+                *question.addresses_problem_keys,
+                *question.prerequisite_problem_keys,
+            ):
+                problem_kind, problem_id, problem_version = allocated[problem_key]
+                if problem_kind != "PROBLEM":
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                self._semantic_record_for_ref(
+                    connection,
+                    command.case_id,
+                    {
+                        "foundation_id": str(problem_id),
+                        "expected_version": problem_version,
+                    },
+                )
+            return c.AdmittedGuidanceQuestion(
+                question_id=foundation_id,
+                question_version=version,
+                exact_text=question.text,
+                reason=question.rationale,
+            )
+
+        recommended = admitted_question(keys[0])
+        alternatives = tuple(admitted_question(key) for key in keys[1:])
+        dependencies = [
+            c.AdmittedGuidanceDependency(
+                dependency_kind=c.GuidanceDependencyKind.SOURCE_SET,
+                entity_id=None,
+                expected_version=None,
+                source_set_hash=candidate.source_set_hash,
+            )
+        ]
+        dependency_refs: set[tuple[c.GuidanceDependencyKind, UUID, int]] = set()
+        for key in keys:
+            question = questions[key]
+            _, question_id, question_version = allocated[key]
+            dependency_refs.add(
+                (c.GuidanceDependencyKind.QUESTION, question_id, question_version)
+            )
+            for problem_key in (
+                *question.addresses_problem_keys,
+                *question.prerequisite_problem_keys,
+            ):
+                _, problem_id, problem_version = allocated[problem_key]
+                dependency_refs.add(
+                    (c.GuidanceDependencyKind.PROBLEM, problem_id, problem_version)
+                )
+        dependencies.extend(
+            c.AdmittedGuidanceDependency(
+                dependency_kind=kind,
+                entity_id=identity,
+                expected_version=version,
+                source_set_hash=None,
+            )
+            for kind, identity, version in sorted(
+                dependency_refs, key=lambda item: (item[0].value, str(item[1]), item[2])
+            )
+        )
+        do_not_ask = tuple(
+            c.FoundationEntityRef(
+                ref_kind="FOUNDATION_ID",
+                foundation_id=allocated[key][1],
+                expected_version=allocated[key][2],
+            )
+            for key in runway.do_not_ask_question_keys
+        )
+        guidance_id = _runtime_id(command.analyzer_run_id, "initial-guidance")
+        admitted = c.AdmittedGuidance(
+            guidance_id=guidance_id,
+            guidance_version=1,
+            source_analyzer_run_id=command.analyzer_run_id,
+            source_context_id=command.context_id,
+            source_request_hash=command.provider_request_hash,
+            based_on_case_revision=command.expected_case_revision,
+            source_set_hash=candidate.source_set_hash,
+            recommended_question=recommended,
+            safe_alternates=alternatives,
+            do_not_ask_questions=do_not_ask,
+            dependencies=tuple(dependencies),
+            acknowledgement_suggestion="The first clarification area is ready.",
+            invalidation_triggers=tuple(
+                sorted(
+                    {
+                        c.GuidanceInvalidationTrigger.SOURCE_SET_CHANGED,
+                        c.GuidanceInvalidationTrigger.FOUNDATION_ENTITY_CHANGED,
+                        c.GuidanceInvalidationTrigger.QUESTION_ANSWERED,
+                        c.GuidanceInvalidationTrigger.PROBLEM_RESOLVED,
+                        c.GuidanceInvalidationTrigger.GUIDANCE_SUPERSEDED,
+                        c.GuidanceInvalidationTrigger.WORKSHOP_CLOSED,
+                    },
+                    key=lambda item: item.value,
+                )
+            ),
+            admitted_at=self.now(),
+        )
+        guidance_table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        runway_table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        connection.execute(
+            update(guidance_table)
+            .where(guidance_table.c.case_id == str(command.case_id))
+            .values(valid=0)
+        )
+        connection.execute(
+            insert(guidance_table).values(
+                guidance_id=str(guidance_id),
+                guidance_version=1,
+                case_id=str(command.case_id),
+                payload_json=admitted.model_dump_json(),
+                valid=1,
+                admitted_at=_instant(admitted.admitted_at),
+            )
+        )
+        for position, question in enumerate(
+            (admitted.recommended_question, *admitted.safe_alternates), start=1
+        ):
+            connection.execute(
+                insert(runway_table).values(
+                    case_id=str(command.case_id),
+                    guidance_id=str(guidance_id),
+                    question_id=str(question.question_id),
+                    question_version=question.question_version,
+                    position=position,
+                    exact_text=question.exact_text,
+                    reason=question.reason,
+                    status="AVAILABLE",
+                    admitted_at=_instant(admitted.admitted_at),
+                    consumed_at=None,
+                )
+            )
+        return guidance_id
 
     def _admit_evidence_candidate(self, connection, case_id, candidate, active_context):
         context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
@@ -1185,13 +2683,91 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if command.candidate.source_set_hash != case["source_set_hash"]:
             raise FoundationProtocolError(c.FoundationRejectionCode.SOURCE_BINDING_FAILED)
 
-        def admitted_question(question):
+        guidance_table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
+        runway_table = WORKSHOP_PROTOCOL_TABLES["workshop_runway_items"]
+        current_guidance_row = connection.execute(
+            select(guidance_table).where(
+                guidance_table.c.case_id == str(command.case_id),
+                guidance_table.c.valid == 1,
+            )
+        ).mappings().one_or_none()
+        prior_available_rows = (
+            []
+            if current_guidance_row is None
+            else connection.execute(
+                select(runway_table)
+                .where(
+                    runway_table.c.case_id == str(command.case_id),
+                    runway_table.c.guidance_id == current_guidance_row["guidance_id"],
+                    runway_table.c.status == "AVAILABLE",
+                )
+                .order_by(runway_table.c.position)
+            ).mappings().all()
+        )
+        asked_rows = connection.execute(
+            select(runway_table)
+            .where(
+                runway_table.c.case_id == str(command.case_id),
+                runway_table.c.status == "ASKED",
+            )
+            .order_by(runway_table.c.consumed_at, runway_table.c.position)
+        ).mappings().all()
+        asked_by_question = {
+            (row["question_id"], row["question_version"]): row for row in asked_rows
+        }
+        latest_asked_by_question_id = {
+            row["question_id"]: row for row in asked_rows
+        }
+
+        derived_dependency_refs: set[
+            tuple[c.GuidanceDependencyKind, UUID, int]
+        ] = set()
+
+        def admitted_question(question, *, track_dependencies=False):
             row = self._semantic_record_for_ref(connection, command.case_id, question.question_ref)
             if row["entity_kind"] != "QUESTION":
                 raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
             payload = json.loads(row["payload_json"])
             if payload.get("text") != question.exact_text:
                 raise FoundationProtocolError(c.FoundationRejectionCode.STALE_ENTITY)
+            if not payload.get("safe_without_current_turn_interpretation", False):
+                raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+            question_dependency_refs = {
+                (
+                    c.GuidanceDependencyKind.QUESTION,
+                    question.question_ref.foundation_id,
+                    question.question_ref.expected_version,
+                )
+            }
+            addressed = payload.get("addresses_problem_refs", ())
+            prerequisites = payload.get("prerequisite_problem_refs", ())
+
+            def require_problem_status(problem_ref, required_status):
+                problem = self._semantic_record_for_ref(
+                    connection, command.case_id, problem_ref
+                )
+                if problem["entity_kind"] != "PROBLEM":
+                    raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+                if problem["status"] != required_status:
+                    raise _GuidanceBranchUnavailable
+                question_dependency_refs.add(
+                    (
+                        c.GuidanceDependencyKind.PROBLEM,
+                        UUID(problem_ref["foundation_id"]),
+                        problem_ref["expected_version"],
+                    )
+                )
+
+            for problem_ref in addressed:
+                require_problem_status(
+                    problem_ref, c.SemanticRecordStatus.OPEN.value
+                )
+            for problem_ref in prerequisites:
+                require_problem_status(
+                    problem_ref, c.SemanticRecordStatus.RESOLVED.value
+                )
+            if track_dependencies:
+                derived_dependency_refs.update(question_dependency_refs)
             return c.AdmittedGuidanceQuestion(
                 question_id=question.question_ref.foundation_id,
                 question_version=question.question_ref.expected_version,
@@ -1199,13 +2775,178 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 reason=question.reason,
             )
 
-        recommended = admitted_question(command.candidate.recommended_question)
-        alternates = tuple(admitted_question(item) for item in command.candidate.safe_alternates)
+        proposed = (
+            command.candidate.recommended_question,
+            *command.candidate.safe_alternates,
+        )
+        admitted_proposed_values: list[c.AdmittedGuidanceQuestion] = []
+        for item in proposed:
+            identity = (
+                str(item.question_ref.foundation_id),
+                item.question_ref.expected_version,
+            )
+            if identity in asked_by_question:
+                # An exact previously asked question can never re-enter the
+                # runway, but it must not discard independent safe selections.
+                continue
+            try:
+                admitted_proposed_values.append(admitted_question(item))
+            except _GuidanceBranchUnavailable:
+                # A resolved target or unresolved prerequisite invalidates only
+                # this branch. Independent current selections remain admissible.
+                continue
+            except FoundationProtocolError as exc:
+                # An existing question that requires current-turn
+                # interpretation is not safe for the live runway. Quarantine
+                # only that selected branch; stale question/text or unknown
+                # refs still fail the complete GUIDANCE admission closed.
+                if exc.code is not c.FoundationRejectionCode.INVALID_TRANSITION:
+                    raise
+        admitted_proposed = tuple(admitted_proposed_values)
+
+        # Replenishment is additive: keep still-current live questions first,
+        # then append newly selected, source-verified questions without duplicates.
+        prior_available: list[c.AdmittedGuidanceQuestion] = []
+        for row in prior_available_rows:
+            if (row["question_id"], row["question_version"]) in asked_by_question:
+                continue
+            try:
+                prior_available.append(
+                    admitted_question(
+                        c.GuidanceQuestion(
+                            question_ref=c.FoundationEntityRef(
+                                ref_kind="FOUNDATION_ID",
+                                foundation_id=UUID(row["question_id"]),
+                                expected_version=row["question_version"],
+                            ),
+                            exact_text=row["exact_text"],
+                            reason=row["reason"],
+                        )
+                    )
+                )
+            except _GuidanceBranchUnavailable:
+                continue
+            except FoundationProtocolError as exc:
+                if exc.code not in {
+                    c.FoundationRejectionCode.STALE_ENTITY,
+                    c.FoundationRejectionCode.INVALID_TRANSITION,
+                }:
+                    raise
+
+        records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        eligible_foundation_questions: list[c.AdmittedGuidanceQuestion] = []
+        for row in connection.execute(
+            select(records)
+            .where(
+                records.c.case_id == str(command.case_id),
+                records.c.entity_kind == "QUESTION",
+                records.c.status == c.SemanticRecordStatus.OPEN.value,
+            )
+            .order_by(records.c.foundation_id, records.c.record_version)
+        ).mappings():
+            identity = (row["foundation_id"], row["record_version"])
+            if identity in asked_by_question:
+                continue
+            payload = json.loads(row["payload_json"])
+            try:
+                eligible_foundation_questions.append(
+                    admitted_question(
+                        c.GuidanceQuestion(
+                            question_ref=c.FoundationEntityRef(
+                                ref_kind="FOUNDATION_ID",
+                                foundation_id=UUID(row["foundation_id"]),
+                                expected_version=row["record_version"],
+                            ),
+                            exact_text=payload["text"],
+                            reason=payload["rationale"],
+                        )
+                    )
+                )
+            except _GuidanceBranchUnavailable:
+                continue
+            except FoundationProtocolError as exc:
+                if exc.code is not c.FoundationRejectionCode.INVALID_TRANSITION:
+                    raise
+
+        severity_priority = {
+            c.Severity.CRITICAL.value: 0,
+            c.Severity.HIGH.value: 1,
+            c.Severity.MEDIUM.value: 2,
+            c.Severity.LOW.value: 3,
+        }
+
+        def guidance_priority(question: c.AdmittedGuidanceQuestion) -> int:
+            row = self._semantic_record_for_ref(
+                connection,
+                command.case_id,
+                {
+                    "foundation_id": str(question.question_id),
+                    "expected_version": question.question_version,
+                },
+            )
+            payload = json.loads(row["payload_json"])
+            return min(
+                severity_priority[
+                    json.loads(
+                        self._semantic_record_for_ref(
+                            connection, command.case_id, problem_ref
+                        )["payload_json"]
+                    )["severity"]
+                ]
+                for problem_ref in payload["addresses_problem_refs"]
+            )
+
+        merged_pool: list[c.AdmittedGuidanceQuestion] = []
+        merged_ids: set[tuple[UUID, int]] = set()
+        for question in (
+            *prior_available,
+            *admitted_proposed,
+            *eligible_foundation_questions,
+        ):
+            identity = (question.question_id, question.question_version)
+            if identity in merged_ids:
+                continue
+            merged_pool.append(question)
+            merged_ids.add(identity)
+        merged = sorted(merged_pool, key=guidance_priority)[
+            :POST_BOOTSTRAP_RUNWAY_TARGET
+        ]
         for ref in command.candidate.do_not_ask_question_refs:
             if self._semantic_record_for_ref(connection, command.case_id, ref)["entity_kind"] != "QUESTION":
                 raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
+        merged_identities = {
+            (item.question_id, item.question_version) for item in merged
+        }
+        # Terra's do-not-ask list cannot suppress a question that Foundation
+        # independently proved safe and eligible. Keep only genuinely unselected
+        # refs in the admitted diagnostic list.
+        do_not_ask = tuple(
+            item
+            for item in command.candidate.do_not_ask_question_refs
+            if (item.foundation_id, item.expected_version) not in merged_identities
+        )
+        if not merged:
+            raise FoundationProtocolError(c.FoundationRejectionCode.INVALID_TRANSITION)
+        recommended, *alternate_values = merged
+        alternates = tuple(alternate_values)
+        for item in merged:
+            admitted_question(
+                c.GuidanceQuestion(
+                    question_ref=c.FoundationEntityRef(
+                        ref_kind="FOUNDATION_ID",
+                        foundation_id=item.question_id,
+                        expected_version=item.question_version,
+                    ),
+                    exact_text=item.exact_text,
+                    reason=item.reason,
+                ),
+                track_dependencies=True,
+            )
 
         dependencies = []
+        admitted_dependency_refs: set[
+            tuple[c.GuidanceDependencyKind, UUID, int]
+        ] = set()
         triggers = {
             c.GuidanceInvalidationTrigger.GUIDANCE_SUPERSEDED,
             c.GuidanceInvalidationTrigger.WORKSHOP_CLOSED,
@@ -1238,10 +2979,39 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     source_set_hash=None,
                 )
             )
+            admitted_dependency_refs.add(
+                (
+                    dependency.dependency_kind,
+                    dependency.entity_ref.foundation_id,
+                    dependency.entity_ref.expected_version,
+                )
+            )
             triggers.add(c.GuidanceInvalidationTrigger.FOUNDATION_ENTITY_CHANGED)
             if dependency.dependency_kind is c.GuidanceDependencyKind.QUESTION:
                 triggers.add(c.GuidanceInvalidationTrigger.QUESTION_ANSWERED)
             if dependency.dependency_kind is c.GuidanceDependencyKind.PROBLEM:
+                triggers.add(c.GuidanceInvalidationTrigger.PROBLEM_RESOLVED)
+
+        # Foundation binds every selected question and each current open
+        # problem it addresses, even if Terra omitted those dependency rows.
+        # This strengthens admission without changing the GUIDANCE schema or
+        # allowing GUIDANCE to create a question.
+        for kind, identity, version in sorted(
+            derived_dependency_refs - admitted_dependency_refs,
+            key=lambda item: (item[0].value, str(item[1]), item[2]),
+        ):
+            dependencies.append(
+                c.AdmittedGuidanceDependency(
+                    dependency_kind=kind,
+                    entity_id=identity,
+                    expected_version=version,
+                    source_set_hash=None,
+                )
+            )
+            triggers.add(c.GuidanceInvalidationTrigger.FOUNDATION_ENTITY_CHANGED)
+            if kind is c.GuidanceDependencyKind.QUESTION:
+                triggers.add(c.GuidanceInvalidationTrigger.QUESTION_ANSWERED)
+            else:
                 triggers.add(c.GuidanceInvalidationTrigger.PROBLEM_RESOLVED)
 
         guidance_id = self.new_id()
@@ -1255,16 +3025,19 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             source_set_hash=command.candidate.source_set_hash,
             recommended_question=recommended,
             safe_alternates=alternates,
-            do_not_ask_questions=command.candidate.do_not_ask_question_refs,
+            do_not_ask_questions=do_not_ask,
             dependencies=tuple(dependencies),
             acknowledgement_suggestion=command.candidate.acknowledgement_suggestion,
             invalidation_triggers=tuple(sorted(triggers, key=lambda item: item.value)),
             admitted_at=self.now(),
         )
-        table = WORKSHOP_PROTOCOL_TABLES["workshop_guidance"]
-        connection.execute(update(table).where(table.c.case_id == str(command.case_id)).values(valid=0))
         connection.execute(
-            insert(table).values(
+            update(guidance_table)
+            .where(guidance_table.c.case_id == str(command.case_id))
+            .values(valid=0)
+        )
+        connection.execute(
+            insert(guidance_table).values(
                 guidance_id=str(guidance_id),
                 guidance_version=1,
                 case_id=str(command.case_id),
@@ -1273,6 +3046,42 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 admitted_at=_instant(admitted.admitted_at),
             )
         )
+        for position, question in enumerate((recommended, *alternates), start=1):
+            connection.execute(
+                insert(runway_table).values(
+                    case_id=str(command.case_id),
+                    guidance_id=str(guidance_id),
+                    question_id=str(question.question_id),
+                    question_version=question.question_version,
+                    position=position,
+                    exact_text=question.exact_text,
+                    reason=question.reason,
+                    status="AVAILABLE",
+                    admitted_at=_instant(admitted.admitted_at),
+                    consumed_at=None,
+                )
+            )
+        merged_question_ids = {str(question.question_id) for question in merged}
+        historical_asked_rows = (
+            row
+            for question_id, row in latest_asked_by_question_id.items()
+            if question_id not in merged_question_ids
+        )
+        for position, row in enumerate(historical_asked_rows, start=len(merged) + 1):
+            connection.execute(
+                insert(runway_table).values(
+                    case_id=str(command.case_id),
+                    guidance_id=str(guidance_id),
+                    question_id=row["question_id"],
+                    question_version=row["question_version"],
+                    position=position,
+                    exact_text=row["exact_text"],
+                    reason=row["reason"],
+                    status="ASKED",
+                    admitted_at=row["admitted_at"],
+                    consumed_at=row["consumed_at"],
+                )
+            )
         self._advance_revision(connection, command.case_id, prior_revision)
         return c.ProposalAdmissionReceipt(
             receipt_type="PROPOSAL_ADMISSION",
@@ -1618,6 +3427,30 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 )
                 .values(status=status.value)
             )
+            if outcome is c.DecisionItemOutcome.COMMITTED:
+                for link in decision_payload["problem_links"]:
+                    if link["resolution_kind"] != c.ProblemResolutionKind.FULL.value:
+                        continue
+                    problem = self._semantic_record_for_ref(
+                        connection,
+                        command.case_id,
+                        link["problem_ref"],
+                    )
+                    if problem["entity_kind"] != "PROBLEM":
+                        raise FoundationProtocolError(
+                            c.FoundationRejectionCode.UNKNOWN_REFERENCE
+                        )
+                    if problem["status"] == c.SemanticRecordStatus.OPEN.value:
+                        connection.execute(
+                            update(records)
+                            .where(
+                                records.c.foundation_id == problem["foundation_id"],
+                                records.c.record_version == problem["record_version"],
+                                records.c.status
+                                == c.SemanticRecordStatus.OPEN.value,
+                            )
+                            .values(status=c.SemanticRecordStatus.RESOLVED.value)
+                        )
             revision_request_id = None
             if outcome is c.DecisionItemOutcome.REVISION_REQUESTED:
                 revision_request_id = self.new_id()
@@ -1657,6 +3490,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             receipt_type="DECISION_BATCH_RESPONSE",
             command=self._base_receipt(command, prior_revision),
             decision_batch_view_id=command.decision_batch_view_id,
+            response_transcript_event_id=command.response_transcript_event_id,
             item_results=tuple(results),
             resulting_readiness=c.Readiness.FORMULATING,
             resulting_review_obligation=c.ReviewObligation.NONE,
@@ -1689,18 +3523,77 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED) from exc
         errors = list(_payload_validator(schema_name).iter_errors(payload))
         if errors:
-            raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED)
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED,
+                safe_diagnostic_pointers=_schema_error_pointers(errors),
+            )
+        assignment_map: tuple[c.ArtifactIdentityAssignment, ...] = ()
+        if artifact_type == "SPEC_PACKAGE":
+            try:
+                assignment_map = (
+                    command.candidate.identity_assignment_map
+                    or derive_materialized_assignment(
+                        payload=payload,
+                        identity_plan=command.identity_plan,
+                    )
+                )
+                validate_materialized_assignment(
+                    payload=payload,
+                    identity_plan=command.identity_plan,
+                    assignment_map=assignment_map,
+                )
+            except SpecIdentityMaterializationError as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                    safe_diagnostic_pointers=exc.pointers,
+                ) from exc
         if artifact_type == "TECHNICAL_CONTRACT":
             self._validate_confirmed_spec_lineage(connection, command, prior_revision)
         planned = {str(item.foundation_id): item.entity_kind for item in command.identity_plan.planned_identities}
         identifier_kinds = self._artifact_identity_kinds(payload)
-        if set(identifier_kinds) != set(planned) or any(
+        if not set(identifier_kinds).issubset(planned) or any(
             planned[identity] != kind for identity, kind in identifier_kinds.items()
         ):
             raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
-        for item in command.identity_plan.planned_identities:
-            for ref in item.source_entity_refs:
-                self._semantic_record_for_ref(connection, command.case_id, ref)
+        if artifact_type == "SPEC_PACKAGE":
+            self._validate_confirmed_decision_projection(command, payload)
+        for ref in command.identity_plan.source_entity_refs:
+            self._semantic_record_for_ref(connection, command.case_id, ref)
+        allowed_reference_ids = set(identifier_kinds)
+        semantic_records = WORKSHOP_PROTOCOL_TABLES["workshop_semantic_records"]
+        allowed_reference_ids.update(
+            connection.execute(
+                select(semantic_records.c.foundation_id).where(
+                    semantic_records.c.case_id == str(command.case_id),
+                    semantic_records.c.status != c.SemanticRecordStatus.STALE.value,
+                )
+            ).scalars()
+        )
+        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
+        allowed_reference_ids.update(
+            str(item.source.source_id) for item in context.source_set.ordered_sources
+        )
+        allowed_reference_ids.update(
+            connection.execute(
+                select(case_participants.c.actor_id).where(
+                    case_participants.c.case_id == str(command.case_id)
+                )
+            ).scalars()
+        )
+        if artifact_type == "TECHNICAL_CONTRACT":
+            allowed_reference_ids.update(
+                self._artifact_identity_kinds(
+                    json.loads(command.confirmed_spec.canonical_payload_json)
+                )
+            )
+        reference_issues = validate_artifact_reference_graph(
+            payload, allowed_reference_ids=allowed_reference_ids
+        )
+        if reference_issues:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.UNKNOWN_REFERENCE,
+                safe_diagnostic_pointers=tuple(item.pointer for item in reference_issues),
+            )
         records = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
         prior_artifact = connection.execute(
             select(records).where(
@@ -1726,7 +3619,17 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                     artifact_id=str(command.target.foundation_artifact_id),
                     artifact_version=command.target.next_artifact_version,
                     semantic_state_hash=command.identity_plan.semantic_state_hash,
-                    plan_json=command.identity_plan.model_dump_json(),
+                    plan_json=_json(
+                        {
+                            "identity_plan": command.identity_plan.model_dump(
+                                mode="json"
+                            ),
+                            "assignment_map": [
+                                item.model_dump(mode="json")
+                                for item in assignment_map
+                            ],
+                        }
+                    ),
                     status="CONSUMED",
                     created_at=_instant(self.now()),
                 )
@@ -1734,7 +3637,6 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         except IntegrityError as exc:
             raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED) from exc
         digest = payload_hash(payload)
-        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
         governance = draft_governance(
             artifact_type=artifact_type,
             payload=payload,
@@ -1792,6 +3694,267 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             record_revision=1,
             payload_hash=digest,
         )
+
+    def _validate_confirmed_decision_projection(self, command, payload):
+        """Reject drafts that omit or rewrite Foundation-confirmed decisions."""
+
+        canonical = self.confirmed_decision_synthesis_bindings(command.case_id)
+        supplied = command.confirmed_decision_bindings
+        if supplied != canonical:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+
+        expected_projection = self._server_owned_spec_records(
+            command.confirmed_decision_bindings,
+            command.identity_plan,
+        )
+        if payload["actors"] != expected_projection["actors"]:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+
+        decisions = payload["decisions"]
+        decision_ids = [item["id"] for item in decisions]
+        if len(decision_ids) != len(set(decision_ids)):
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+        confirmed = {
+            item["id"]: item for item in decisions if item["status"] == "confirmed"
+        }
+        expected_ids = {str(item.decision_id) for item in canonical}
+        if set(confirmed) != expected_ids:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+
+        expected_decisions = {
+            item["id"]: item for item in expected_projection["decisions"]
+        }
+        for binding in canonical:
+            if confirmed[str(binding.decision_id)] != expected_decisions[
+                str(binding.decision_id)
+            ]:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+                )
+
+    def project_spec_server_owned_records(
+        self,
+        candidate: c.SpecPackageSynthesisCandidate,
+        *,
+        confirmed_decision_bindings: tuple[c.ConfirmedDecisionSynthesisBinding, ...],
+        identity_plan: c.ArtifactSynthesisIdentityPlan,
+    ) -> c.SpecPackageSynthesisCandidate:
+        """Materialize Analyzer handles, then merge Foundation-owned records."""
+
+        try:
+            payload = json.loads(
+                candidate.candidate_payload_json,
+                object_pairs_hook=self._reject_duplicate_keys,
+            )
+        except ValueError as exc:
+            raise FoundationProtocolError(c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED) from exc
+        if candidate.identity_assignment_map:
+            try:
+                validate_materialized_assignment(
+                    payload=payload,
+                    identity_plan=identity_plan,
+                    assignment_map=candidate.identity_assignment_map,
+                )
+            except SpecIdentityMaterializationError as exc:
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                    safe_diagnostic_pointers=exc.pointers,
+                ) from exc
+            expected = self._server_owned_spec_records(
+                confirmed_decision_bindings, identity_plan
+            )
+            if (
+                payload.get("actors") != expected["actors"]
+                or payload.get("decisions") != expected["decisions"]
+            ):
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+                )
+            return candidate
+        if any(
+            field in payload
+            for field in (
+                "actors",
+                "decisions",
+                "evidence_catalog",
+                "semantic_evidence_findings",
+            )
+        ):
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+            )
+        try:
+            payload, proposals, assignment_map = materialize_spec_identities(
+                payload=payload,
+                proposals=candidate.evidence_support_proposals,
+                identity_plan=identity_plan,
+            )
+        except SpecIdentityMaterializationError as exc:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                safe_diagnostic_pointers=exc.pointers,
+            ) from exc
+        self._initialize_foundation_owned_evidence_refs(payload)
+        payload.update(
+            self._server_owned_spec_records(
+                confirmed_decision_bindings,
+                identity_plan,
+            )
+        )
+        payload["evidence_catalog"] = []
+        payload["semantic_evidence_findings"] = []
+        return candidate.model_copy(
+            update={
+                "candidate_payload_json": json.dumps(
+                    payload, sort_keys=True, separators=(",", ":")
+                ),
+                "evidence_support_proposals": proposals,
+                "identity_assignment_map": assignment_map,
+            }
+        )
+
+    @staticmethod
+    def _initialize_foundation_owned_evidence_refs(payload: dict[str, Any]) -> None:
+        """Add empty canonical evidence fields at exact provider-owned entity paths."""
+
+        collection_fields = {
+            ("glossary",): "evidence_refs",
+            ("outcomes",): "evidence_refs",
+            ("scope", "in_scope"): "evidence_refs",
+            ("scope", "non_goals"): "evidence_refs",
+            ("scope", "boundaries"): "evidence_refs",
+            ("behaviour_contract", "always"): "evidence_refs",
+            ("behaviour_contract", "ask_first"): "evidence_refs",
+            ("behaviour_contract", "never"): "evidence_refs",
+            ("requirements",): "source_evidence_refs",
+            ("data_rules",): "evidence_refs",
+            ("quality_attributes",): "evidence_refs",
+            ("constraints",): "evidence_refs",
+            ("dependencies",): "evidence_refs",
+            ("risks",): "evidence_refs",
+        }
+
+        for path, field in collection_fields.items():
+            value: object = payload
+            for part in path:
+                if not isinstance(value, dict) or part not in value:
+                    raise FoundationProtocolError(
+                        c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+                    )
+                value = value[part]
+            if not isinstance(value, list) or any(
+                not isinstance(item, dict) or field in item for item in value
+            ):
+                raise FoundationProtocolError(
+                    c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+                )
+            for item in value:
+                item[field] = []
+
+    @staticmethod
+    def _server_owned_spec_records(
+        bindings: tuple[c.ConfirmedDecisionSynthesisBinding, ...],
+        identity_plan: c.ArtifactSynthesisIdentityPlan,
+    ) -> dict[str, list[dict[str, Any]]]:
+        actor_ids = [
+            item.foundation_id
+            for item in identity_plan.slots
+            if item.entity_kind == "ACTOR"
+            and item.owner == "FOUNDATION"
+            and item.allocation_mode == "BOUND_EXISTING"
+        ]
+        bound_actor_ids = {item.actor_ref for item in bindings}
+        if len(actor_ids) != 1 or not bound_actor_ids.issubset(set(actor_ids)):
+            raise FoundationProtocolError(c.FoundationRejectionCode.IDENTITY_PLAN_FAILED)
+
+        domain_map = {
+            c.Domain.PRODUCT: "product",
+            c.Domain.TECHNICAL: "technical",
+            c.Domain.CROSS_DOMAIN: "cross_domain",
+            c.Domain.POLICY: "compliance",
+            c.Domain.SECURITY: "security",
+            c.Domain.PRIVACY: "privacy",
+            c.Domain.DATA: "data",
+            c.Domain.ACCEPTANCE: "business",
+        }
+        classification_map = {
+            c.Domain.PRODUCT: "product",
+            c.Domain.TECHNICAL: "technical",
+            c.Domain.CROSS_DOMAIN: "cross_domain",
+            c.Domain.POLICY: "policy",
+            c.Domain.SECURITY: "cross_domain",
+            c.Domain.PRIVACY: "cross_domain",
+            c.Domain.DATA: "cross_domain",
+            c.Domain.ACCEPTANCE: "cross_domain",
+        }
+        authority_domains = sorted(
+            {domain_map[item.classification] for item in bindings} or {"product"}
+        )
+        evidence_refs = sorted(
+            {str(evidence_id) for item in bindings for evidence_id in item.evidence_ids}
+        )
+        actors = [
+            {
+                "id": str(actor_ids[0]),
+                "name": "Workshop decision authority",
+                "description": "Canonical human authority for confirmed workshop decisions.",
+                "responsibilities": [
+                    "Own confirmed decisions within the listed authority domains."
+                ],
+                "permissions": [
+                    "Confirm, revise, reject, or defer workshop decisions."
+                ],
+                "authority_domains": authority_domains,
+                "evidence_refs": evidence_refs,
+            }
+        ]
+        decisions = []
+        for binding in bindings:
+            classification = classification_map[binding.classification]
+            confirmation = {
+                "confirmation_id": str(binding.confirmation_id),
+                "confirmed_decision_id": str(binding.decision_id),
+                "confirmed_decision_version": binding.decision_version,
+                "decision_batch_view_id": str(binding.decision_batch_view_id),
+                "decision_batch_view_hash": binding.decision_batch_view_hash,
+                "review_item_id": str(binding.review_item_id),
+                "confirmed_case_revision": binding.confirmed_case_revision,
+                "actor_ref": str(binding.actor_ref),
+                "authority_validation_id": str(binding.authority_validation_id),
+                "transcript_event_id": str(binding.transcript_event_id),
+                "confirmed_at": binding.confirmed_at.astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            }
+            decisions.append(
+                {
+                    "id": str(binding.decision_id),
+                    "decision_version": binding.decision_version,
+                    "question": f"Should the workshop adopt this decision: {binding.statement}",
+                    "decision": binding.statement,
+                    "classification": classification,
+                    "domains": [domain_map[binding.classification]],
+                    "rationale": binding.rationale,
+                    "alternatives_considered": list(binding.alternatives_considered),
+                    "status": "confirmed",
+                    "authority": {
+                        "actor_ref": str(binding.actor_ref),
+                        "domain": domain_map[binding.classification],
+                        "delegation_ref": None,
+                        "foundation_validation_id": str(binding.authority_validation_id),
+                    },
+                    "confirmation_binding": confirmation,
+                    "affected_refs": [str(item) for item in binding.problem_ids],
+                    "evidence_refs": [str(item) for item in binding.evidence_ids],
+                }
+            )
+        return {"actors": actors, "decisions": decisions}
 
     def _validate_confirmed_spec_lineage(self, connection, command, prior_revision):
         binding = command.confirmed_spec
@@ -1967,9 +4130,57 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 == c.ContextStatus.ACTIVE.value,
             )
         ).mappings().one()
-        context = c.AnalyzerContextBinding.model_validate_json(active_context["binding_json"])
+        try:
+            historical_context = json.loads(active_context["binding_json"])
+            source_set = c.SourceSetBinding.model_validate_json(
+                json.dumps(
+                    historical_context["source_set"],
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+            ) from exc
         next_record = dict(record)
         next_record["record_revision"] = record["record_revision"] + 1
+        payload = json.loads(record["payload_json"])
+        evidence_refs = {
+            item["id"] for item in payload.get("evidence_catalog", [])
+        }
+        artifact_evidence_pairs: dict[str, dict[str, Any]] = {}
+        if evidence_refs:
+            assessment_runs = EVIDENCE_ASSESSMENT_TABLES[
+                "workshop_artifact_evidence_assessment_runs"
+            ]
+            assessments = EVIDENCE_ASSESSMENT_TABLES[
+                "workshop_artifact_evidence_assessments"
+            ]
+            rows = connection.execute(
+                select(assessments.c.evidence_ref, assessments.c.pair_json)
+                .join(
+                    assessment_runs,
+                    assessment_runs.c.request_hash == assessments.c.request_hash,
+                )
+                .where(
+                    assessment_runs.c.case_id == record["case_id"],
+                    assessment_runs.c.artifact_id == record["artifact_id"],
+                    assessment_runs.c.artifact_version == record["artifact_version"],
+                    assessment_runs.c.resulting_record_revision
+                    <= record["record_revision"],
+                    assessments.c.evidence_ref.in_(evidence_refs),
+                    assessments.c.disposition == "CANONICAL",
+                )
+            ).mappings().all()
+            for row in rows:
+                if row["evidence_ref"] in artifact_evidence_pairs:
+                    raise FoundationProtocolError(
+                        c.FoundationRejectionCode.EVIDENCE_BINDING_FAILED
+                    )
+                artifact_evidence_pairs[row["evidence_ref"]] = json.loads(
+                    row["pair_json"]
+                )
         governance = json.loads(record["governance_json"])
         governance = self.governance_with_projection_pass(
             record=next_record,
@@ -1983,7 +4194,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             provisional = build_review_view(
                 artifact_type=command.subject.artifact_type,
                 record=next_record,
-                payload=json.loads(record["payload_json"]),
+                payload=payload,
                 governance=governance,
                 confirmed_from=(
                     None
@@ -1993,7 +4204,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 view_id=view_id,
                 view_mode=command.view_mode,
                 case_revision=prior_revision + 1,
-                context=context,
+                source_set=source_set,
+                artifact_evidence_pairs=artifact_evidence_pairs,
                 snapshot=self.semantic_snapshot(command.case_id),
                 now=generated_at,
             )
@@ -2009,7 +4221,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             view = build_review_view(
                 artifact_type=command.subject.artifact_type,
                 record=next_record,
-                payload=json.loads(record["payload_json"]),
+                payload=payload,
                 governance=governance,
                 confirmed_from=(
                     None
@@ -2019,7 +4231,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 view_id=view_id,
                 view_mode=command.view_mode,
                 case_revision=prior_revision + 1,
-                context=context,
+                source_set=source_set,
+                artifact_evidence_pairs=artifact_evidence_pairs,
                 snapshot=self.semantic_snapshot(command.case_id),
                 now=generated_at,
             )
@@ -2098,12 +4311,19 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
         if row is None:
             raise FoundationProtocolError(c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED)
         self._require_participant(connection, command.case_id, command.acting_actor_id)
-        if self._participant_transcript(
+        transcript = self._participant_transcript(
             connection,
             command.case_id,
             command.confirmation_transcript_event_id,
             command.acting_actor_id,
-        ) is None:
+        )
+        if transcript is None:
+            raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
+        if (
+            command.residual_quality_risk_acceptance is not None
+            and transcript.text
+            != command.residual_quality_risk_acceptance.acceptance_statement
+        ):
             raise FoundationProtocolError(c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED)
         if command.approved_exception_ids:
             raise FoundationProtocolError(c.FoundationRejectionCode.UNKNOWN_REFERENCE)
@@ -2116,8 +4336,8 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 records.c.record_revision == command.binding.record_revision,
             )
         ).mappings().one()
-        audit, governance = self.require_quality_confirmation_gate(
-            connection, dict(artifact), dict(row)
+        audit, governance, residual_risk = self.require_quality_confirmation_gate(
+            connection, dict(artifact), dict(row), command
         )
         required_domain = "BUSINESS" if artifact["artifact_type"] == "SPEC_PACKAGE" else "TECHNICAL"
         if not self._has_domain_authority(
@@ -2132,6 +4352,7 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
             view=dict(row),
             command=command,
             confirmed_case_revision=prior_revision + 1,
+            residual_risk=residual_risk,
         )
         try:
             validate_governance(artifact["artifact_type"], governance)
@@ -2185,6 +4406,58 @@ class WorkshopFoundationService(ArtifactQualityFoundationMixin):
                 )
             ).scalar_one_or_none()
         return None if row is None else c.DecisionBatchReviewView.model_validate_json(row)
+
+    def decision_view_by_binding(
+        self,
+        case_id: UUID,
+        view_id: UUID,
+        view_hash: str,
+    ) -> c.DecisionBatchReviewView | None:
+        """Return an exact historical view so Foundation can decide replay vs stale."""
+
+        table = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(table.c.view_json).where(
+                    table.c.case_id == str(case_id),
+                    table.c.view_id == str(view_id),
+                    table.c.view_hash == view_hash,
+                )
+            ).scalar_one_or_none()
+        return None if row is None else c.DecisionBatchReviewView.model_validate_json(row)
+
+    def decision_response_replay_context(
+        self,
+        case_id: UUID,
+        idempotency_key: str,
+    ) -> tuple[c.DecisionBatchReviewView, int] | None:
+        """Recover the view and revision bound to a ledgered decision response."""
+
+        ledger = WORKSHOP_PROTOCOL_TABLES["workshop_command_ledger"]
+        views = WORKSHOP_PROTOCOL_TABLES["workshop_decision_views"]
+        with self.engine.connect() as connection:
+            recorded = connection.execute(
+                select(ledger.c.receipt_json).where(
+                    ledger.c.case_id == str(case_id),
+                    ledger.c.idempotency_key == idempotency_key,
+                    ledger.c.command_type == "APPLY_DECISION_BATCH_RESPONSE",
+                )
+            ).scalar_one_or_none()
+            if recorded is None:
+                return None
+            receipt = c.DecisionBatchResponseReceipt.model_validate_json(recorded)
+            row = connection.execute(
+                select(views.c.view_json).where(
+                    views.c.case_id == str(case_id),
+                    views.c.view_id == str(receipt.decision_batch_view_id),
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        return (
+            c.DecisionBatchReviewView.model_validate_json(row),
+            receipt.command.prior_case_revision,
+        )
 
     def current_artifact_review(self, case_id: UUID) -> dict[str, Any] | None:
         table = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_reviews"]

@@ -1,173 +1,284 @@
 import { expect, test } from "@playwright/test";
 
-const sourceLines = Array.from({ length: 46 }, (_, index) => {
-  const line = index + 1;
-  const content: Record<number, string> = {
-    1: "# Filtered Orders CSV Export — Draft Technical Specification",
-    4: "The export MUST include every order matching the active filter set.",
-    12: "The CSV schema is fixed: Order ID, Customer, Status, Total, Created At, Updated At.",
-    18: "Large exports MUST be generated asynchronously without truncating filtered rows.",
-    27: "Authorization is rechecked when the export is requested and when the file is downloaded.",
-    35: "Failed generation returns a stable error and never exposes a partial file.",
-    43: "All output is UTF-8 with a single header row.",
-  };
-  return [line, content[line] ?? ""];
-});
+const sourceLines = Array.from({ length: 46 }, (_, index) => [index + 1, index === 17
+  ? "Large exports MUST be generated asynchronously without truncating filtered rows."
+  : index === 42 ? "All output is UTF-8 with a single header row." : ""]);
 
-const transcriptEventId = "77777777-7777-4777-8777-777777777777";
 const bootstrap = {
   case_id: "33333333-3333-4333-8333-333333333333",
   pm_actor_id: "22222222-2222-4222-8222-222222222222",
-  dev_lead_actor_id: "11111111-1111-4111-8111-111111111111",
-  delegation_id: "55555555-5555-4555-8555-555555555555",
   delegation_valid_from: "2026-07-23T00:00:00Z",
   delegation_valid_until: "2026-08-22T23:59:59Z",
-  delegation_command_scope: ["revise_spec_package", "mark_spec_package_item_ready", "approve_spec_package_item"],
+  delegation_command_scope: ["revise_spec_package", "approve_spec_package_item"],
   technical_source_lines: sourceLines,
 };
 
-const workshop = {
-  session: {
-    workshop_state: "ACTIVE",
-    conversation_phase: "WORKSHOP",
-    call_state: "LISTENING",
-    revision_locked: false,
-    revision_lock_reason: null,
-  },
-  final_transcripts: [{
-    event_id: transcriptEventId,
-    turn_sequence: 1,
-    version: 1,
-    normalized_text: "I confirm the exact displayed decision and artifact review.",
-    correction_of_version: null,
-    speaker_actor_id: bootstrap.pm_actor_id,
-  }],
-  pending_proposal: null,
-  governance: null,
-  review_requests: [],
-  handoff: null,
+const question = {
+  question_id: "18888888-8888-4888-8888-888888888888",
+  question_version: 2,
+  exact_text: "Which timezone defines the filtered export date boundary?",
+  reason: "The Foundation-admitted data boundary remains open.",
+  dependencies: [{ dependency_kind: "SOURCE_SET", entity_id: null, expected_version: null, source_set_hash: `sha256:${"a".repeat(64)}` }],
 };
 
-const artifactReview = {
-  confirmation_id: "12121212-1212-4212-8212-121212121212",
-  view_id: "13131313-1313-4313-8313-131313131313",
-  view_hash: `sha256:${"e".repeat(64)}`,
-  confirmed: false,
-  view: {
-    view_type: "spec_package_view",
-    mode: "review",
-    header: { package_name: "Filtered Orders CSV", overall_readiness: "FORMULATING" },
-    items: [{ id: "14141414-1414-4414-8414-141414141414", title: "Complete export", summary: "Every matching row is included." }],
-    projection_integrity: { all_material_items_included: true },
-  },
+const priorQuestion = {
+  ...question,
+  question_id: "28888888-8888-4888-8888-888888888888",
+  question_version: 1,
+  exact_text: "Which encoding is required for the exported CSV?",
 };
 
-const decisionReview = {
-  protocol_version: "1.0.0",
-  view_type: "DECISION_BATCH_REVIEW",
-  view_id: "99999999-9999-4999-8999-999999999999",
-  view_hash: `sha256:${"d".repeat(64)}`,
+const response = {
+  response_id: "77777777-7777-4777-8777-777777777777",
   session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-  based_on_case_revision: 12,
-  derived_from_cluster_ids: [],
-  items: ["A", "B"].map((handle, index) => ({
-    review_item_id: `${index + 1}bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`,
-    handle,
-    pending_decision_id: `${index + 1}ccccccc-cccc-4ccc-8ccc-cccccccccccc`,
-    pending_decision_version: 1,
-    classification: "PRODUCT",
-    exact_statement: handle === "A" ? "Use UTF-8 for every CSV export." : "Never truncate a large export.",
-    rationale: "Consumers need one stable contract.",
-    problem_origins: [{
-      problem_id: `${index + 1}ddddddd-dddd-4ddd-8ddd-dddddddddddd`,
-      problem_version: 1,
-      problem_statement: "The export behavior was not confirmed.",
-      resolution_kind: "FULL",
-      evidence_summary: "The technical source supplies the constraint.",
+  question_id: priorQuestion.question_id,
+  question_version: 1,
+  turn_sequence: 1,
+  response_version: 1,
+  normalized_text: "Use UTF-8 with one header row.",
+  content_hash: "b".repeat(64),
+  final_source_ref: { artifact_id: "66666666-6666-4666-8666-666666666666", version: 1, content_hash: "b".repeat(64), location: { kind: "JSON_POINTER", pointer: "/normalized_text" } },
+  client_submission_id: "55555555-5555-4555-8555-555555555555",
+  correction_of_response_id: null,
+  input_channel: "CHAT",
+  channel_confirmation_receipt_id: null,
+  created_at: "2026-08-16T12:00:00Z",
+};
+
+const binding = {
+  proposal_ref: "99999999-9999-4999-8999-999999999999",
+  proposal_version: 1,
+  base_case_revision: 12,
+  payload_hash: "d".repeat(64),
+};
+
+const proposal = {
+  binding,
+  status: "PENDING",
+  view: {
+    view_id: binding.proposal_ref,
+    items: [{
+      handle: "A",
+      classification: "PRODUCT",
+      exact_statement: "Use the organization timezone for date boundaries.",
+      rationale: "The PM must choose one deterministic date interpretation.",
     }],
-  })),
-  generated_at: "2026-08-12T12:00:00Z",
+  },
+};
+
+const workshop = {
+  session_id: response.session_id,
+  case_revision: 12,
+  workshop_state: "ACTIVE",
+  conversation_phase: "WORKSHOP",
+  session_card: { readiness: "NEEDS_CLARIFICATION", review_obligation: "DECISION_REQUIRED" },
+  committed_turns: [{ question: priorQuestion, response }],
+  question_runway: { questions: [question], runway_depth: 1 },
+  turn_submission_status: "READY",
+  proposal_statuses: [proposal],
+  completion_status: null,
+  generated_at: "2026-08-16T12:00:00Z",
 };
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/bootstrap", (route) => route.fulfill({ json: bootstrap }));
+  await page.route("**/api/workshop/preparation", (route) => route.fulfill({ json: { phase: "READY", message: null, delayed_message: null } }));
   await page.route("**/api/workshop", (route) => route.fulfill({ json: workshop }));
-  await page.route("**/api/v4/cases/*/decision-review", (route) => route.fulfill({ json: null }));
-  await page.route("**/api/v4/cases/*/artifact-review", (route) => route.fulfill({ json: null }));
+  await page.route("**/api/telemetry/spans", (route) => route.fulfill({ json: {} }));
 });
 
-test("renders the immutable artifact projection and real V4 pipeline controls", async ({ page }) => {
-  await page.unroute("**/api/v4/cases/*/artifact-review");
-  await page.route("**/api/v4/cases/*/artifact-review", (route) => route.fulfill({ json: artifactReview }));
-  await page.goto("/");
-  const review = page.getByRole("region", { name: "Filtered Orders CSV" });
-  await expect(review).toContainText("Complete projection");
-  await expect(review).toContainText("Complete export");
-  await expect(review).toContainText("AWAITING HUMAN CONFIRMATION");
-  await expect(page.getByRole("region", { name: "Artifact pipeline" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Synthesize + audit" })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Open exact review" })).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Confirm exact artifact" })).toBeEnabled();
-});
-
-test("partial browser decisions use the current Foundation view and leave omissions pending", async ({ page }) => {
+test("renders canonical question messages and submits the exact typed response intent", async ({ page }) => {
   let body: Record<string, unknown> | null = null;
-  await page.unroute("**/api/v4/cases/*/decision-review");
-  await page.route("**/api/v4/cases/*/decision-review", (route) => route.fulfill({ json: decisionReview }));
-  await page.route("**/api/v4/decisions/current/respond", async (route) => {
+  await page.route("**/api/workshop/responses", async (route) => {
     body = route.request().postDataJSON();
-    return route.fulfill({ json: { receipt_type: "DECISION_BATCH_RESPONSE" } });
+    return route.fulfill({ json: { recovery_code: "ANALYSIS_QUEUED", snapshot: response } });
   });
   await page.goto("/");
-  await page.getByLabel("Action for A").selectOption("CONFIRM");
-  await expect(page.getByLabel("Action for B")).toHaveValue("");
-  await page.getByRole("button", { name: "Apply selected decisions" }).click();
-  await expect(page.getByText("Selected decisions committed atomically; unselected decisions remain pending")).toBeVisible();
-  expect(body).not.toBeNull();
-  const request = body as { response_transcript_event_id: string; selections: Array<{ handle: string; action: string }>; actor_authentication: { actor_id: string } };
-  expect(request.response_transcript_event_id).toBe(transcriptEventId);
-  expect(request.actor_authentication.actor_id).toBe(bootstrap.pm_actor_id);
-  expect(request.selections).toEqual([{ handle: "A", action: "CONFIRM", revision_span: null }]);
+  await expect(page.getByText(question.exact_text)).toBeVisible();
+  await expect(page.getByText(priorQuestion.exact_text)).toBeVisible();
+  await expect(page.getByText("You · chat")).toBeVisible();
+  await page.getByLabel("Your typed response").fill("Use the organization timezone.");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Your response is saved. Analysis will resume automatically.")).toBeVisible();
+  expect(body).toMatchObject({
+    question_id: question.question_id,
+    expected_question_version: question.question_version,
+    text: "Use the organization timezone.",
+    correction_of_response_id: null,
+    edit_target: null,
+  });
+  expect(body).not.toHaveProperty("input_channel");
+  expect(body).not.toHaveProperty("channel_confirmation_receipt_id");
 });
 
-test("artifact confirmation sends the exact final transcript authentication binding", async ({ page }) => {
-  let confirmation: Record<string, unknown> | null = null;
-  await page.unroute("**/api/v4/cases/*/artifact-review");
-  await page.route("**/api/v4/cases/*/artifact-review", (route) => route.fulfill({ json: artifactReview }));
-  await page.route("**/api/v4/artifacts/current/confirm", async (route) => {
-    confirmation = route.request().postDataJSON();
-    return route.fulfill({ json: { receipt_type: "ARTIFACT_CONFIRMATION" } });
+test("presents active and completed Workshop states as an honest chat", async ({ page }) => {
+  await page.goto("/");
+
+  const chatPanel = page.locator(".chat-panel");
+  const conversation = page.getByRole("log", { name: "Workshop conversation" });
+  const composer = page.getByRole("form", { name: "Workshop response" });
+  await expect(conversation.getByText(question.exact_text)).toBeVisible();
+  await expect(conversation.getByText(priorQuestion.exact_text)).toBeVisible();
+  await expect(conversation.getByText("Luna · canonical question")).toHaveCount(2);
+  await expect(conversation.getByText("You · chat")).toBeVisible();
+  await expect(page.getByLabel("Your typed response")).toBeEnabled();
+
+  const [panelBox, conversationBox, composerBox] = await Promise.all([
+    chatPanel.boundingBox(),
+    conversation.boundingBox(),
+    composer.boundingBox(),
+  ]);
+  expect(panelBox).not.toBeNull();
+  expect(conversationBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(conversationBox!.y + conversationBox!.height).toBeLessThanOrEqual(composerBox!.y + 1);
+  expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(panelBox!.y + panelBox!.height + 1);
+
+  const completedWorkshop = {
+    ...workshop,
+    workshop_state: "COMPLETED",
+    conversation_phase: "COMPLETE",
+  };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: completedWorkshop }));
+  await page.reload();
+
+  await expect(page.getByText("Workshop complete")).toBeVisible();
+  await expect(page.getByText(question.exact_text)).not.toBeVisible();
+  await expect(page.getByRole("form", { name: "Workshop response" })).not.toBeVisible();
+});
+
+test("keeps an untouched Workshop active with Luna and the composer ready", async ({ page }) => {
+  const untouchedWorkshop = {
+    ...workshop,
+    case_revision: 7,
+    committed_turns: [],
+    proposal_statuses: [],
+  };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: untouchedWorkshop }));
+
+  await page.goto("/");
+
+  const conversation = page.getByRole("log", { name: "Workshop conversation" });
+  await expect(page.getByText("ACTIVE", { exact: true })).toBeVisible();
+  await expect(conversation.getByText(question.exact_text)).toBeVisible();
+  await expect(conversation.getByText("Luna · canonical question")).toBeVisible();
+  await expect(page.getByLabel("Your typed response")).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Finish Workshop" })).toBeDisabled();
+});
+
+test("correction control loads the exact latest response binding and text", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Correct response" }).click();
+  await expect(page.getByLabel("Correct committed response")).toHaveValue(response.normalized_text);
+  await expect(page.getByRole("button", { name: "Save correction" })).toBeEnabled();
+});
+
+test("keeps the next draft local while prior turn analysis is pending", async ({ page }) => {
+  const pendingWorkshop = { ...workshop, turn_submission_status: "ANALYSIS_PENDING" };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: pendingWorkshop }));
+  let responseCalls = 0;
+  await page.route("**/api/workshop/responses", (route) => {
+    responseCalls += 1;
+    return route.fulfill({ status: 409, json: { detail: { code: "TURN_ANALYSIS_IN_PROGRESS" } } });
+  });
+
+  await page.goto("/");
+  const composer = page.getByLabel("Your typed response");
+  await composer.fill("Keep this draft local until analysis finishes.");
+  await expect(composer).toHaveValue("Keep this draft local until analysis finishes.");
+  await expect(page.getByRole("button", { name: "Analyzing previous response…" })).toBeDisabled();
+  await expect(page.getByText("Your previous response is saved. Analysis must finish before you send another.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Correct response" })).toBeDisabled();
+  expect(responseCalls).toBe(0);
+});
+
+test("keeps the Workshop usable while zero-runway analysis looks for ambiguities", async ({ page }) => {
+  const zeroRunwayWorkshop = {
+    ...workshop,
+    question_runway: { questions: [], runway_depth: 0 },
+    turn_submission_status: "ANALYSIS_PENDING",
+    proposal_statuses: [],
+  };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: zeroRunwayWorkshop }));
+
+  await page.goto("/");
+  await expect(page.getByText("No questions are available right now. The analyzer is checking for new ambiguities. This may take a moment.")).toBeVisible();
+  await expect(page.getByText(question.exact_text)).not.toBeVisible();
+  await expect(page.getByRole("button", { name: "Play exact question" })).not.toBeVisible();
+  await expect(page.getByLabel("Your typed response")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Finish Workshop" })).toBeEnabled();
+});
+
+test("playback is user-triggered, exact-text, and does not open a live input socket", async ({ page }) => {
+  let playback: Record<string, unknown> | null = null;
+  const sockets: string[] = [];
+  page.on("websocket", (socket) => sockets.push(socket.url()));
+  await page.route("**/api/workshop/playback", async (route) => {
+    playback = route.request().postDataJSON();
+    return route.fulfill({ json: { accepted: true, exact_text: question.exact_text } });
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "Confirm exact artifact" }).click();
-  await expect(page.getByText("Exact artifact version confirmed")).toBeVisible();
-  const request = confirmation as { confirmation_transcript_event_id: string; actor_authentication: { actor_id: string; assertion_transcript_event_id: string } };
-  expect(request.confirmation_transcript_event_id).toBe(transcriptEventId);
-  expect(request.actor_authentication).toMatchObject({
-    actor_id: bootstrap.pm_actor_id,
-    assertion_transcript_event_id: transcriptEventId,
+  await page.getByRole("button", { name: "Play exact question" }).click();
+  expect(playback).toEqual({
+    question_id: question.question_id,
+    question_version: question.question_version,
+    exact_text: question.exact_text,
   });
+  expect(sockets.some((url) => url.endsWith("/ws/live"))).toBe(false);
+  await expect(page.getByText("Playback has no input or control authority.")).toBeVisible();
+});
+
+test("Confirm, Edit, and Reject use only their explicit proposal endpoints", async ({ page }) => {
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+  await page.route("**/api/workshop/proposals/*/*", async (route) => {
+    calls.push({ url: route.request().url(), body: route.request().postDataJSON() });
+    return route.fulfill({ json: { status: route.request().url().endsWith("/confirm") ? "COMMITTED" : "EDIT_REQUESTED" } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Confirm" }).click();
+  expect(calls[0].url).toContain(`/api/workshop/proposals/${binding.proposal_ref}/confirm`);
+  expect(calls[0].body.binding).toEqual(binding);
+
+  await page.getByRole("button", { name: "Edit" }).click();
+  expect(calls[1].url).toContain(`/api/workshop/proposals/${binding.proposal_ref}/edit`);
+  await expect(page.getByText(/Editing proposal/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Reject" }).click();
+  expect(calls[2].url).toContain(`/api/workshop/proposals/${binding.proposal_ref}/reject`);
+});
+
+test("Finish Workshop is a separate deliberate control with its exact intent", async ({ page }) => {
+  let body: Record<string, unknown> | null = null;
+  const noProposal = { ...workshop, proposal_statuses: [] };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: noProposal }));
+  await page.route("**/api/workshop/finish", async (route) => {
+    body = route.request().postDataJSON();
+    return route.fulfill({ json: { state: "FINISHING_ANALYSIS", replayed: false } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Finish Workshop" }).click();
+  expect(body).toMatchObject({ expected_case_revision: 12 });
+  expect(body).toHaveProperty("client_action_id");
+  await expect(page.getByText("Workshop finish committed. Existing analysis is draining before handoff.")).toBeVisible();
 });
 
 test("preserves the governed three-panel reading order and narrow layout", async ({ page }, testInfo) => {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "CSV Export Workshop" })).toBeVisible();
-  await expect(page.getByText("Technical authority delegated")).toBeVisible();
   const order = await page.locator("main > section").evaluateAll((sections) => sections.map((section) => section.getAttribute("aria-labelledby")));
-  expect(order).toEqual(["voice-title", "source-title", "package-title"]);
+  expect(order).toEqual(["chat-title", "source-title", "govern-title"]);
+  await expect(page.getByText("Technical authority delegated")).toBeVisible();
   if (testInfo.project.name === "narrow") {
     expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBe(0);
-    await expect(page.getByLabel("Text fallback")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Synthesize + audit" })).toBeVisible();
+    await expect(page.getByLabel("Your typed response")).toBeVisible();
   } else {
-    const metrics = await page.locator("main").evaluate((main) => ({
-      columns: getComputedStyle(main).gridTemplateColumns.split(" ").map((value) => Number.parseFloat(value)),
-      heights: Array.from(main.children).map((child) => getComputedStyle(child).height),
-      overflow: Array.from(main.children).map((child) => getComputedStyle(child).overflowY),
-    }));
-    expect(metrics.columns[0] / metrics.columns.reduce((a, b) => a + b, 0)).toBeCloseTo(.32, 1);
-    expect(metrics.columns[1] / metrics.columns.reduce((a, b) => a + b, 0)).toBeCloseTo(.42, 1);
-    expect(metrics.heights).toEqual(["900px", "900px", "900px"]);
-    expect(metrics.overflow).toEqual(["auto", "auto", "auto"]);
+    const columns = await page.locator("main").evaluate((main) => getComputedStyle(main).gridTemplateColumns.split(" ").map(Number.parseFloat));
+    const total = columns.reduce((sum, value) => sum + value, 0);
+    expect(columns[0] / total).toBeCloseTo(.32, 1);
+    expect(columns[1] / total).toBeCloseTo(.42, 1);
   }
 });

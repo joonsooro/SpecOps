@@ -74,7 +74,7 @@ from sw_release_contract import SW_EVIDENCE, SW_IDS
 
 
 ROOT = Path("/Users/rudinro/Desktop/SpecOps/Spec_Eng")
-BACKEND = Path("/Users/rudinro/Desktop/SpecOps/backend")
+BACKEND = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 8, 9, 16, tzinfo=timezone.utc)
 
 

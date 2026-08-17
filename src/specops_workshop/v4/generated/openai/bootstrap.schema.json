@@ -232,10 +232,16 @@
         },
         "suggested_confirmation_mode": {
           "$ref": "#/$defs/SuggestedConfirmationMode"
+        },
+        "title": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
         }
       },
       "required": [
         "candidate_key",
+        "title",
         "problem_keys",
         "coupling_type",
         "coupling_reason",
@@ -256,73 +262,228 @@
       "type": "string"
     },
     "QuestionCandidate": {
-      "additionalProperties": false,
-      "properties": {
-        "addresses_problem_keys": {
-          "items": {
-            "maxLength": 96,
-            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
-            "type": "string"
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "addresses_problem_keys": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 1,
+              "type": "array"
+            },
+            "answer_options": {
+              "items": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 2,
+              "type": "array"
+            },
+            "candidate_key": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "capture_policy": {
+              "$ref": "#/$defs/CapturePolicy"
+            },
+            "prerequisite_problem_keys": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "question_shape": {
+              "const": "CLOSED_ENUM",
+              "type": "string"
+            },
+            "rationale": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "safe_without_current_turn_interpretation": {
+              "type": "boolean"
+            },
+            "text": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            }
           },
-          "maxItems": 20,
-          "minItems": 1,
-          "type": "array"
+          "required": [
+            "candidate_key",
+            "text",
+            "rationale",
+            "question_shape",
+            "capture_policy",
+            "answer_options",
+            "addresses_problem_keys",
+            "prerequisite_problem_keys",
+            "safe_without_current_turn_interpretation"
+          ],
+          "type": "object"
         },
-        "answer_options": {
-          "items": {
-            "maxLength": 255,
-            "minLength": 1,
-            "type": "string"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "addresses_problem_keys": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 1,
+              "type": "array"
+            },
+            "answer_options": {
+              "items": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 0,
+              "type": "array"
+            },
+            "candidate_key": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "capture_policy": {
+              "enum": [
+                "CLARIFICATION_ONLY",
+                "BINDING_DECISION"
+              ],
+              "type": "string"
+            },
+            "prerequisite_problem_keys": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "question_shape": {
+              "const": "OPEN_TEXT",
+              "type": "string"
+            },
+            "rationale": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "safe_without_current_turn_interpretation": {
+              "type": "boolean"
+            },
+            "text": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            }
           },
-          "maxItems": 20,
-          "type": "array"
+          "required": [
+            "candidate_key",
+            "text",
+            "rationale",
+            "question_shape",
+            "capture_policy",
+            "answer_options",
+            "addresses_problem_keys",
+            "prerequisite_problem_keys",
+            "safe_without_current_turn_interpretation"
+          ],
+          "type": "object"
         },
-        "candidate_key": {
-          "maxLength": 96,
-          "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
-          "type": "string"
-        },
-        "capture_policy": {
-          "$ref": "#/$defs/CapturePolicy"
-        },
-        "prerequisite_problem_keys": {
-          "items": {
-            "maxLength": 96,
-            "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
-            "type": "string"
+        {
+          "additionalProperties": false,
+          "properties": {
+            "addresses_problem_keys": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "minItems": 1,
+              "type": "array"
+            },
+            "answer_options": {
+              "items": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 0,
+              "type": "array"
+            },
+            "candidate_key": {
+              "maxLength": 96,
+              "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+              "type": "string"
+            },
+            "capture_policy": {
+              "$ref": "#/$defs/CapturePolicy"
+            },
+            "prerequisite_problem_keys": {
+              "items": {
+                "maxLength": 96,
+                "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
+                "type": "string"
+              },
+              "maxItems": 20,
+              "type": "array"
+            },
+            "question_shape": {
+              "enum": [
+                "CLOSED_BOOLEAN",
+                "CLOSED_INTEGER",
+                "CLOSED_DECIMAL",
+                "CLOSED_TEXT"
+              ],
+              "type": "string"
+            },
+            "rationale": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "safe_without_current_turn_interpretation": {
+              "type": "boolean"
+            },
+            "text": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            }
           },
-          "maxItems": 20,
-          "type": "array"
-        },
-        "question_shape": {
-          "$ref": "#/$defs/QuestionShape"
-        },
-        "rationale": {
-          "maxLength": 20000,
-          "minLength": 1,
-          "type": "string"
-        },
-        "safe_without_current_turn_interpretation": {
-          "type": "boolean"
-        },
-        "text": {
-          "maxLength": 20000,
-          "minLength": 1,
-          "type": "string"
+          "required": [
+            "candidate_key",
+            "text",
+            "rationale",
+            "question_shape",
+            "capture_policy",
+            "answer_options",
+            "addresses_problem_keys",
+            "prerequisite_problem_keys",
+            "safe_without_current_turn_interpretation"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "candidate_key",
-        "text",
-        "rationale",
-        "question_shape",
-        "capture_policy",
-        "answer_options",
-        "addresses_problem_keys",
-        "prerequisite_problem_keys",
-        "safe_without_current_turn_interpretation"
-      ],
-      "type": "object"
+      ]
     },
     "QuestionRunwayCandidate": {
       "additionalProperties": false,
@@ -348,8 +509,8 @@
             "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
             "type": "string"
           },
-          "maxItems": 5,
-          "minItems": 0,
+          "maxItems": 3,
+          "minItems": 3,
           "type": "array"
         }
       },

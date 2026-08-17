@@ -191,6 +191,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v4/workshop/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Complete Workshop */
+        post: operations["complete_workshop_api_v4_workshop_complete_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -538,6 +555,8 @@ export interface components {
              * @enum {string}
              */
             receipt_type: "DECISION_BATCH_RESPONSE";
+            /** Response Transcript Event Id */
+            response_transcript_event_id?: string | null;
             resulting_readiness: components["schemas"]["Readiness"];
             resulting_review_obligation: components["schemas"]["ReviewObligation"];
         };
@@ -1070,6 +1089,11 @@ export interface components {
              */
             command_type: "ADMIT_SPEC_PACKAGE_SYNTHESIS";
             /**
+             * Confirmed Decision Bindings
+             * @default []
+             */
+            confirmed_decision_bindings: components["schemas"]["V4_ConfirmedDecisionSynthesisBinding"][];
+            /**
              * Correlation Id
              * Format: uuid
              */
@@ -1316,7 +1340,7 @@ export interface components {
              * Semantic Quality Contract Version
              * @constant
              */
-            semantic_quality_contract_version: "2.1.0";
+            semantic_quality_contract_version: "2.2.0";
         };
         /** ApplyDecisionBatchResponseCommand */
         V4_ApplyDecisionBatchResponseCommand: {
@@ -1436,6 +1460,46 @@ export interface components {
             /** Next Artifact Version */
             next_artifact_version: number;
         };
+        /** ArtifactIdentityAssignment */
+        V4_ArtifactIdentityAssignment: {
+            /** Canonical Pointer */
+            canonical_pointer: string;
+            /** Entity Kind */
+            entity_kind: string;
+            /**
+             * Foundation Id
+             * Format: uuid
+             */
+            foundation_id: string;
+            /** Ordinal */
+            ordinal: number;
+            /** Slot Key */
+            slot_key: string;
+        };
+        /** ArtifactIdentitySlot */
+        V4_ArtifactIdentitySlot: {
+            /**
+             * Allocation Mode
+             * @enum {string}
+             */
+            allocation_mode: "NEW_ENTITY" | "BOUND_EXISTING";
+            /** Entity Kind */
+            entity_kind: string;
+            /**
+             * Foundation Id
+             * Format: uuid
+             */
+            foundation_id: string;
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Owner
+             * @enum {string}
+             */
+            owner: "ANALYZER" | "FOUNDATION";
+            /** Slot Key */
+            slot_key: string;
+        };
         /** ArtifactReviewSubjectBinding */
         V4_ArtifactReviewSubjectBinding: {
             /**
@@ -1472,6 +1536,13 @@ export interface components {
             planned_identities: components["schemas"]["V4_PlannedArtifactIdentity"][];
             /** Semantic State Hash */
             semantic_state_hash: string;
+            /**
+             * Slots
+             * @default []
+             */
+            slots: components["schemas"]["V4_ArtifactIdentitySlot"][];
+            /** Source Entity Refs */
+            source_entity_refs: components["schemas"]["V4_FoundationEntityRef"][];
             target: components["schemas"]["V4_ArtifactDraftTarget"];
         };
         /** CandidateEntityRef */
@@ -1565,6 +1636,60 @@ export interface components {
          * @enum {string}
          */
         V4_CapturePolicy: "CLARIFICATION_ONLY" | "LOW_RISK_FACT" | "BINDING_DECISION";
+        /** ClaimWorkshopCompleteCommand */
+        V4_ClaimWorkshopCompleteCommand: {
+            /**
+             * Acting Actor Id
+             * Format: uuid
+             */
+            acting_actor_id: string;
+            /**
+             * Case Id
+             * Format: uuid
+             */
+            case_id: string;
+            /** Causation Id */
+            causation_id: string | null;
+            /**
+             * Command Id
+             * Format: uuid
+             */
+            command_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            command_type: "CLAIM_WORKSHOP_COMPLETE";
+            completion_source: components["schemas"]["V4_WorkshopCompletionSource"];
+            /** Completion Transcript Event Id */
+            completion_transcript_event_id: string | null;
+            /** Confirmation Transcript Event Id */
+            confirmation_transcript_event_id: string | null;
+            /**
+             * Correlation Id
+             * Format: uuid
+             */
+            correlation_id: string;
+            /** Expected Case Revision */
+            expected_case_revision: number;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /**
+             * Issued At
+             * Format: date-time
+             */
+            issued_at: string;
+            /**
+             * Protocol Version
+             * @constant
+             */
+            protocol_version: "1.0.0";
+            /**
+             * Session Id
+             * Format: uuid
+             */
+            session_id: string;
+        };
         /**
          * ClusterCouplingType
          * @enum {string}
@@ -1620,6 +1745,8 @@ export interface components {
              * @constant
              */
             protocol_version: "1.0.0";
+            /** @default null */
+            residual_quality_risk_acceptance: components["schemas"]["V4_ResidualQualityRiskAcceptance"] | null;
             /**
              * Session Id
              * Format: uuid
@@ -1645,6 +1772,69 @@ export interface components {
          * @enum {string}
          */
         V4_ConfirmationMappingStatus: "MAPPED" | "CLARIFICATION_REQUIRED";
+        /**
+         * ConfirmedDecisionSynthesisBinding
+         * @description Exact Foundation ceremony needed to project one confirmed decision.
+         */
+        V4_ConfirmedDecisionSynthesisBinding: {
+            /**
+             * Actor Ref
+             * Format: uuid
+             */
+            actor_ref: string;
+            /** Alternatives Considered */
+            alternatives_considered: string[];
+            /**
+             * Authority Validation Id
+             * Format: uuid
+             */
+            authority_validation_id: string;
+            classification: components["schemas"]["V4_Domain"];
+            /**
+             * Confirmation Id
+             * Format: uuid
+             */
+            confirmation_id: string;
+            /**
+             * Confirmed At
+             * Format: date-time
+             */
+            confirmed_at: string;
+            /** Confirmed Case Revision */
+            confirmed_case_revision: number;
+            /** Decision Batch View Hash */
+            decision_batch_view_hash: string;
+            /**
+             * Decision Batch View Id
+             * Format: uuid
+             */
+            decision_batch_view_id: string;
+            /**
+             * Decision Id
+             * Format: uuid
+             */
+            decision_id: string;
+            /** Decision Version */
+            decision_version: number;
+            /** Evidence Ids */
+            evidence_ids: string[];
+            /** Problem Ids */
+            problem_ids: string[];
+            /** Rationale */
+            rationale: string;
+            /**
+             * Review Item Id
+             * Format: uuid
+             */
+            review_item_id: string;
+            /** Statement */
+            statement: string;
+            /**
+             * Transcript Event Id
+             * Format: uuid
+             */
+            transcript_event_id: string;
+        };
         /** ConfirmedSpecSynthesisBinding */
         V4_ConfirmedSpecSynthesisBinding: {
             /** Artifact Key */
@@ -1940,7 +2130,7 @@ export interface components {
              * Reason Code
              * @enum {string}
              */
-            reason_code: "SOURCE_SET_CHANGED" | "CONVERSATION_UNAVAILABLE" | "PROFILE_MISMATCH" | "ANALYZER_CONTRACT_CHANGED" | "CONTEXT_MISMATCH" | "WORKSHOP_CLOSED";
+            reason_code: "SOURCE_SET_CHANGED" | "CONVERSATION_UNAVAILABLE" | "PROFILE_MISMATCH" | "ANALYZER_CONTRACT_CHANGED" | "CONTEXT_MISMATCH" | "PREPARATION_REJECTED" | "WORKSHOP_CLOSED";
             /**
              * Session Id
              * Format: uuid
@@ -2092,8 +2282,6 @@ export interface components {
             foundation_id: string;
             /** Foundation Version */
             foundation_version: number;
-            /** Source Entity Refs */
-            source_entity_refs: components["schemas"]["V4_FoundationEntityRef"][];
         };
         /** ProblemCandidate */
         V4_ProblemCandidate: {
@@ -2251,6 +2439,23 @@ export interface components {
             session_id: string;
             transcript: components["schemas"]["V4_TranscriptFinalizedEvent"];
         };
+        /** ResidualQualityRiskAcceptance */
+        V4_ResidualQualityRiskAcceptance: {
+            /** Acceptance Statement */
+            acceptance_statement: string;
+            /** Accepted Failed Rule Ids */
+            accepted_failed_rule_ids: string[];
+            /**
+             * Audit Id
+             * Format: uuid
+             */
+            audit_id: string;
+            /**
+             * Policy Id
+             * @constant
+             */
+            policy_id: "V0_EXPLICIT_RESIDUAL_SPEC_RISK";
+        };
         /** ReviewConsideration */
         V4_ReviewConsideration: {
             consideration_kind: components["schemas"]["V4_ReviewConsiderationKind"];
@@ -2383,6 +2588,22 @@ export interface components {
          * @enum {string}
          */
         V4_SpeakerAttributionMethod: "VERBAL_SELF_ASSERTION" | "ENTERPRISE_SSO" | "VOICE_SYSTEM";
+        /** SpecEvidenceSupportProposalCandidate */
+        V4_SpecEvidenceSupportProposalCandidate: {
+            /** Claim Pointer */
+            claim_pointer: string;
+            /** Claim Ref */
+            claim_ref: string;
+            /** Evidence Ref */
+            evidence_ref: string;
+            /** Exact Excerpt */
+            exact_excerpt: string;
+            /** Finding Ref */
+            finding_ref: string;
+            /** Locator */
+            locator: string;
+            source_role: components["schemas"]["V4_SourceRole"];
+        };
         /** SpecPackageSynthesisCandidate */
         V4_SpecPackageSynthesisCandidate: {
             /**
@@ -2400,10 +2621,20 @@ export interface components {
              */
             context_id: string;
             /**
+             * Evidence Support Proposals
+             * @default []
+             */
+            evidence_support_proposals: components["schemas"]["V4_SpecEvidenceSupportProposalCandidate"][];
+            /**
              * Foundation Artifact Id
              * Format: uuid
              */
             foundation_artifact_id: string;
+            /**
+             * Identity Assignment Map
+             * @default []
+             */
+            identity_assignment_map: components["schemas"]["V4_ArtifactIdentityAssignment"][];
             /**
              * Identity Plan Id
              * Format: uuid
@@ -2425,7 +2656,7 @@ export interface components {
              * Payload Schema Version
              * @constant
              */
-            payload_schema_version: "4.0.0";
+            payload_schema_version: "4.0.2";
             /** Request Hash */
             request_hash: string;
             /** Semantic State Hash */
@@ -2800,6 +3031,11 @@ export interface components {
             handle: string;
             revision_span: components["schemas"]["V4_TranscriptSpan"] | null;
         };
+        /**
+         * WorkshopCompletionSource
+         * @enum {string}
+         */
+        V4_WorkshopCompletionSource: "BUTTON" | "VOICE_EXPLICIT" | "VOICE_CONFIRMED";
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -2813,6 +3049,51 @@ export interface components {
             /** Error Type */
             type: string;
         };
+        /** WorkshopCompletionIntent */
+        WorkshopCompletionIntent: {
+            /** Operation Key */
+            operation_key: string;
+        };
+        /** WorkshopCompletionOutcome */
+        WorkshopCompletionOutcome: {
+            receipt: components["schemas"]["WorkshopCompletionReceipt"];
+            /** Replayed */
+            replayed: boolean;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "FINISHING_ANALYSIS" | "CLEANUP_PENDING" | "COMPLETE";
+        };
+        /** WorkshopCompletionReceipt */
+        WorkshopCompletionReceipt: {
+            command: components["schemas"]["FoundationCommandReceipt"];
+            /**
+             * Completed At
+             * Format: date-time
+             */
+            completed_at: string;
+            completion_source: components["schemas"]["WorkshopCompletionSource"];
+            /** Completion Transcript Event Id */
+            completion_transcript_event_id: string | null;
+            /** Confirmation Transcript Event Id */
+            confirmation_transcript_event_id: string | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            receipt_type: "WORKSHOP_COMPLETION";
+            /**
+             * State
+             * @constant
+             */
+            state: "FINISHING_ANALYSIS";
+        };
+        /**
+         * WorkshopCompletionSource
+         * @enum {string}
+         */
+        WorkshopCompletionSource: "BUTTON" | "VOICE_EXPLICIT" | "VOICE_CONFIRMED";
     };
     responses: never;
     parameters: never;
@@ -2839,6 +3120,7 @@ export interface operations {
                      * Format: uuid
                      */
                     confirmation_transcript_event_id: string;
+                    residual_quality_risk_acceptance?: components["schemas"]["V4_ResidualQualityRiskAcceptance"] | null;
                 };
             };
         };
@@ -3081,7 +3363,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["V4_ActivateAnalyzerContextCommand"] | components["schemas"]["V4_InvalidateAnalyzerContextCommand"] | components["schemas"]["V4_RecordFinalTranscriptCommand"] | components["schemas"]["V4_AdmitInterviewBriefCommand"] | components["schemas"]["V4_AdmitTurnAnalysisCommand"] | components["schemas"]["V4_AdmitGuidanceCommand"] | components["schemas"]["V4_AdmitReviewNarrationCommand"] | components["schemas"]["V4_AdmitSpecPackageSynthesisCommand"] | components["schemas"]["V4_AdmitTechnicalContractSynthesisCommand"] | components["schemas"]["V4_CaptureLowRiskFactCommand"] | components["schemas"]["V4_MaterializeDecisionBatchReviewCommand"] | components["schemas"]["V4_ApplyDecisionBatchResponseCommand"] | components["schemas"]["V4_MaterializeArtifactReviewCommand"] | components["schemas"]["V4_ConfirmArtifactCommand"];
+                "application/json": components["schemas"]["V4_ActivateAnalyzerContextCommand"] | components["schemas"]["V4_InvalidateAnalyzerContextCommand"] | components["schemas"]["V4_RecordFinalTranscriptCommand"] | components["schemas"]["V4_ClaimWorkshopCompleteCommand"] | components["schemas"]["V4_AdmitInterviewBriefCommand"] | components["schemas"]["V4_AdmitTurnAnalysisCommand"] | components["schemas"]["V4_AdmitGuidanceCommand"] | components["schemas"]["V4_AdmitReviewNarrationCommand"] | components["schemas"]["V4_AdmitSpecPackageSynthesisCommand"] | components["schemas"]["V4_AdmitTechnicalContractSynthesisCommand"] | components["schemas"]["V4_CaptureLowRiskFactCommand"] | components["schemas"]["V4_MaterializeDecisionBatchReviewCommand"] | components["schemas"]["V4_ApplyDecisionBatchResponseCommand"] | components["schemas"]["V4_MaterializeArtifactReviewCommand"] | components["schemas"]["V4_ConfirmArtifactCommand"];
             };
         };
         responses: {
@@ -3091,7 +3373,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AnalyzerContextCommandReceipt"] | components["schemas"]["TranscriptRecordedReceipt"] | components["schemas"]["ProposalAdmissionReceipt"] | components["schemas"]["ArtifactSynthesisAdmissionReceipt"] | components["schemas"]["ReviewNarrationAdmissionReceipt"] | components["schemas"]["LowRiskFactCaptureReceipt"] | components["schemas"]["DecisionBatchReviewReceipt"] | components["schemas"]["DecisionBatchResponseReceipt"] | components["schemas"]["ArtifactReviewReceipt"] | components["schemas"]["ArtifactConfirmationReceipt"];
+                    "application/json": components["schemas"]["AnalyzerContextCommandReceipt"] | components["schemas"]["TranscriptRecordedReceipt"] | components["schemas"]["WorkshopCompletionReceipt"] | components["schemas"]["ProposalAdmissionReceipt"] | components["schemas"]["ArtifactSynthesisAdmissionReceipt"] | components["schemas"]["ReviewNarrationAdmissionReceipt"] | components["schemas"]["LowRiskFactCaptureReceipt"] | components["schemas"]["DecisionBatchReviewReceipt"] | components["schemas"]["DecisionBatchResponseReceipt"] | components["schemas"]["ArtifactReviewReceipt"] | components["schemas"]["ArtifactConfirmationReceipt"];
                 };
             };
             /** @description Conflict */
@@ -3345,6 +3627,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ContractValidationEnvelope"];
+                };
+            };
+        };
+    };
+    complete_workshop_api_v4_workshop_complete_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkshopCompletionIntent"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkshopCompletionOutcome"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FoundationErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

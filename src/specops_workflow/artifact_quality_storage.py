@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -19,6 +21,11 @@ ARTIFACT_QUALITY_TABLE_NAMES = (
     "workshop_artifact_quality_audits",
     "workshop_artifact_quality_findings",
     "workshop_artifact_quality_gate_phases",
+)
+
+EVIDENCE_ASSESSMENT_TABLE_NAMES = (
+    "workshop_artifact_evidence_assessment_runs",
+    "workshop_artifact_evidence_assessments",
 )
 
 
@@ -118,3 +125,94 @@ def define_artifact_quality_tables(metadata: MetaData) -> dict[str, Table]:
         audits.c.state,
     )
     return {audits.name: audits, findings.name: findings, phases.name: phases}
+
+
+def define_evidence_assessment_tables(metadata: MetaData) -> dict[str, Table]:
+    """Append-only exact-pair evidence history, separate from canonical artifacts."""
+
+    if EVIDENCE_ASSESSMENT_TABLE_NAMES[0] in metadata.tables:
+        return {
+            name: metadata.tables[name] for name in EVIDENCE_ASSESSMENT_TABLE_NAMES
+        }
+
+    runs = Table(
+        "workshop_artifact_evidence_assessment_runs",
+        metadata,
+        Column("request_hash", Text, primary_key=True),
+        Column("request_id", Text, nullable=False, unique=True),
+        Column("evaluator_run_id", Text, nullable=False, unique=True),
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False),
+        Column("artifact_id", Text, nullable=False),
+        Column("artifact_version", Integer, nullable=False),
+        Column("assessed_record_revision", Integer, nullable=False),
+        Column("assessed_payload_hash", Text, nullable=False),
+        Column("resulting_record_revision", Integer, nullable=False),
+        Column("resulting_payload_hash", Text, nullable=False),
+        Column("policy_version", Text, nullable=False),
+        Column("provider", Text, nullable=False),
+        Column("model", Text, nullable=False),
+        Column("reasoning_effort", Text, nullable=False),
+        Column("provider_response_id", Text, nullable=False, unique=True),
+        Column("client_request_id", Text, nullable=False, unique=True),
+        Column("canonical_count", Integer, nullable=False),
+        Column("quarantined_count", Integer, nullable=False),
+        Column("request_json", Text, nullable=False),
+        Column("candidate_json", Text, nullable=False),
+        Column("execution_json", Text, nullable=False),
+        Column("created_at", Text, nullable=False),
+        ForeignKeyConstraint(
+            ("artifact_id", "artifact_version"),
+            (
+                "workshop_artifact_records.artifact_id",
+                "workshop_artifact_records.artifact_version",
+            ),
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("canonical_count >= 0"),
+        CheckConstraint("quarantined_count >= 0"),
+    )
+    assessments = Table(
+        "workshop_artifact_evidence_assessments",
+        metadata,
+        Column(
+            "request_hash",
+            Text,
+            ForeignKey(
+                "workshop_artifact_evidence_assessment_runs.request_hash",
+                ondelete="RESTRICT",
+            ),
+            primary_key=True,
+        ),
+        Column("pair_id", Text, primary_key=True),
+        Column("claim_ref", Text, nullable=False),
+        Column("claim_pointer", Text, nullable=False),
+        Column("claim_hash", Text, nullable=False),
+        Column("evidence_ref", Text, nullable=False),
+        Column("source_id", Text, nullable=False),
+        Column("source_hash", Text, nullable=False),
+        Column("excerpt_hash", Text, nullable=False),
+        Column("assessment", Text, nullable=False),
+        Column("confidence", Float, nullable=False),
+        Column("disposition", Text, nullable=False),
+        Column("pair_json", Text, nullable=False),
+        Column("assessment_json", Text, nullable=False),
+        Column("created_at", Text, nullable=False),
+        CheckConstraint(
+            "assessment IN ('SUPPORTS', 'SUGGESTS', 'CONTRADICTS', "
+            "'INSUFFICIENT', 'AMBIGUOUS')"
+        ),
+        CheckConstraint("disposition IN ('CANONICAL', 'QUARANTINED')"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1"),
+    )
+    Index(
+        "ix_workshop_artifact_evidence_assessment_subject",
+        runs.c.case_id,
+        runs.c.artifact_id,
+        runs.c.artifact_version,
+    )
+    Index(
+        "ix_workshop_artifact_evidence_assessment_outcome",
+        assessments.c.assessment,
+        assessments.c.disposition,
+    )
+    return {runs.name: runs, assessments.name: assessments}

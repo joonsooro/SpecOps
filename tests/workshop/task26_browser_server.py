@@ -14,6 +14,10 @@ from specops_workshop.api import create_app
 from specops_workshop.config import Settings
 from specops_workshop.sources import SourceCatalog
 from specops_workflow.workshop_protocol import WorkshopFoundationService
+from specops_workflow.spec_identity_materialization import (
+    SPEC_ANALYZER_COLLECTIONS,
+    spec_collection_slot_assignments,
+)
 
 from test_feature_26_v4_production_seam import DeterministicAdapter
 from v4_payload_factory import (
@@ -25,8 +29,104 @@ from v4_quality_factory import DeterministicQualityEvaluator
 
 
 BACKEND = Path(__file__).resolve().parents[2]
-SPEC_ENG = BACKEND.parent / "Spec_Eng"
+SPEC_ENG = next(
+    parent for parent in Path(__file__).resolve().parents if parent.name == "Spec_Eng"
+)
 _temporary = tempfile.TemporaryDirectory(prefix="specops-task26-browser-")
+
+
+def _bind_matching_planned_identities(payload: dict, identity_plan) -> dict:
+    """Use the first available server-owned identity of each required kind."""
+
+    available: dict[str, list] = {}
+    for planned in identity_plan.planned_identities:
+        available.setdefault(planned.entity_kind, []).append(planned.foundation_id)
+    mapping = {}
+    for original, kind in WorkshopFoundationService._artifact_identity_kinds(payload).items():
+        try:
+            mapping[original] = available[kind].pop(0)
+        except (KeyError, IndexError) as exc:
+            raise AssertionError(f"identity plan lacks required {kind} capacity") from exc
+    return bind_planned_identities(payload, mapping)
+
+
+def _provider_owned_spec_payload(payload: dict, identity_plan) -> dict:
+    """Mirror production: local handles carry semantics; Foundation owns IDs."""
+
+    # Keep the generated actor just long enough to bind every actor_ref to the
+    # Foundation-allocated ACTOR slot. No unconfirmed decision may be emitted.
+    payload["decisions"] = []
+    payload["evidence_catalog"] = []
+    payload["semantic_evidence_findings"] = []
+    payload = _bind_matching_planned_identities(payload, identity_plan)
+    bind_fixture_references(payload)
+    payload.pop("actors")
+    payload.pop("decisions")
+    payload.pop("evidence_catalog")
+    payload.pop("semantic_evidence_findings")
+
+    def project_provider_owned_refs(value):
+        if isinstance(value, dict):
+            for key, item in tuple(value.items()):
+                if key in {"source_evidence_refs", "evidence_refs"}:
+                    value.pop(key)
+                elif key == "decision_refs":
+                    value[key] = []
+                else:
+                    project_provider_owned_refs(item)
+        elif isinstance(value, list):
+            for item in value:
+                project_provider_owned_refs(item)
+
+    project_provider_owned_refs(payload)
+
+    slot_assignments = spec_collection_slot_assignments(identity_plan.slots)
+    kind_offsets: dict[str, int] = {}
+    selected_by_path = {}
+    identity_to_handle = {}
+    for path, kind in SPEC_ANALYZER_COLLECTIONS:
+        collection = payload
+        for part in path:
+            collection = collection[part]
+        start = kind_offsets.get(kind, 0)
+        selected = slot_assignments[path][start : start + len(collection)]
+        kind_offsets[kind] = start + len(collection)
+        if len(selected) != len(collection):
+            raise AssertionError(f"identity plan lacks local {kind} capacity")
+        selected_by_path[path] = selected
+        identity_to_handle.update(
+            (item["id"], slot.slot_key)
+            for item, slot in zip(collection, selected, strict=True)
+        )
+
+    def rewrite_dict_scalars(value):
+        if isinstance(value, dict):
+            for child_key, child in tuple(value.items()):
+                if child_key != "id" and isinstance(child, str):
+                    value[child_key] = identity_to_handle.get(child, child)
+                else:
+                    rewrite_dict_scalars(child)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                if isinstance(child, str):
+                    value[index] = identity_to_handle.get(child, child)
+                else:
+                    rewrite_dict_scalars(child)
+
+    rewrite_dict_scalars(payload)
+    for path, _kind in SPEC_ANALYZER_COLLECTIONS:
+        parent = payload
+        for part in path[:-1]:
+            parent = parent[part]
+        collection = parent[path[-1]]
+        slots = slot_assignments[path]
+        keyed = {slot.slot_key: None for slot in slots}
+        for item, slot in zip(collection, selected_by_path[path], strict=True):
+            body = dict(item)
+            body.pop("id")
+            keyed[slot.slot_key] = body
+        parent[path[-1]] = keyed
+    return payload
 
 
 class BrowserAnalyzerAdapter(DeterministicAdapter):
@@ -36,36 +136,7 @@ class BrowserAnalyzerAdapter(DeterministicAdapter):
             payload = PayloadFactory(full_identity_plan=True).payload(
                 "spec-package-payload.schema.json"
             )
-            identities = WorkshopFoundationService._artifact_identity_kinds(payload)
-            payload = bind_planned_identities(
-                payload,
-                {
-                    original: planned.foundation_id
-                    for original, planned in zip(
-                        identities, request.identity_plan.planned_identities, strict=True
-                    )
-                },
-            )
-            bind_fixture_references(payload)
-            source_evidence = request.foundation_snapshot.evidence[0]
-            evidence = payload["evidence_catalog"][0]
-            evidence.update(
-                source_id=str(context.source_set.ordered_sources[0].source.source_id),
-                source_hash=source_evidence.source_hash,
-                excerpt_hash=source_evidence.excerpt_hash,
-                claim_refs=[payload["requirements"][0]["id"]],
-            )
-            finding = payload["semantic_evidence_findings"][0]
-            finding.update(
-                claim_ref=payload["requirements"][0]["id"],
-                evidence_ref=evidence["id"],
-                source_hash=source_evidence.source_hash,
-                excerpt_hash=source_evidence.excerpt_hash,
-                analyzer_run_id=str(request.analyzer_run_id),
-            )
-            for decision in payload["decisions"]:
-                decision["status"] = "deferred"
-                decision["confirmation_binding"] = None
+            payload = _provider_owned_spec_payload(payload, request.identity_plan)
             return c.SpecPackageSynthesisCandidate(
                 output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
                 analyzer_run_id=request.analyzer_run_id,
@@ -87,16 +158,7 @@ class BrowserAnalyzerAdapter(DeterministicAdapter):
             payload = PayloadFactory(full_identity_plan=True).payload(
                 "technical-contract-payload.schema.json"
             )
-            identities = WorkshopFoundationService._artifact_identity_kinds(payload)
-            payload = bind_planned_identities(
-                payload,
-                {
-                    original: planned.foundation_id
-                    for original, planned in zip(
-                        identities, request.identity_plan.planned_identities, strict=True
-                    )
-                },
-            )
+            payload = _bind_matching_planned_identities(payload, request.identity_plan)
             confirmed_spec = json.loads(request.confirmed_spec.canonical_payload_json)
             bind_fixture_references(payload, confirmed_spec)
             source_evidence = request.foundation_snapshot.evidence[0]

@@ -1,0 +1,308 @@
+{
+  "checks": [
+    {
+      "name": "pytest",
+      "status": "PASS"
+    },
+    {
+      "name": "vitest",
+      "status": "PASS"
+    },
+    {
+      "name": "frontend-build",
+      "status": "PASS"
+    },
+    {
+      "name": "playwright",
+      "status": "PASS"
+    },
+    {
+      "name": "playwright-real-v4",
+      "status": "PASS"
+    }
+  ],
+  "evidence": {
+    "SW-EV-001": [
+      {
+        "kind": "playwright",
+        "name": "renders the immutable artifact projection and real V4 pipeline controls",
+        "outcome": "PASS",
+        "path": "frontend/e2e/workshop.spec.ts"
+      }
+    ],
+    "SW-EV-002": [
+      {
+        "kind": "pytest",
+        "name": "test_s2_c1_native_schemas_and_two_block_egress_are_identity_free",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_24_productive_turn.py"
+      }
+    ],
+    "SW-EV-003": [
+      {
+        "kind": "pytest",
+        "name": "test_delegation_identity_scope_and_frontmatter_fail_closed",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      }
+    ],
+    "SW-EV-004": [
+      {
+        "kind": "pytest",
+        "name": "test_partial_readiness_selective_revision_and_restart",
+        "outcome": "PASS",
+        "path": "tests/test_feature_13_package_items.py"
+      }
+    ],
+    "SW-EV-005": [
+      {
+        "kind": "pytest",
+        "name": "test_binary_audio_text_interrupt_and_end_share_one_live_session",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_16_live_transport.py"
+      }
+    ],
+    "SW-EV-006": [
+      {
+        "kind": "pytest",
+        "name": "test_final_transcripts_are_immutable_correctable_deduplicated_and_resumable",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_15_recovery.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_interruption_marker_is_idempotent_and_recoverable",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      }
+    ],
+    "SW-EV-007": [
+      {
+        "kind": "vitest",
+        "name": "distinguishes speech energy from silence within one 20 ms frame",
+        "outcome": "PASS",
+        "path": "frontend/src/audio/liveClient.test.ts"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_five_stage_spans_and_thirty_turn_latency_bar",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      }
+    ],
+    "SW-EV-008": [
+      {
+        "kind": "pytest",
+        "name": "test_five_stage_spans_and_thirty_turn_latency_bar",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      }
+    ],
+    "SW-EV-009": [
+      {
+        "kind": "pytest",
+        "name": "test_substantive_voice_continuation_waits_for_typed_confirmed_foundation_commit",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_17_analyzer_gate.py"
+      }
+    ],
+    "SW-EV-010": [
+      {
+        "kind": "pytest",
+        "name": "test_semantic_grounding_rejects_an_unrelated_conclusion",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_missing_fields_reused_keys_and_model_uuid_are_rejected",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_17_analyzer_gate.py"
+      }
+    ],
+    "SW-EV-011": [
+      {
+        "kind": "pytest",
+        "name": "test_control_acknowledgement_question_and_extra_fields_are_strict",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_17_analyzer_gate.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_substantive_voice_continuation_waits_for_typed_confirmed_foundation_commit",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_17_analyzer_gate.py"
+      }
+    ],
+    "SW-EV-012": [
+      {
+        "kind": "pytest",
+        "name": "test_final_evidence_proposes_without_mutation_then_confirm_commits_exact_cross_domain_item",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_17_analyzer_gate.py"
+      },
+      {
+        "kind": "playwright",
+        "name": "partial browser decisions use the current Foundation view and leave omissions pending",
+        "outcome": "PASS",
+        "path": "frontend/e2e/workshop.spec.ts"
+      }
+    ],
+    "SW-EV-013": [
+      {
+        "kind": "pytest",
+        "name": "test_confirmation_requires_explicit_prompt_context_and_generic_ack_is_not_a_commit",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_17_analyzer_gate.py"
+      }
+    ],
+    "SW-EV-014": [
+      {
+        "kind": "pytest",
+        "name": "test_final_evidence_proposes_without_mutation_then_confirm_commits_exact_cross_domain_item",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_17_analyzer_gate.py"
+      }
+    ],
+    "SW-EV-015": [
+      {
+        "kind": "pytest",
+        "name": "test_delegated_cross_domain_item_is_ready_with_later_review_until_direct_approval",
+        "outcome": "PASS",
+        "path": "tests/test_feature_13_package_items.py"
+      }
+    ],
+    "SW-EV-016": [
+      {
+        "kind": "pytest",
+        "name": "test_explicit_technical_blocker_creates_native_decision_request_and_may_finish",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_19_finish_handoff.py"
+      }
+    ],
+    "SW-EV-017": [
+      {
+        "kind": "pytest",
+        "name": "test_partial_readiness_selective_revision_and_restart",
+        "outcome": "PASS",
+        "path": "tests/test_feature_13_package_items.py"
+      }
+    ],
+    "SW-EV-018": [
+      {
+        "kind": "pytest",
+        "name": "test_finish_runs_medium_audit_keeps_voice_live_and_exposes_exact_idempotent_handoff",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_19_finish_handoff.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_pending_patch_prevents_finish_before_medium_audit",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_19_finish_handoff.py"
+      }
+    ],
+    "SW-EV-019": [
+      {
+        "kind": "playwright",
+        "name": "artifact confirmation sends the exact final transcript authentication binding",
+        "outcome": "PASS",
+        "path": "frontend/e2e/workshop.spec.ts"
+      }
+    ],
+    "SW-EV-020": [
+      {
+        "kind": "pytest",
+        "name": "test_midstream_provider_and_device_failure_keep_text_fallback",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_reconnect_sends_only_authorized_exact_context_in_turn_version_order",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_19_finish_handoff.py"
+      }
+    ],
+    "SW-EV-021": [
+      {
+        "kind": "pytest",
+        "name": "test_unknown_after_foundation_commit_replays_same_command_without_duplicate_audit",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_15_recovery.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_unexplained_foundation_revision_locks_session_without_alternate_state",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_15_recovery.py"
+      }
+    ],
+    "SW-EV-022": [
+      {
+        "kind": "pytest",
+        "name": "test_operational_telemetry_redacts_and_secrets_stay_opaque",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_audio_buffers_are_hard_bounded_and_never_touch_disk",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_16_live_transport.py"
+      }
+    ],
+    "SW-EV-023": [
+      {
+        "kind": "pytest",
+        "name": "test_downstream_boundary_has_no_platform_runtime_surface",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_20_release.py"
+      },
+      {
+        "kind": "pytest",
+        "name": "test_finish_runs_medium_audit_keeps_voice_live_and_exposes_exact_idempotent_handoff",
+        "outcome": "PASS",
+        "path": "tests/workshop/test_feature_19_finish_handoff.py"
+      }
+    ],
+    "SW-EV-024": [
+      {
+        "kind": "live",
+        "name": "real Gemini audio plus Terra decision and explicit governed commit",
+        "outcome": "NOT_RUN",
+        "path": "tests/workshop/live_workshop_probe.py"
+      }
+    ]
+  },
+  "generated_at": "2026-08-16T07:49:05.574084Z",
+  "inventory": [
+    "SW-EV-001",
+    "SW-EV-002",
+    "SW-EV-003",
+    "SW-EV-004",
+    "SW-EV-005",
+    "SW-EV-006",
+    "SW-EV-007",
+    "SW-EV-008",
+    "SW-EV-009",
+    "SW-EV-010",
+    "SW-EV-011",
+    "SW-EV-012",
+    "SW-EV-013",
+    "SW-EV-014",
+    "SW-EV-015",
+    "SW-EV-016",
+    "SW-EV-017",
+    "SW-EV-018",
+    "SW-EV-019",
+    "SW-EV-020",
+    "SW-EV-021",
+    "SW-EV-022",
+    "SW-EV-023",
+    "SW-EV-024"
+  ],
+  "mode": "deterministic",
+  "passed": true,
+  "schema_version": 1
+}

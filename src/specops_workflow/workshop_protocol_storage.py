@@ -34,11 +34,28 @@ V4_TABLE_NAMES = (
     "workshop_protocol_events",
 )
 
+V0_RUNTIME_TABLE_NAMES = (
+    "workshop_preparations",
+    "workshop_preparation_resources",
+    "workshop_provider_responses",
+    "workshop_runway_items",
+    "workshop_analyzer_jobs",
+)
+
+# Task 28 is an additive application seam over the frozen Workshop Protocol.
+# Keep these names out of V0_RUNTIME_TABLE_NAMES: migration 0005 imports that
+# tuple and must continue to represent the exact historical Task 27 schema.
+TASK28_RUNTIME_TABLE_NAMES = (
+    "workshop_typed_responses",
+    "workshop_visual_proposal_actions",
+)
+
 
 def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
     """Register the V4 tables on the one canonical Foundation metadata graph."""
 
-    if V4_TABLE_NAMES[0] in metadata.tables:
+    all_names = (*V4_TABLE_NAMES, *V0_RUNTIME_TABLE_NAMES, *TASK28_RUNTIME_TABLE_NAMES)
+    if all(name in metadata.tables for name in all_names):
         return {name: metadata.tables[name] for name in V4_TABLE_NAMES}
 
     tables: dict[str, Table] = {}
@@ -241,6 +258,123 @@ def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
         Column("occurred_at", Text, nullable=False),
         UniqueConstraint("case_id", "event_sequence"),
     )
+    table(
+        "workshop_preparations",
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True),
+        Column("preparation_id", Text, nullable=False, unique=True),
+        Column("phase", Text, nullable=False),
+        Column("started_at", Text, nullable=False),
+        Column("updated_at", Text, nullable=False),
+        Column("ready_at", Text),
+        Column("failure_code", Text),
+        Column("cleanup_state", Text, nullable=False),
+        Column("cleanup_reason", Text),
+        Column("last_client_disconnected_at", Text),
+        Column("restart_grace_until", Text),
+        Column("workshop_complete_at", Text),
+        Column("cleanup_available_at", Text),
+        Column("cleanup_last_error_code", Text),
+    )
+    table(
+        "workshop_preparation_resources",
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True),
+        Column("source_set_hash", Text, nullable=False),
+        Column("pm_file_id", Text),
+        Column("technical_file_id", Text),
+        Column("provider_conversation_id", Text),
+        Column("bootstrap_request_id", Text, nullable=False),
+        Column("bootstrap_response_id", Text),
+        Column("bootstrap_candidate_json", Text),
+        Column("context_json", Text),
+        Column("updated_at", Text, nullable=False),
+    )
+    table(
+        "workshop_provider_responses",
+        Column(
+            "case_id",
+            Text,
+            ForeignKey("cases.id", ondelete="RESTRICT"),
+            primary_key=True,
+        ),
+        Column("client_request_id", Text, primary_key=True),
+        Column("operation", Text, nullable=False),
+        Column("provider_response_id", Text, unique=True),
+        Column("recorded_at", Text, nullable=False),
+        Column("cleared_at", Text),
+    )
+    table(
+        "workshop_runway_items",
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), primary_key=True),
+        Column("guidance_id", Text, primary_key=True),
+        Column("question_id", Text, primary_key=True),
+        Column("question_version", Integer, nullable=False),
+        Column("position", Integer, nullable=False),
+        Column("exact_text", Text, nullable=False),
+        Column("reason", Text, nullable=False),
+        Column("status", Text, nullable=False),
+        Column("admitted_at", Text, nullable=False),
+        Column("consumed_at", Text),
+        UniqueConstraint("case_id", "guidance_id", "position"),
+    )
+    table(
+        "workshop_analyzer_jobs",
+        Column("job_id", Text, primary_key=True),
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False),
+        Column("session_id", Text, nullable=False),
+        Column("operation", Text, nullable=False),
+        Column("subject_id", Text, nullable=False),
+        Column("dedupe_key", Text, nullable=False, unique=True),
+        Column("priority", Integer, nullable=False),
+        Column("state", Text, nullable=False),
+        Column("provider_request_id", Text, nullable=False),
+        Column("request_json", Text),
+        Column("candidate_json", Text),
+        Column("admission_receipt_json", Text),
+        Column("attempt_count", Integer, nullable=False),
+        Column("lease_owner", Text),
+        Column("lease_expires_at", Text),
+        Column("available_at", Text, nullable=False),
+        Column("last_error_code", Text),
+        Column("created_at", Text, nullable=False),
+        Column("updated_at", Text, nullable=False),
+        UniqueConstraint("case_id", "operation", "subject_id"),
+    )
+    table(
+        "workshop_typed_responses",
+        Column("response_id", Text, primary_key=True),
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False),
+        Column("session_id", Text, nullable=False),
+        Column("question_id", Text, nullable=False),
+        Column("question_version", Integer, nullable=False),
+        Column("turn_sequence", Integer, nullable=False),
+        Column("response_version", Integer, nullable=False),
+        Column("normalized_text", Text, nullable=False),
+        Column("content_hash", Text, nullable=False),
+        Column("final_source_ref_json", Text, nullable=False),
+        Column("client_submission_id", Text, nullable=False, unique=True),
+        Column("request_fingerprint", Text, nullable=False),
+        Column("correction_of_response_id", Text),
+        Column("edit_target_json", Text),
+        Column("input_channel", Text, nullable=False),
+        Column("channel_confirmation_receipt_id", Text),
+        Column("question_snapshot_json", Text, nullable=False),
+        Column("transcript_event_id", Text, nullable=False, unique=True),
+        Column("created_at", Text, nullable=False),
+        UniqueConstraint("case_id", "session_id", "turn_sequence", "response_version"),
+    )
+    table(
+        "workshop_visual_proposal_actions",
+        Column("client_action_id", Text, primary_key=True),
+        Column("case_id", Text, ForeignKey("cases.id", ondelete="RESTRICT"), nullable=False),
+        Column("proposal_ref", Text, nullable=False),
+        Column("proposal_version", Integer, nullable=False),
+        Column("action_sequence", Integer, nullable=False),
+        Column("action", Text, nullable=False),
+        Column("binding_json", Text, nullable=False),
+        Column("request_fingerprint", Text, nullable=False),
+        Column("result_json", Text, nullable=False),
+        Column("created_at", Text, nullable=False),
+    )
 
     Index(
         "ix_workshop_semantic_records_current",
@@ -254,4 +388,10 @@ def define_workshop_protocol_tables(metadata: MetaData) -> dict[str, Table]:
         tables["workshop_artifact_records"].c.artifact_type,
         tables["workshop_artifact_records"].c.artifact_version,
     )
-    return tables
+    Index(
+        "ix_workshop_analyzer_jobs_eligible",
+        tables["workshop_analyzer_jobs"].c.state,
+        tables["workshop_analyzer_jobs"].c.priority,
+        tables["workshop_analyzer_jobs"].c.available_at,
+    )
+    return {name: tables[name] for name in V4_TABLE_NAMES}

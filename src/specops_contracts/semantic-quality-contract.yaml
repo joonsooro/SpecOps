@@ -1,6 +1,6 @@
 contract:
   id: SEMANTIC-QUALITY-CONTRACT
-  version: "2.1.0"
+  version: "2.2.0"
   purpose: >-
     Define the semantic conditions under which a Spec Package may be confirmed
     and a Technical Contract may enter downstream handoff.
@@ -415,18 +415,22 @@ spec_package_rules:
     failure_effect: REJECT_MUTATION
 
   - id: SPEC-Q-026
-    name: Evidence semantically supports the claim
+    name: Evidence is traceably relevant to the claim
     dimension: evidence
     check_types: [semantic, referential]
     gate: block_confirmation
     primary_evaluator: analyzer
     requirement: >-
-      Every must-level claim that relies on evidence must have a current Analyzer finding bound
-      to the exact claim hash, evidence record, source hash, and excerpt hash.
+      Every must-level claim that carries a canonical evidence link must have a current Analyzer
+      finding bound to the exact claim hash, evidence record, source hash, and excerpt hash.
+      V0 canonical evidence may SUPPORT or SUGGEST the exact claim; a suggestion is relevance,
+      not proof, and its assessment and confidence must remain explicit.
     pass_condition: >-
-      The admitted finding assesses the cited evidence as SUPPORTS for the exact current claim;
-      SUGGESTS, CONTRADICTS, INSUFFICIENT, or AMBIGUOUS does not satisfy this rule.
-    evidence_of_pass: Version-bound Analyzer semantic-evidence finding admitted by Foundation under the current Analyzer contract.
+      Every canonical evidence link has an admitted SUPPORTS or SUGGESTS finding for the exact
+      current claim, and no canonical link is assessed CONTRADICTS, INSUFFICIENT, or AMBIGUOUS.
+      Foundation retains every negative or indeterminate assessment outside the canonical artifact
+      so later proof or Analyzer improvement can re-evaluate it without relabeling history.
+    evidence_of_pass: Version-bound Analyzer semantic-evidence finding plus Foundation canonical/quarantine disposition under the current Analyzer contract.
     failure_effect: NEEDS_CLARIFICATION
 
 technical_contract_rules:

@@ -2,23 +2,129 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
+import json
+import hashlib
 
+import pytest
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
 from pydantic import SecretStr
 
 from specops_contracts import workshop_v1 as c
-from specops_contracts.canonical import analyzer_request_hash
+from specops_contracts import artifact_quality_v1 as q
+from specops_contracts.canonical import analyzer_request_hash, payload_hash
 from specops_workshop.api import create_app
 from specops_workshop.config import Settings
 from specops_workshop.sources import SourceCatalog
-from specops_workshop.v4.openai_adapter import BootstrapResult, PreparedProviderContext
-from specops_workshop.v4.orchestrator import V4ProductionOrchestrator
+from specops_workshop.v4.openai_adapter import (
+    BootstrapResult,
+    PreparedProviderContext,
+    ProviderAdapterError,
+    ProviderSourceUpload,
+)
+from specops_workshop.v4.artifact_quality_adapter import ArtifactEvidenceSupportEvaluation
+from specops_workshop.v4.orchestrator import (
+    ProviderOperationAdmission,
+    V4ProductionOrchestrator,
+)
+from specops_workshop.v4.api import ArtifactSynthesisIntent, synthesize_artifact
+from specops_workflow.workshop_protocol import FoundationProtocolError
 
 
-ROOT = Path(__file__).resolve().parents[3] / "Spec_Eng"
+ROOT = next(
+    parent for parent in Path(__file__).resolve().parents if parent.name == "Spec_Eng"
+)
+
+
+def test_synthesis_http_error_preserves_only_foundation_safe_pointers():
+    class RejectingOrchestrator:
+        @staticmethod
+        async def synthesize_artifact(artifact_type, *, operation_key):
+            assert artifact_type == "SPEC_PACKAGE"
+            assert operation_key == "diagnose-identity-plan"
+            raise FoundationProtocolError(
+                c.FoundationRejectionCode.IDENTITY_PLAN_FAILED,
+                safe_diagnostic_pointers=(
+                    "/evidence_support_proposals/0/claim_pointer",
+                ),
+            )
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                workshop_protocol_orchestrator=RejectingOrchestrator()
+            )
+        )
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            synthesize_artifact(
+                request,
+                "SPEC_PACKAGE",
+                ArtifactSynthesisIntent(operation_key="diagnose-identity-plan"),
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == {
+        "code": "IDENTITY_PLAN_FAILED",
+        "diagnostic_pointers": [
+            "/evidence_support_proposals/0/claim_pointer",
+        ],
+    }
+
+
+def test_synthesis_provider_error_preserves_only_safe_failure_fields():
+    class RejectingOrchestrator:
+        @staticmethod
+        async def synthesize_artifact(artifact_type, *, operation_key):
+            assert artifact_type == "SPEC_PACKAGE"
+            assert operation_key == "diagnose-provider-failure"
+            raise ProviderAdapterError(
+                c.ProviderFailureReceipt(
+                    provider=c.ProviderName.OPENAI,
+                    stage=c.ProviderProcessingStage.SPEC_PACKAGE_SYNTHESIS,
+                    client_request_id="client-private-provider-identity",
+                    provider_request_id="req_private_provider_identity",
+                    status_code=None,
+                    code=c.ProviderFailureCode.UNKNOWN_SAFE,
+                    retryable=False,
+                    validation_diagnostics=(),
+                    occurred_at=datetime.now(timezone.utc),
+                )
+            )
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                workshop_protocol_orchestrator=RejectingOrchestrator()
+            )
+        )
+    )
+
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            synthesize_artifact(
+                request,
+                "SPEC_PACKAGE",
+                ArtifactSynthesisIntent(operation_key="diagnose-provider-failure"),
+            )
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.detail == {
+        "code": "UNKNOWN_SAFE",
+        "stage": "SPEC_PACKAGE_SYNTHESIS",
+        "status_code": None,
+        "retryable": False,
+        "validation_diagnostics": [],
+    }
+    assert "private_provider_identity" not in repr(error.value.detail)
 
 
 class DeterministicAdapter:
@@ -70,16 +176,19 @@ class DeterministicAdapter:
             consequence="The export behavior cannot yet be confirmed.",
             evidence_candidate_keys=("evidence-export",),
         )
-        question = c.QuestionCandidate(
-            candidate_key="question-export",
-            text="Which export behavior should be confirmed?",
-            rationale="The product decision requires a human answer.",
-            question_shape=c.QuestionShape.OPEN_TEXT,
-            capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
-            answer_options=(),
-            addresses_problem_keys=("problem-export",),
-            prerequisite_problem_keys=(),
-            safe_without_current_turn_interpretation=True,
+        questions = tuple(
+            c.QuestionCandidate(
+                candidate_key=f"question-export-{index}",
+                text=f"Which export behavior should be confirmed for area {index}?",
+                rationale="The product decision requires an independently safe human answer.",
+                question_shape=c.QuestionShape.OPEN_TEXT,
+                capture_policy=c.CapturePolicy.CLARIFICATION_ONLY,
+                answer_options=(),
+                addresses_problem_keys=("problem-export",),
+                prerequisite_problem_keys=(),
+                safe_without_current_turn_interpretation=True,
+            )
+            for index in range(1, c.INITIAL_RUNWAY_DEPTH + 1)
         )
         candidate = c.InterviewBriefCandidate(
             protocol_version="1.0.0",
@@ -93,10 +202,13 @@ class DeterministicAdapter:
             evidence_candidates=(evidence,),
             problems=(problem,),
             problem_clusters=(),
-            questions=(question,),
+            questions=questions,
             initial_runway=c.QuestionRunwayCandidate(
-                recommended_question_key="question-export",
-                safe_alternate_question_keys=(),
+                recommended_question_key="question-export-1",
+                safe_alternate_question_keys=tuple(
+                    f"question-export-{index}"
+                    for index in range(2, c.INITIAL_RUNWAY_DEPTH + 1)
+                ),
                 do_not_ask_question_keys=(),
             ),
             confirmation_checkpoints=(),
@@ -165,6 +277,190 @@ def configured(tmp_path):
     )
 
 
+def test_spec_evidence_support_is_checkpointed_then_materialized_before_audit():
+    case_id = UUID("70000000-0000-4000-8000-000000000001")
+    session_id = UUID("70000000-0000-4000-8000-000000000002")
+    artifact_id = UUID("70000000-0000-4000-8000-000000000003")
+    claim_id = UUID("70000000-0000-4000-8000-000000000004")
+    evidence_id = UUID("70000000-0000-4000-8000-000000000005")
+    finding_id = UUID("70000000-0000-4000-8000-000000000006")
+    source_id = UUID("70000000-0000-4000-8000-000000000007")
+    source_text = "Only authorized users may export."
+    source_hash = "sha256:" + hashlib.sha256(source_text.encode()).hexdigest()
+    payload = {
+        "requirements": [
+            {
+                "id": str(claim_id),
+                "behaviour": "Only authorized users may export.",
+            }
+        ],
+        "evidence_catalog": [
+            {
+                "id": str(evidence_id),
+                "source_id": str(source_id),
+                "source_hash": source_hash,
+                "locator": "PM source line 1",
+                "excerpt_hash": "sha256:"
+                + hashlib.sha256(source_text.encode()).hexdigest(),
+                "claim_refs": [str(claim_id)],
+            }
+        ],
+        "semantic_evidence_findings": [],
+    }
+    record = {
+        "artifact_id": str(artifact_id),
+        "artifact_version": 1,
+        "record_revision": 1,
+        "payload_hash": payload_hash(payload),
+        "payload_json": json.dumps(payload),
+    }
+    events = []
+
+    class Foundation:
+        def latest_artifact_record(self, _case_id, _artifact_type):
+            return record
+
+        def pending_provider_responses(self, _case_id):
+            return ()
+
+        def checkpoint_provider_response(self, _case_id, **values):
+            events.append(("checkpoint", values))
+
+        def materialize_artifact_evidence_support(
+            self, _case_id, request, candidate, execution
+        ):
+            events.append(("materialize", request, candidate, execution))
+
+    class Evaluator:
+        async def evaluate_evidence_support(
+            self, request, *, known_response_id=None, response_checkpoint=None
+        ):
+            assert known_response_id is None
+            response_checkpoint("resp_support_exact", f"aqa-support-{request.request_hash[7:39]}")
+            candidate = q.ArtifactEvidenceSupportCandidate(
+                protocol_version=q.PROTOCOL_VERSION,
+                output_type="ARTIFACT_EVIDENCE_SUPPORT_CANDIDATE",
+                request_id=request.request_id,
+                evaluator_run_id=request.evaluator_run_id,
+                request_hash=request.request_hash,
+                artifact_id=request.artifact_id,
+                artifact_version=request.artifact_version,
+                record_revision=request.record_revision,
+                payload_hash=request.payload_hash,
+                assessments=(
+                    q.EvidenceSupportAssessment(
+                        pair_id=request.pairs[0].pair_id,
+                        assessment=q.EvidenceSupportResult.SUPPORTS,
+                        confidence=0.97,
+                    ),
+                ),
+            )
+            return ArtifactEvidenceSupportEvaluation(
+                execution=q.StandaloneEvaluatorExecutionBinding(
+                    provider="OPENAI",
+                    model="gpt-5.6-terra",
+                    reasoning_effort="medium",
+                    provider_response_id="resp_support_exact",
+                    client_request_id=f"aqa-support-{request.request_hash[7:39]}",
+                    store_enabled=True,
+                    started_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                ),
+                candidate=candidate,
+            )
+
+    source = ProviderSourceUpload(
+        source=c.SourceIdentity(
+            source_id=source_id,
+            role=c.SourceRole.PM_SPEC,
+            version=1,
+            payload_hash=source_hash,
+            canonical_locator="/sources/pm.md",
+            filename="pm.md",
+            media_type="text/markdown",
+        ),
+        content=source_text.encode(),
+    )
+    technical = ProviderSourceUpload(
+        source=c.SourceIdentity(
+            source_id=UUID("70000000-0000-4000-8000-000000000008"),
+            role=c.SourceRole.TECHNICAL_CONTRACT,
+            version=1,
+            payload_hash=source_hash,
+            canonical_locator="/sources/technical.md",
+            filename="technical.md",
+            media_type="text/markdown",
+        ),
+        content=source_text.encode(),
+    )
+    plan = c.ArtifactSynthesisIdentityPlan(
+        identity_plan_id=UUID("70000000-0000-4000-8000-000000000009"),
+        identity_plan_version=1,
+        target=c.ArtifactDraftTarget(
+            artifact_type="SPEC_PACKAGE",
+            foundation_artifact_id=artifact_id,
+            artifact_key="SPEC-EVIDENCE",
+            next_artifact_version=1,
+        ),
+        based_on_case_revision=1,
+        semantic_state_hash="sha256:" + "a" * 64,
+        source_entity_refs=(),
+        planned_identities=(
+            c.PlannedArtifactIdentity(
+                foundation_id=evidence_id,
+                foundation_version=1,
+                entity_kind="EVIDENCE",
+            ),
+            c.PlannedArtifactIdentity(
+                foundation_id=finding_id,
+                foundation_version=1,
+                entity_kind="SEMANTIC_EVIDENCE_FINDING",
+            ),
+        ),
+    )
+    request = c.SpecPackageSynthesisRequest.model_construct(identity_plan=plan)
+    candidate = c.SpecPackageSynthesisCandidate.model_construct(
+        evidence_support_proposals=(
+            c.SpecEvidenceSupportProposalCandidate(
+                evidence_ref=evidence_id,
+                finding_ref=finding_id,
+                claim_ref=claim_id,
+                claim_pointer="/requirements/0/behaviour",
+                source_role=c.SourceRole.PM_SPEC,
+                locator="PM source line 1",
+                exact_excerpt=source_text,
+            ),
+        )
+    )
+    orchestrator = V4ProductionOrchestrator(
+        foundation=Foundation(),
+        adapter=SimpleNamespace(source_set_hash=lambda _sources: source_hash),
+        case_id=case_id,
+        session_id=session_id,
+        sources=(source, technical),
+        analyzer_contract=SimpleNamespace(),
+        quality_evaluator=Evaluator(),
+    )
+
+    asyncio.run(
+        orchestrator._materialize_spec_evidence_support(
+            request=request,
+            admission=ProviderOperationAdmission(
+                candidate=candidate,
+                receipt=SimpleNamespace(),
+            ),
+        )
+    )
+
+    assert [item[0] for item in events] == ["checkpoint", "materialize"]
+    assert events[0][1]["operation"] == "ARTIFACT_EVIDENCE_SUPPORT"
+    support_request = events[1][1]
+    assert support_request.pairs[0].claim_hash.startswith("sha256:")
+    assert support_request.pairs[0].excerpt_hash.startswith("sha256:")
+    assert support_request.pairs[0].evidence_ref == evidence_id
+    assert support_request.pairs[0].finding_id == finding_id
+
+
 def test_production_factory_uses_stored_conversation_v4_path_and_replays_duplicates(tmp_path):
     adapter = DeterministicAdapter()
     app = create_app(
@@ -174,18 +470,33 @@ def test_production_factory_uses_stored_conversation_v4_path_and_replays_duplica
         analyzer_adapter=adapter,
     )
     with TestClient(app) as client:
+        for _ in range(200):
+            if client.get("/api/workshop/preparation").json()["phase"] == "READY":
+                break
+            time.sleep(0.01)
+        context = client.get("/api/workshop").json()
+        question = context["question_runway"]["questions"][0]
         payload = {
-            "turn_sequence": 1,
+            "client_submission_id": "14141414-1414-4414-8414-141414141414",
+            "question_id": question["question_id"],
+            "expected_question_version": question["question_version"],
             "text": "Thanks, let us continue.",
-            "provider_request_id": "http-final-1",
-            "correction_of_version": None,
+            "correction_of_response_id": None,
+            "edit_target": None,
         }
-        first = client.post("/api/session/final-turn", json=payload)
-        replay = client.post("/api/session/final-turn", json=payload)
+        first = client.post("/api/workshop/responses", json=payload)
+        replay = client.post("/api/workshop/responses", json=payload)
+        for _ in range(100):
+            jobs = app.state.workshop_protocol_foundation.analyzer_jobs(
+                app.state.bootstrap.case_id
+            )
+            if jobs and jobs[0]["state"] == "COMPLETED":
+                break
+            time.sleep(0.01)
     assert first.status_code == 200, first.text
     assert replay.status_code == 200, replay.text
-    assert first.json()["duplicate"] is False
-    assert replay.json()["duplicate"] is True
+    assert first.json()["replayed"] is False
+    assert replay.json()["replayed"] is True
     assert adapter.operations == [
         c.AnalyzerOperation.BOOTSTRAP,
         c.AnalyzerOperation.TURN_ANALYSIS,
@@ -203,7 +514,7 @@ def test_production_source_excludes_the_legacy_orchestration_boundary():
         assert forbidden not in source
 
 
-def test_restart_invalidates_unavailable_conversation_and_rebuilds_provider_bindings(tmp_path):
+def test_restart_reuses_durable_ready_context_without_duplicate_provider_work(tmp_path):
     first = DeterministicAdapter()
     settings = configured(tmp_path)
     initial = create_app(
@@ -217,13 +528,14 @@ def test_restart_invalidates_unavailable_conversation_and_rebuilds_provider_bind
         live_provider=object(), analyzer_adapter=rebuilt,
     )
     context = asyncio.run(restarted.state.workshop_protocol_orchestrator.ensure_context())
-    assert rebuilt.released == ["conv_task26"]
-    assert context.provider_conversation_id == "conv_task26_rebuilt"
+    assert rebuilt.released == []
+    assert rebuilt.operations == []
+    assert context.provider_conversation_id == "conv_task26"
     recovered = restarted.state.workshop_protocol_foundation.active_analyzer_context(
         restarted.state.bootstrap.case_id
     )
     assert recovered is not None
-    assert recovered.provider_conversation_id == "conv_task26_rebuilt"
+    assert recovered.provider_conversation_id == "conv_task26"
 
 
 def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
@@ -252,7 +564,7 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
             instruction_set_version=1,
             instruction_set_hash="sha256:" + "4" * 64,
             semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-            semantic_quality_contract_version="2.1.0",
+            semantic_quality_contract_version="2.2.0",
             semantic_quality_contract_hash="sha256:" + "5" * 64,
             provider_schema_version="1.0.0",
             model="gpt-5.6-terra",
@@ -280,6 +592,8 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
         class Foundation:
             def __init__(self): self.commands = []
             def active_analyzer_context(self, case_id): return context
+            def project_spec_server_owned_records(self, candidate, **kwargs):
+                return candidate
             def execute(self, command):
                 self.commands.append(command)
                 return SimpleNamespace(receipt_type=command.command_type)
@@ -318,12 +632,14 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
             "spec": c.ArtifactSynthesisIdentityPlan(
                 identity_plan_id=UUID("20000000-0000-4000-8000-000000000022"), identity_plan_version=1,
                 target=target_spec, based_on_case_revision=8, semantic_state_hash="sha256:" + "6" * 64,
-                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000023"), foundation_version=1, entity_kind="REQUIREMENT", source_entity_refs=()),),
+                source_entity_refs=(),
+                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000023"), foundation_version=1, entity_kind="REQUIREMENT"),),
             ),
             "tech": c.ArtifactSynthesisIdentityPlan(
                 identity_plan_id=UUID("20000000-0000-4000-8000-000000000024"), identity_plan_version=1,
                 target=target_tech, based_on_case_revision=8, semantic_state_hash="sha256:" + "7" * 64,
-                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000025"), foundation_version=1, entity_kind="COMPONENT", source_entity_refs=()),),
+                source_entity_refs=(),
+                planned_identities=(c.PlannedArtifactIdentity(foundation_id=UUID("20000000-0000-4000-8000-000000000025"), foundation_version=1, entity_kind="COMPONENT"),),
             ),
         }
         common = dict(
@@ -381,7 +697,11 @@ def test_post_bootstrap_operations_route_to_their_exact_foundation_admissions():
                     semantic_state_hash=extras["identity_plan"].semantic_state_hash,
                     candidate_payload_json="{}",
                     payload_schema_id="technical-contract-payload" if operation is c.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS else "spec-package-payload",
-                    payload_schema_version="4.0.0",
+                    payload_schema_version=(
+                        "4.0.0"
+                        if operation is c.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS
+                        else "4.0.2"
+                    ),
                 )
             cases.append((request, candidate))
         for request, candidate in cases:

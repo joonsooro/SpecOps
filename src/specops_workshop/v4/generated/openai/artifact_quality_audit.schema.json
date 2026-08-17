@@ -6,7 +6,7 @@
         "artifact_pointers": {
           "items": {
             "maxLength": 2048,
-            "pattern": "^(?:|/(?:[^~/]|~0|~1)*)$",
+            "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
             "type": "string"
           },
           "maxItems": 100,
@@ -89,7 +89,7 @@
         "artifact_pointers": {
           "items": {
             "maxLength": 2048,
-            "pattern": "^(?:|/(?:[^~/]|~0|~1)*)$",
+            "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
             "type": "string"
           },
           "maxItems": 100,

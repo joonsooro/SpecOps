@@ -10,7 +10,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import func, insert, select
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from specops_contracts import workshop_v1 as c
 from specops_contracts import artifact_quality_v1 as q
@@ -18,9 +19,20 @@ from specops_contracts.canonical import domain_hash, payload_hash, transcript_ha
 from specops_workflow import WorkflowService, migrate
 from specops_workflow.enums import SourceArtifactType
 from specops_workflow.models import CreateCaseCommand, RegisterSourceArtifactCommand, SourceArtifactIdentity
-from specops_workflow.persistence import WORKSHOP_PROTOCOL_TABLES, audit_events, cases, engine_for
+from specops_workflow.persistence import (
+    ARTIFACT_QUALITY_TABLES,
+    EVIDENCE_ASSESSMENT_TABLES,
+    WORKSHOP_PROTOCOL_TABLES,
+    audit_events,
+    cases,
+    engine_for,
+)
 from specops_workflow.workshop_protocol import FoundationProtocolError, WorkshopFoundationService
 from specops_workflow.artifact_projection import draft_governance
+from specops_workflow.artifact_evidence_support import (
+    EvidenceSupportProposal,
+    prepare_evidence_support_request,
+)
 from specops_workshop.v4.api import install_workshop_protocol_api
 from specops_workshop.v4.artifact_quality import build_audit_bundle, quality_contract_hash
 from specops_workshop.v4.openai_adapter import ProviderSourceUpload
@@ -70,7 +82,7 @@ def _contract() -> c.AnalyzerContractBinding:
         instruction_set_version=1,
         instruction_set_hash="sha256:" + "3" * 64,
         semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-        semantic_quality_contract_version="2.1.0",
+        semantic_quality_contract_version="2.2.0",
         semantic_quality_contract_hash=quality_contract_hash(),
         provider_schema_version="1.0.0",
         model="gpt-5.6-terra",
@@ -575,7 +587,10 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
     command = c.ApplyDecisionBatchResponseCommand(**response_values)
     receipt = foundation.execute(command)
     assert [item.outcome for item in receipt.item_results] == ["COMMITTED", "REVISION_REQUESTED"]
+    assert receipt.response_transcript_event_id == confirmation.transcript.event_id
     assert foundation.execute(command) == receipt
+    problem = next(item for item in foundation.semantic_snapshot(CASE_ID).problems)
+    assert problem.status is c.SemanticRecordStatus.RESOLVED
 
     engine = engine_for(url)
     with engine.connect() as connection:
@@ -598,6 +613,76 @@ def test_foundation_mixed_batch_is_atomic_audited_replayable_and_restart_safe(tm
         finding = c.AdmittedSemanticEvidenceFinding.model_validate_json(finding_json)
         assert finding.assessment is c.EvidenceAssessment.SUPPORTS
         assert finding.source_hash == foundation.test_source_set.ordered_sources[1].source.payload_hash
+
+    snapshot = foundation.semantic_snapshot(CASE_ID)
+    assert snapshot.evidence_findings == (finding,)
+
+    protocol_events = WORKSHOP_PROTOCOL_TABLES["workshop_protocol_events"]
+    with engine.begin() as connection:
+        legacy_event = connection.execute(
+            select(protocol_events).where(
+                protocol_events.c.case_id == str(CASE_ID),
+                protocol_events.c.event_type == "APPLY_DECISION_BATCH_RESPONSE_APPLIED",
+            )
+        ).mappings().one()
+        legacy_receipt = json.loads(legacy_event["event_json"])
+        legacy_receipt.pop("response_transcript_event_id")
+        connection.execute(
+            update(protocol_events)
+            .where(protocol_events.c.event_id == legacy_event["event_id"])
+            .values(event_json=json.dumps(legacy_receipt, sort_keys=True, separators=(",", ":")))
+        )
+    bindings = foundation.confirmed_decision_synthesis_bindings(CASE_ID)
+    assert len(bindings) == 1
+    omitted_payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(
+        omitted_payload
+    )
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID, "SPEC_PACKAGE", (*identity_kinds.values(), "DECISION")
+    )
+    omitted_payload = bind_planned_identities(
+        omitted_payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities[: len(identity_kinds)],
+                strict=True,
+            )
+        },
+    )
+    omitted_payload["decisions"] = []
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=9,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(
+            omitted_payload, separators=(",", ":"), sort_keys=True
+        ),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.2",
+    )
+    admission_values = _base(9)
+    admission_values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        confirmed_decision_bindings=bindings,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+    with pytest.raises(FoundationProtocolError) as omitted_error:
+        foundation.execute(c.AdmitSpecPackageSynthesisCommand(**admission_values))
+    assert omitted_error.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+    assert foundation.case_revision(CASE_ID) == 9
 
     restarted = WorkflowService(database_url=url)
     assert restarted._cases[CASE_ID].revision == 9
@@ -709,6 +794,36 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
         )
     audit = _admit_quality(foundation, "SPEC_PACKAGE")
     assert audit.outcome is q.AuditOutcome.PASS
+    initial_results = {
+        item.rule_id: item.result for item in audit.combined_rule_results
+    }
+    assert initial_results["SPEC-Q-024"] is q.ComponentResult.PENDING
+    assert initial_results["SPEC-Q-025"] is q.ComponentResult.PENDING
+    assert sum(
+        item.result is q.ComponentResult.PASS
+        for item in audit.combined_rule_results
+    ) == 24
+    # Review projection needs only the immutable source-set binding. Historical
+    # provider contexts remain readable after the semantic-quality contract advances.
+    contexts = WORKSHOP_PROTOCOL_TABLES["workshop_analyzer_contexts"]
+    with engine_for(url).begin() as connection:
+        stored = connection.execute(
+            select(contexts.c.binding_json).where(
+                contexts.c.case_id == str(CASE_ID),
+                contexts.c.status == c.ContextStatus.ACTIVE.value,
+            )
+        ).scalar_one()
+        historical = json.loads(stored)
+        historical["analyzer_contract"]["semantic_quality_contract_version"] = "2.1.0"
+        connection.execute(
+            update(contexts)
+            .where(contexts.c.case_id == str(CASE_ID))
+            .values(
+                binding_json=json.dumps(
+                    historical, separators=(",", ":"), sort_keys=True
+                )
+            )
+        )
     review_values = _base(5)
     review_values.update(
         command_type="MATERIALIZE_ARTIFACT_REVIEW",
@@ -724,6 +839,13 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
     )
     review = foundation.execute(c.MaterializeArtifactReviewCommand(**review_values))
     projection = foundation.current_artifact_review(CASE_ID)
+    projected_record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    projected_rules = {
+        item["rule_id"]: item["result"]
+        for item in json.loads(projected_record["governance_json"])["readiness_audit"]["rule_results"]
+    }
+    assert projected_rules["SPEC-Q-025"] == "pass"
+    assert "SPEC-Q-024" not in projected_rules
     view_id = review.view_id
     confirmation_id = review.confirmation_id
     transcript = _transcript_command(6, 1, "I confirm the displayed Spec Package.")
@@ -756,6 +878,14 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
     command = c.ConfirmArtifactCommand(**values)
     first = foundation.execute(command)
     assert foundation.execute(command) == first
+    confirmed_record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    confirmed_rules = {
+        item["rule_id"]: item["result"]
+        for item in json.loads(confirmed_record["governance_json"])["readiness_audit"]["rule_results"]
+    }
+    assert confirmed_rules == {
+        f"SPEC-Q-{index:03d}": "pass" for index in range(1, 27)
+    }
     refreshed = WorkshopFoundationService(url, now=lambda: NOW).confirmed_artifact(
         CASE_ID, "SPEC_PACKAGE"
     )
@@ -775,6 +905,199 @@ def test_artifact_confirmation_binds_exact_view_commits_once_and_survives_refres
             select(func.count()).select_from(tables["workshop_artifact_confirmations"])
         ).scalar_one() == 1
         assert connection.execute(select(func.count()).select_from(audit_events)).scalar_one() == 7
+
+
+def test_v0_residual_spec_risk_acceptance_is_exact_durable_and_audit_immutable(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    artifact_id = _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    candidate = all_pass_candidate(bundle)
+    q004 = next(item for item in candidate.assessments if item.rule_id == "SPEC-Q-004")
+    q004 = q004.model_copy(
+        update={
+            "result": q.SemanticAssessmentResult.FAIL,
+            "artifact_pointers": ("/actors",),
+            "explanation": "One actor has an unresolved authority definition.",
+            "findings": (
+                q.QualityFindingCandidate(
+                    candidate_key="actor-authority-unresolved",
+                    severity="HIGH",
+                    category="ACTOR_AUTHORITY",
+                    message="Define the actor authority before a production release.",
+                    artifact_pointers=("/actors",),
+                    evidence_ids=(),
+                    transcript_event_ids=(),
+                ),
+            ),
+        }
+    )
+    candidate = candidate.model_copy(
+        update={
+            "assessments": tuple(
+                q004 if item.rule_id == q004.rule_id else item
+                for item in candidate.assessments
+            )
+        }
+    )
+    audit = _admit_quality_candidate(foundation, bundle, candidate)
+    assert audit.outcome is q.AuditOutcome.BLOCKED
+    assert tuple(
+        item.rule_id
+        for item in audit.combined_rule_results
+        if item.result is q.ComponentResult.FAIL
+    ) == ("SPEC-Q-004",)
+    assert {
+        item.rule_id
+        for item in audit.combined_rule_results
+        if item.result is q.ComponentResult.PENDING
+    } == {"SPEC-Q-024", "SPEC-Q-025"}
+
+    record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    review_values = _base(foundation.case_revision(CASE_ID))
+    review_values.update(
+        command_type="MATERIALIZE_ARTIFACT_REVIEW",
+        subject=c.ArtifactReviewSubjectBinding(
+            artifact_type="SPEC_PACKAGE",
+            artifact_id=artifact_id,
+            artifact_key=record["artifact_key"],
+            artifact_version=record["artifact_version"],
+            record_revision=record["record_revision"],
+            payload_hash=record["payload_hash"],
+        ),
+        view_mode="REVIEW",
+    )
+    review = foundation.execute(c.MaterializeArtifactReviewCommand(**review_values))
+    statement = (
+        "I accept the listed residual Spec quality failures for this exact V0 review "
+        "and authorize Technical Contract continuation."
+    )
+    transcript = _transcript_command(
+        foundation.case_revision(CASE_ID), 1, statement
+    )
+    foundation.execute(transcript)
+    projection = foundation.current_artifact_review(CASE_ID)
+    source = projection["view"]["source"]
+    binding = c.ArtifactConfirmationBinding(
+        artifact_type="SPEC_PACKAGE",
+        artifact_id=UUID(source["artifact_id"]),
+        artifact_key=source["artifact_key"],
+        artifact_version=source["artifact_version"],
+        record_revision=source["record_revision"],
+        payload_hash=source["payload_hash"],
+        confirmation_id=review.confirmation_id,
+        view_id=review.view_id,
+        view_hash=review.view_hash,
+    )
+    authentication = c.VerbalSelfAssertion(
+        authentication_method=c.ActorAuthenticationMethod.VERBAL_SELF_ASSERTION,
+        assurance_level=c.AssuranceLevel.SELF_ASSERTED,
+        actor_id=PM_ID,
+        asserted_display_name="PM",
+        claimed_role="Product Manager",
+        assertion_transcript_event_id=transcript.transcript.event_id,
+    )
+
+    def confirm_command(*, failed_rule_ids, acceptance_statement=statement):
+        values = _base(foundation.case_revision(CASE_ID), actor=PM_ID)
+        values.update(
+            command_type="CONFIRM_ARTIFACT",
+            actor_authentication=authentication,
+            binding=binding,
+            confirmation_transcript_event_id=transcript.transcript.event_id,
+            approved_exception_ids=(),
+            residual_quality_risk_acceptance=c.ResidualQualityRiskAcceptance(
+                policy_id="V0_EXPLICIT_RESIDUAL_SPEC_RISK",
+                audit_id=audit.audit_id,
+                accepted_failed_rule_ids=failed_rule_ids,
+                acceptance_statement=acceptance_statement,
+            ),
+        )
+        return c.ConfirmArtifactCommand(**values)
+
+    audits = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_audits"]
+    with foundation.engine.connect() as connection:
+        immutable_before = dict(
+            connection.execute(
+                select(audits).where(audits.c.audit_id == str(audit.audit_id))
+            ).mappings().one()
+        )
+    with pytest.raises(FoundationProtocolError) as mismatch:
+        foundation.execute(confirm_command(failed_rule_ids=("SPEC-Q-005",)))
+    assert mismatch.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+    with pytest.raises(FoundationProtocolError) as transcript_mismatch:
+        foundation.execute(
+            confirm_command(
+                failed_rule_ids=("SPEC-Q-004",),
+                acceptance_statement="I accept a different statement.",
+            )
+        )
+    assert (
+        transcript_mismatch.value.code
+        is c.FoundationRejectionCode.TRANSCRIPT_BINDING_FAILED
+    )
+
+    command = confirm_command(failed_rule_ids=("SPEC-Q-004",))
+    confirmed = foundation.execute(command)
+    assert foundation.execute(command) == confirmed
+    exact = foundation.confirmed_spec_binding(CASE_ID)
+    assert exact is not None
+    assert exact.foundation_artifact_id == artifact_id
+    assert exact.record_revision == source["record_revision"]
+    assert exact.payload_hash == source["payload_hash"]
+
+    phases = ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_gate_phases"]
+    confirmations = WORKSHOP_PROTOCOL_TABLES["workshop_artifact_confirmations"]
+    with foundation.engine.connect() as connection:
+        immutable_after = dict(
+            connection.execute(
+                select(audits).where(audits.c.audit_id == str(audit.audit_id))
+            ).mappings().one()
+        )
+        risk_phase = connection.execute(
+            select(phases).where(
+                phases.c.audit_id == str(audit.audit_id),
+                phases.c.phase == "RESIDUAL_RISK_ACCEPTANCE",
+            )
+        ).mappings().one()
+        confirmation_count = connection.execute(
+            select(func.count()).select_from(confirmations)
+        ).scalar_one()
+    assert immutable_after == immutable_before
+    evidence = json.loads(risk_phase["evidence_json"])
+    assert evidence["audit_outcome"] == "BLOCKED"
+    assert evidence["accepted_failed_rule_ids"] == ["SPEC-Q-004"]
+    assert evidence["approved_finding_ids"] == [str(audit.findings[0].finding_id)]
+    assert evidence["acceptance_statement"] == statement
+    governance = json.loads(
+        foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")["governance_json"]
+    )
+    results = {
+        item["rule_id"]: item["result"]
+        for item in governance["readiness_audit"]["rule_results"]
+    }
+    assert results["SPEC-Q-004"] == "fail"
+    assert results["SPEC-Q-024"] == "pass"
+    assert results["SPEC-Q-025"] == "pass"
+    assert governance["confirmation"]["exceptions"] == [
+        str(audit.findings[0].finding_id)
+    ]
+
+    stale = command.model_copy(
+        update={
+            "command_id": uuid4(),
+            "idempotency_key": f"idem-{uuid4()}",
+            "expected_case_revision": foundation.case_revision(CASE_ID),
+        }
+    )
+    with pytest.raises(FoundationProtocolError) as duplicate:
+        foundation.execute(stale)
+    assert duplicate.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED
+    with foundation.engine.connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(confirmations)
+        ).scalar_one() == confirmation_count == 1
 
 
 def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependencies(tmp_path):
@@ -814,10 +1137,16 @@ def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependenci
             ),
         ),
         problem_clusters=(),
-        questions=(
+        questions=tuple(
             c.QuestionCandidate(
-                candidate_key="question-brief",
-                text="Should every export use UTF-8?",
+                candidate_key=(
+                    "question-brief" if index == 1 else f"question-brief-{index}"
+                ),
+                text=(
+                    "Should every export use UTF-8?"
+                    if index == 1
+                    else f"Should export policy area {index} use UTF-8?"
+                ),
                 rationale="This closes the encoding decision.",
                 question_shape=c.QuestionShape.CLOSED_BOOLEAN,
                 capture_policy=c.CapturePolicy.BINDING_DECISION,
@@ -825,11 +1154,15 @@ def test_guidance_is_admitted_only_from_exact_foundation_question_and_dependenci
                 addresses_problem_keys=("problem-brief",),
                 prerequisite_problem_keys=(),
                 safe_without_current_turn_interpretation=True,
-            ),
+            )
+            for index in range(1, c.INITIAL_RUNWAY_DEPTH + 1)
         ),
         initial_runway=c.QuestionRunwayCandidate(
             recommended_question_key="question-brief",
-            safe_alternate_question_keys=(),
+            safe_alternate_question_keys=tuple(
+                f"question-brief-{index}"
+                for index in range(2, c.INITIAL_RUNWAY_DEPTH + 1)
+            ),
             do_not_ask_question_keys=(),
         ),
         confirmation_checkpoints=(),
@@ -935,6 +1268,8 @@ def test_full_spec_then_technical_contract_validation_projection_and_exact_linea
             if confirmed_spec is None
             else json.loads(confirmed_spec.canonical_payload_json),
         )
+        if artifact_type == "SPEC_PACKAGE":
+            payload.update(foundation._server_owned_spec_records((), plan))
         # The current schemas call semantic identifiers `id`; the Foundation
         # guard also requires every planned identity to occur in provider JSON.
         run_id = uuid4()
@@ -949,7 +1284,9 @@ def test_full_spec_then_technical_contract_validation_projection_and_exact_linea
             identity_plan_version=plan.identity_plan_version,
             semantic_state_hash=plan.semantic_state_hash,
             candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
-            payload_schema_version="4.0.0",
+            payload_schema_version=(
+                "4.0.2" if artifact_type == "SPEC_PACKAGE" else "4.0.0"
+            ),
         )
         if artifact_type == "SPEC_PACKAGE":
             candidate = c.SpecPackageSynthesisCandidate(
@@ -1189,6 +1526,85 @@ def test_quality_abstention_is_reviewable_but_cannot_enter_confirmation_gate(tmp
     assert caught.value.code is c.FoundationRejectionCode.INVALID_TRANSITION
 
 
+def test_failed_audit_can_apply_exactly_one_durable_bounded_revision(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    candidate = all_pass_candidate(bundle)
+    failed = candidate.assessments[0].model_copy(
+        update={
+            "result": q.SemanticAssessmentResult.FAIL,
+            "artifact_pointers": ("/requirements",),
+            "explanation": "The requirement combines two independently testable duties.",
+            "findings": (
+                q.QualityFindingCandidate(
+                    candidate_key="split-atomic-requirement",
+                    severity="HIGH",
+                    category="ATOMICITY",
+                    message="Split the two duties into independent requirements.",
+                    artifact_pointers=("/requirements",),
+                    evidence_ids=(),
+                    transcript_event_ids=(),
+                ),
+            ),
+        }
+    )
+    candidate = candidate.model_copy(
+        update={"assessments": (failed, *candidate.assessments[1:])}
+    )
+    rejected = _admit_quality_candidate(foundation, bundle, candidate)
+    assert rejected.outcome is not q.AuditOutcome.PASS
+
+    request = foundation.prepare_artifact_quality_revision(
+        CASE_ID,
+        "SPEC_PACKAGE",
+        allocated_identity_kinds=("REQUIREMENT",),
+    )
+    payload = json.loads(request.canonical_payload_json)
+    replacement = [dict(item) for item in payload["requirements"]]
+    added = dict(replacement[0])
+    added["id"] = str(request.allocated_identities[0].foundation_id)
+    added["title"] = "One independently testable duty"
+    replacement.append(added)
+    revision_candidate = q.ArtifactQualityRevisionCandidate(
+        protocol_version=q.PROTOCOL_VERSION,
+        output_type="ARTIFACT_QUALITY_REVISION_CANDIDATE",
+        revision_request_id=request.revision_request_id,
+        revision_request_version=1,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        attempt=1,
+        patches=(
+            q.ArtifactRevisionPatch(
+                pointer="/requirements",
+                replacement_value_json=json.dumps(replacement),
+            ),
+        ),
+    )
+
+    applied = foundation.apply_artifact_quality_revision(
+        CASE_ID, request, revision_candidate
+    )
+    replay = foundation.apply_artifact_quality_revision(
+        CASE_ID, request, revision_candidate
+    )
+
+    assert applied.replayed is False
+    assert replay.model_copy(update={"replayed": False}) == applied
+    assert applied.prior_record_revision == rejected.resulting_record_revision
+    assert applied.resulting_record_revision == rejected.resulting_record_revision + 1
+    record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    assert record is not None
+    assert record["payload_hash"] == applied.resulting_payload_hash
+    assert len(json.loads(record["payload_json"])["requirements"]) == 2
+    assert foundation.case_revision(CASE_ID) == request.based_on_case_revision + 1
+
+
 def test_quality_provider_mapping_and_admitted_receipt_survive_restart(tmp_path):
     url, foundation = _runtime(tmp_path)
     _activate(foundation)
@@ -1224,6 +1640,36 @@ def test_quality_provider_mapping_and_admitted_receipt_survive_restart(tmp_path)
     assert replay.existing_receipt is not None
     assert replay.existing_receipt.replayed is True
     assert replay.existing_receipt.model_copy(update={"replayed": False}) == admitted
+
+
+def test_quality_response_checkpoint_survives_restart_without_recreate(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    _insert_minimal_spec_artifact(foundation)
+    bundle = _quality_bundle(foundation, "SPEC_PACKAGE")
+    _prepare_quality_candidate(foundation, bundle)
+    command = q.CheckpointArtifactQualityResponseCommand(
+        protocol_version=q.PROTOCOL_VERSION,
+        command_id=quality_stable_id(bundle.audit_id, "checkpoint-response"),
+        audit_id=bundle.audit_id,
+        request_hash=bundle.request_hash,
+        client_request_id=f"aqa-response-{bundle.request_hash[7:39]}",
+        provider_response_id=f"resp_checkpoint_{str(bundle.audit_id)[:12]}",
+    )
+
+    foundation.checkpoint_artifact_quality_response(command)
+    foundation.checkpoint_artifact_quality_response(command)
+
+    restarted = WorkshopFoundationService(url, now=lambda: NOW)
+    provider = restarted.artifact_quality_provider_context(bundle.audit_id)
+    assert provider["provider_response_id"] == command.provider_response_id
+    assert provider["response_client_request_id"] == command.client_request_id
+
+    with pytest.raises(FoundationProtocolError) as caught:
+        restarted.checkpoint_artifact_quality_response(
+            command.model_copy(update={"provider_response_id": "resp_conflict"})
+        )
+    assert caught.value.code is c.FoundationRejectionCode.DUPLICATE_CONFLICT
 
 
 @pytest.mark.parametrize("shape", ["missing", "duplicate"])
@@ -1268,6 +1714,7 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
     url, foundation = _runtime(tmp_path)
     _activate(foundation)
     payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
     identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
     plan = foundation.issue_artifact_identity_plan(
         CASE_ID, "SPEC_PACKAGE", tuple(identity_kinds.values())
@@ -1281,12 +1728,18 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
             )
         },
     )
+    payload.update(foundation._server_owned_spec_records((), plan))
     identities = list(plan.planned_identities)
+    slots = list(plan.slots)
     if plan_error == "wrong_kind":
         identities[0] = identities[0].model_copy(update={"entity_kind": "COMPONENT"})
+        slots[0] = slots[0].model_copy(update={"entity_kind": "COMPONENT"})
     else:
         identities.pop()
-    invalid_plan = plan.model_copy(update={"planned_identities": tuple(identities)})
+        slots.pop()
+    invalid_plan = plan.model_copy(
+        update={"planned_identities": tuple(identities), "slots": tuple(slots)}
+    )
     candidate = c.SpecPackageSynthesisCandidate(
         output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
         analyzer_run_id=uuid4(),
@@ -1300,7 +1753,7 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
         semantic_state_hash=plan.semantic_state_hash,
         candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
         payload_schema_id="spec-package-payload",
-        payload_schema_version="4.0.0",
+        payload_schema_version="4.0.2",
     )
     values = _base(4)
     values.update(
@@ -1320,3 +1773,501 @@ def test_artifact_admission_rejects_noncanonical_identity_plan(tmp_path, plan_er
                 WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
             )
         ).scalar_one() == 0
+
+
+def test_artifact_admission_accepts_unused_bounded_identity_capacity(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID,
+        "SPEC_PACKAGE",
+        (*identity_kinds.values(), "REQUIREMENT"),
+    )
+    payload = bind_planned_identities(
+        payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities[: len(identity_kinds)],
+                strict=True,
+            )
+        },
+    )
+    payload.update(foundation._server_owned_spec_records((), plan))
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.2",
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+
+    receipt = foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
+
+    assert receipt.artifact_type == "SPEC_PACKAGE"
+    assert foundation.case_revision(CASE_ID) == 5
+
+
+def test_foundation_materializes_and_retains_exact_evidence_revision_once(tmp_path):
+    _, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID,
+        "SPEC_PACKAGE",
+        (*identity_kinds.values(), "EVIDENCE", "SEMANTIC_EVIDENCE_FINDING"),
+    )
+    payload = bind_planned_identities(
+        payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities[: len(identity_kinds)],
+                strict=True,
+            )
+        },
+    )
+    payload.update(foundation._server_owned_spec_records((), plan))
+    evidence_id = plan.planned_identities[-2].foundation_id
+    finding_id = plan.planned_identities[-1].foundation_id
+    payload["evidence_catalog"] = [
+        {
+            "id": str(evidence_id),
+            "source_id": "10000000-0000-4000-8000-000000000005",
+            "source_hash": PM_SOURCE_HASH,
+            "locator": "PM source line 1",
+            "excerpt_hash": "sha256:86dae90de48c8838e01cc421488dc5b5001a4533638b25e6bc1a945c7f3aeab9",
+            "claim_refs": [str(payload["requirements"][0]["id"])],
+        }
+    ]
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.2",
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+    foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
+    record = foundation.latest_artifact_record(CASE_ID, "SPEC_PACKAGE")
+    assert record is not None
+    source = q.AuditSourceDocument(
+        source_id=UUID("10000000-0000-4000-8000-000000000005"),
+        role=q.SourceRole.PM_SPEC,
+        version=1,
+        payload_hash=PM_SOURCE_HASH,
+        canonical_locator="/sources/pm.md",
+        filename="pm.md",
+        media_type="text/markdown",
+        complete_text=PM_SOURCE_BYTES.decode(),
+    )
+    ids = iter((uuid4(), uuid4()))
+    request = prepare_evidence_support_request(
+        evaluator_run_id=uuid4(),
+        artifact_id=UUID(record["artifact_id"]),
+        artifact_version=record["artifact_version"],
+        record_revision=record["record_revision"],
+        payload=json.loads(record["payload_json"]),
+        sources=(source,),
+        proposals=(
+            EvidenceSupportProposal(
+                claim_ref=UUID(payload["requirements"][0]["id"]),
+                claim_pointer="/requirements/0/behaviour",
+                source_id=source.source_id,
+                locator="PM source line 1",
+                exact_excerpt="Export filtered orders.",
+                evidence_ref=evidence_id,
+                finding_ref=finding_id,
+            ),
+        ),
+        new_id=lambda: next(ids),
+    )
+    support = q.ArtifactEvidenceSupportCandidate(
+        protocol_version=q.PROTOCOL_VERSION,
+        output_type="ARTIFACT_EVIDENCE_SUPPORT_CANDIDATE",
+        request_id=request.request_id,
+        evaluator_run_id=request.evaluator_run_id,
+        request_hash=request.request_hash,
+        artifact_id=request.artifact_id,
+        artifact_version=request.artifact_version,
+        record_revision=request.record_revision,
+        payload_hash=request.payload_hash,
+        assessments=(
+            q.EvidenceSupportAssessment(
+                pair_id=request.pairs[0].pair_id,
+                assessment=q.EvidenceSupportResult.SUPPORTS,
+                confidence=0.98,
+            ),
+        ),
+    )
+
+    execution = q.StandaloneEvaluatorExecutionBinding(
+        provider="OPENAI",
+        model="gpt-5.6-terra",
+        reasoning_effort="medium",
+        provider_response_id="resp_evidence_support_fixture",
+        client_request_id=f"aqa-support-{request.request_hash[7:39]}",
+        store_enabled=True,
+        started_at=NOW,
+        completed_at=NOW,
+    )
+    revised = foundation.materialize_artifact_evidence_support(
+        CASE_ID, request, support, execution
+    )
+
+    revised_payload = json.loads(revised["payload_json"])
+    assert revised["record_revision"] == 2
+    assert revised["payload_hash"] != record["payload_hash"]
+    assert revised_payload["evidence_catalog"][0]["id"] == str(evidence_id)
+    assert revised_payload["semantic_evidence_findings"][0]["finding_id"] == str(
+        finding_id
+    )
+    assert revised_payload["semantic_evidence_findings"][0]["assessment"] == "SUPPORTS"
+    assert foundation.case_revision(CASE_ID) == 6
+    with foundation.engine.connect() as connection:
+        run = connection.execute(
+            select(
+                EVIDENCE_ASSESSMENT_TABLES[
+                    "workshop_artifact_evidence_assessment_runs"
+                ]
+            )
+        ).mappings().one()
+        assessment = connection.execute(
+            select(
+                EVIDENCE_ASSESSMENT_TABLES[
+                    "workshop_artifact_evidence_assessments"
+                ]
+            )
+        ).mappings().one()
+    assert run["canonical_count"] == 1
+    assert run["quarantined_count"] == 0
+    assert run["provider_response_id"] == execution.provider_response_id
+    assert assessment["assessment"] == "SUPPORTS"
+    assert assessment["disposition"] == "CANONICAL"
+    with pytest.raises(IntegrityError, match="EVIDENCE_ASSESSMENT_APPEND_ONLY"):
+        with foundation.engine.begin() as connection:
+            connection.execute(
+                update(
+                    EVIDENCE_ASSESSMENT_TABLES[
+                        "workshop_artifact_evidence_assessment_runs"
+                    ]
+                ).values(model="changed")
+            )
+
+    replayed = foundation.materialize_artifact_evidence_support(
+        CASE_ID, request, support, execution
+    )
+    assert replayed["payload_hash"] == revised["payload_hash"]
+    assert replayed["record_revision"] == revised["record_revision"]
+    assert foundation.case_revision(CASE_ID) == 6
+
+
+def test_artifact_admission_exposes_content_safe_schema_error_pointers(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID, "SPEC_PACKAGE", tuple(identity_kinds.values())
+    )
+    payload = bind_planned_identities(
+        payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities,
+                strict=True,
+            )
+        },
+    )
+    payload.update(foundation._server_owned_spec_records((), plan))
+    payload["requirements"][0]["behaviour"] = []
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.2",
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        confirmed_decision_bindings=(),
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+
+    with pytest.raises(FoundationProtocolError) as exc:
+        foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
+
+    assert exc.value.code is c.FoundationRejectionCode.PAYLOAD_SCHEMA_FAILED
+    assert exc.value.safe_diagnostic_pointers == ("/requirements/0/behaviour",)
+    assert "[]" not in repr(exc.value.safe_diagnostic_pointers)
+    assert foundation.case_revision(CASE_ID) == 4
+    with engine_for(url).connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(
+                WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+            )
+        ).scalar_one() == 0
+
+
+def test_artifact_admission_rejects_reference_to_unused_planned_identity(tmp_path):
+    url, foundation = _runtime(tmp_path)
+    _activate(foundation)
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    _bind_fixture_refs(payload)
+    identity_kinds = WorkshopFoundationService._artifact_identity_kinds(payload)
+    plan = foundation.issue_artifact_identity_plan(
+        CASE_ID,
+        "SPEC_PACKAGE",
+        (*identity_kinds.values(), "REQUIREMENT"),
+    )
+    payload = bind_planned_identities(
+        payload,
+        {
+            original: planned.foundation_id
+            for original, planned in zip(
+                identity_kinds,
+                plan.planned_identities[: len(identity_kinds)],
+                strict=True,
+            )
+        },
+    )
+    payload.update(foundation._server_owned_spec_records((), plan))
+    unused_requirement_id = plan.planned_identities[-1].foundation_id
+    payload["acceptance_checks"][0]["requirement_refs"] = [
+        str(unused_requirement_id)
+    ]
+    candidate = c.SpecPackageSynthesisCandidate(
+        output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+        analyzer_run_id=uuid4(),
+        context_id=CONTEXT_ID,
+        request_hash=REQUEST_HASH,
+        source_set_hash=SOURCE_SET_HASH,
+        based_on_case_revision=4,
+        foundation_artifact_id=plan.target.foundation_artifact_id,
+        identity_plan_id=plan.identity_plan_id,
+        identity_plan_version=plan.identity_plan_version,
+        semantic_state_hash=plan.semantic_state_hash,
+        candidate_payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        payload_schema_id="spec-package-payload",
+        payload_schema_version="4.0.2",
+    )
+    values = _base(4)
+    values.update(
+        command_type="ADMIT_SPEC_PACKAGE_SYNTHESIS",
+        target=plan.target,
+        identity_plan=plan,
+        confirmed_decision_bindings=(),
+        provider_request_hash=REQUEST_HASH,
+        candidate=candidate,
+    )
+
+    with pytest.raises(FoundationProtocolError) as exc:
+        foundation.execute(c.AdmitSpecPackageSynthesisCommand(**values))
+
+    assert exc.value.code is c.FoundationRejectionCode.UNKNOWN_REFERENCE
+    assert exc.value.safe_diagnostic_pointers == (
+        "/acceptance_checks/0/requirement_refs/0",
+    )
+    assert str(unused_requirement_id) not in repr(exc.value.safe_diagnostic_pointers)
+    assert foundation.case_revision(CASE_ID) == 4
+    with engine_for(url).connect() as connection:
+        assert connection.execute(
+            select(func.count()).select_from(
+                WORKSHOP_PROTOCOL_TABLES["workshop_artifact_records"]
+            )
+        ).scalar_one() == 0
+        assert connection.execute(
+            select(func.count()).select_from(
+                WORKSHOP_PROTOCOL_TABLES["workshop_identity_plans"]
+            )
+        ).scalar_one() == 0
+        assert connection.execute(
+            select(func.count()).select_from(
+                ARTIFACT_QUALITY_TABLES["workshop_artifact_quality_audits"]
+            )
+        ).scalar_one() == 0
+
+
+def test_rule_derived_blueprint_projects_cross_domain_authority_deterministically():
+    actor_id = uuid4()
+    decision_id = uuid4()
+    target = c.ArtifactDraftTarget(
+        artifact_type="SPEC_PACKAGE",
+        foundation_artifact_id=uuid4(),
+        artifact_key="SPEC-BLUEPRINT",
+        next_artifact_version=1,
+    )
+    plan = c.ArtifactSynthesisIdentityPlan(
+        identity_plan_id=uuid4(),
+        identity_plan_version=1,
+        target=target,
+        based_on_case_revision=9,
+        semantic_state_hash="sha256:" + "7" * 64,
+        source_entity_refs=(),
+        planned_identities=(
+            c.PlannedArtifactIdentity(
+                foundation_id=actor_id,
+                foundation_version=1,
+                entity_kind="ACTOR",
+            ),
+            c.PlannedArtifactIdentity(
+                foundation_id=decision_id,
+                foundation_version=1,
+                entity_kind="DECISION",
+            ),
+        ),
+        slots=(
+            c.ArtifactIdentitySlot(
+                slot_key="ACTOR:0001",
+                entity_kind="ACTOR",
+                ordinal=1,
+                owner="FOUNDATION",
+                foundation_id=actor_id,
+                allocation_mode="BOUND_EXISTING",
+            ),
+            c.ArtifactIdentitySlot(
+                slot_key="DECISION:0001",
+                entity_kind="DECISION",
+                ordinal=1,
+                owner="FOUNDATION",
+                foundation_id=decision_id,
+                allocation_mode="BOUND_EXISTING",
+            ),
+        ),
+    )
+    binding = c.ConfirmedDecisionSynthesisBinding(
+        decision_id=decision_id,
+        decision_version=1,
+        classification=c.Domain.CROSS_DOMAIN,
+        statement="Commit the accepted export snapshot immutably.",
+        rationale="Acceptance fixes membership and values.",
+        alternatives_considered=("Re-evaluate the export during download.",),
+        problem_ids=(uuid4(),),
+        evidence_ids=(uuid4(),),
+        confirmation_id=uuid4(),
+        decision_batch_view_id=uuid4(),
+        decision_batch_view_hash="sha256:" + "8" * 64,
+        review_item_id=uuid4(),
+        confirmed_case_revision=9,
+        actor_ref=actor_id,
+        authority_validation_id=uuid4(),
+        transcript_event_id=uuid4(),
+        confirmed_at=NOW,
+    )
+
+    projection = WorkshopFoundationService._server_owned_spec_records(
+        (binding,), plan
+    )
+
+    assert projection["actors"][0]["id"] == str(actor_id)
+    assert projection["actors"][0]["authority_domains"] == ["cross_domain"]
+    assert projection["decisions"][0]["id"] == str(decision_id)
+    assert projection["decisions"][0]["decision"] == binding.statement
+    assert projection["decisions"][0]["confirmation_binding"][
+        "confirmation_id"
+    ] == str(binding.confirmation_id)
+
+    policy = WorkshopFoundationService.artifact_construction_policy(
+        "SPEC_PACKAGE",
+        confirmed_decision_count=4,
+        quality_rule_ids=tuple(f"SPEC-Q-{index:03d}" for index in range(1, 27)),
+    )
+    counts = {
+        kind: sum(item[0] == kind for item in policy)
+        for kind, _, _ in policy
+    }
+    assert counts["DECISION"] == 4
+    assert counts["REQUIREMENT"] == 14
+    assert counts["SCOPE_ITEM"] == 16
+    assert counts["BEHAVIOUR_RULE"] == 16
+    assert counts["SCENARIO"] == 12
+    assert counts["EXPERIENCE_STATE"] == 9
+    assert counts["ACCEPTANCE_CHECK"] == 14
+
+
+def test_foundation_initializes_absent_provider_evidence_fields_before_projection():
+    provider_payload = {
+        "requirements": [
+            {}
+        ],
+        "behaviour_contract": {
+            "always": [{}],
+            "ask_first": [],
+            "never": [],
+        },
+        "glossary": [],
+        "outcomes": [],
+        "scope": {"in_scope": [], "non_goals": [], "boundaries": []},
+        "data_rules": [],
+        "quality_attributes": [],
+        "constraints": [],
+        "dependencies": [],
+        "risks": [],
+    }
+
+    WorkshopFoundationService._initialize_foundation_owned_evidence_refs(provider_payload)
+
+    assert provider_payload["requirements"][0]["source_evidence_refs"] == []
+    assert provider_payload["behaviour_contract"]["always"][0]["evidence_refs"] == []
+
+    provider_payload["requirements"][0]["source_evidence_refs"] = [
+        "10000000-0000-4000-8000-000000000010"
+    ]
+    with pytest.raises(FoundationProtocolError) as exc:
+        WorkshopFoundationService._initialize_foundation_owned_evidence_refs(
+            provider_payload
+        )
+    assert exc.value.code is c.FoundationRejectionCode.CONFIRMATION_BINDING_FAILED

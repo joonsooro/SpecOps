@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import subprocess
@@ -11,12 +10,58 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
 FRONTEND = BACKEND / "frontend"
-# Run 4/SW evidence is historical and immutable. Task 26 emits a separate
-# deterministic build receipt and never rewrites that release record.
-RECEIPT = BACKEND / "tests/workshop/task26-deterministic-evidence.json"
-LIVE_RECEIPT = BACKEND / "tests/workshop/live-evidence.json"
+# Task 26 and Task 27 receipts remain immutable. Task 28 writes only this
+# additive deterministic receipt and deliberately has no live-provider mode.
+RECEIPT = BACKEND / "tests/workshop/task28-deterministic-evidence.json"
 sys.path.insert(0, str(BACKEND / "tests/workshop"))
-from sw_release_contract import SW_EVIDENCE, SW_IDS  # noqa: E402
+from sw_release_contract import SW_EVIDENCE  # noqa: E402
+
+
+TASK28_SW_IDS = (
+    "SW-EV-001",
+    "SW-EV-005",
+    "SW-EV-006",
+    "SW-EV-007",
+    "SW-EV-008",
+    "SW-EV-009",
+    "SW-EV-011",
+    "SW-EV-012",
+    "SW-EV-013",
+    "SW-EV-016",
+    "SW-EV-018",
+    "SW-EV-019",
+    "SW-EV-020",
+    "SW-EV-021",
+    "SW-EV-022",
+    "SW-EV-023",
+)
+V0R_IDS = tuple(f"V0R-EV-{index:03d}" for index in range(1, 17))
+AR_IDS = ("AR-EV-011", "AR-EV-012", "AR-EV-013")
+
+V0R_EVIDENCE = {
+    "V0R-EV-001": ("playwright", "frontend/e2e/workshop.spec.ts", "renders canonical question messages and submits the exact typed response intent"),
+    "V0R-EV-002": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_three"),
+    "V0R-EV-003": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_unsafe_bootstrap_runway_fails_closed_without_guidance"),
+    "V0R-EV-004": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_delayed_projection_uses_server_time_and_exact_copy"),
+    "V0R-EV-005": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_bootstrap_runway_is_foundation_admitted_only_at_exact_one_plus_three"),
+    "V0R-EV-006": ("pytest", "tests/workshop/test_feature_28_text_authoritative_workshop.py", "test_luna_selection_is_materialized_from_exact_supplied_foundation_questions"),
+    "V0R-EV-007": ("pytest", "tests/workshop/test_feature_28_text_authoritative_workshop.py", "test_ingress_failure_rolls_back_snapshot_evidence_consumption_and_job"),
+    "V0R-EV-008": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_presence_websocket_starts_grace_only_after_last_browser_page_closes"),
+    "V0R-EV-009": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_cancelled_analysis_lease_reclaims_provider_completed_stage_without_another_call"),
+    "V0R-EV-010": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_depth_two_enqueues_one_guidance_and_turn_jobs_remain_first"),
+    "V0R-EV-011": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_depth_two_enqueues_one_guidance_and_turn_jobs_remain_first"),
+    "V0R-EV-012": ("pytest", "tests/workshop/test_feature_28_text_authoritative_workshop.py", "test_openai_chatbot_provider_is_luna_medium_stateless_and_selection_only"),
+    "V0R-EV-013": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_zero_runway_instruction_is_fixed_and_never_invents_a_question"),
+    "V0R-EV-014": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_cleanup_clears_only_confirmed_ids_then_retries_same_uncertain_id"),
+    "V0R-EV-015": ("pytest", "tests/workshop/test_feature_28_text_authoritative_workshop.py", "test_ingress_idempotency_correction_and_channel_provenance_survive_restart"),
+    "V0R-EV-016": ("pytest", "tests/workshop/test_feature_27_v0_preparation_runtime.py", "test_verified_turn_branch_replenishes_before_one_bounded_correction"),
+}
+
+AR_EVIDENCE = {
+    "AR-EV-011": ("pytest", "tests/workshop/test_feature_20_release.py", "test_operational_telemetry_redacts_and_secrets_stay_opaque"),
+    "AR-EV-012": ("playwright", "frontend/e2e/workshop.spec.ts", "renders canonical question messages and submits the exact typed response intent"),
+    "AR-EV-013": ("pytest", "tests/workshop/test_feature_28_text_authoritative_workshop.py", "test_visual_edit_and_reject_are_explicit_idempotent_proposal_actions"),
+}
 
 
 def run(
@@ -25,7 +70,7 @@ def run(
     cwd: Path,
     *,
     unset_environment: tuple[str, ...] = (),
-) -> dict[str, object]:
+) -> dict[str, str]:
     environment = os.environ.copy()
     for key in unset_environment:
         environment.pop(key, None)
@@ -34,100 +79,65 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--live", action="store_true", help="run the credentialed SW-EV-024 probe")
-    parser.add_argument(
-        "--live-receipt",
-        action="store_true",
-        help="verify an existing credentialed SW-EV-024 PASS receipt without another provider call",
-    )
-    args = parser.parse_args()
-    if args.live and args.live_receipt:
-        parser.error("choose either --live or --live-receipt")
     checks = [
-        # Make exports default runtime database URLs for ``make dev``.  A test
-        # process must not inherit those shared files: unit tests that omit a
-        # database URL intentionally exercise the in-memory Foundation, while
-        # persistence tests create and migrate their own isolated databases.
         run(
             "pytest",
-            [str(BACKEND / ".venv/bin/pytest"), "-q"],
+            [sys.executable, "-m", "pytest", "-q"],
             BACKEND,
-            unset_environment=("SPECOPS_DATABASE_URL", "WORKSHOP_DATABASE_URL"),
+            unset_environment=(
+                "SPECOPS_DATABASE_URL",
+                "WORKSHOP_DATABASE_URL",
+                "OPENAI_API_KEY",
+                "GEMINI_API_KEY",
+            ),
         ),
         run("vitest", ["npm", "test"], FRONTEND),
         run("frontend-build", ["npm", "run", "build"], FRONTEND),
         run("playwright", ["npm", "run", "test:e2e"], FRONTEND),
-        run("playwright-real-v4", ["npm", "run", "test:e2e:real"], FRONTEND),
+        run("playwright-real", ["npm", "run", "test:e2e:real"], FRONTEND),
     ]
-    deterministic_passed = all(value["status"] == "PASS" for value in checks)
-    if args.live and deterministic_passed:
-        checks.append(run(
-            "SW-EV-024-live",
-            [str(BACKEND / ".venv/bin/python"), "tests/workshop/live_workshop_probe.py"],
-            BACKEND,
-        ))
-    elif args.live:
-        checks.append({"name": "SW-EV-024-live", "status": "NOT_RUN"})
-    elif args.live_receipt:
-        try:
-            live = json.loads(LIVE_RECEIPT.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            live = {}
-        receipt_passed = (
-            live.get("sw_ev") == "SW-EV-024"
-            and live.get("status") == "PASS"
-            and live.get("gemini_provider") == "GeminiLiveProvider"
-            and live.get("terra_provider") == "TerraResponsesProvider"
-            and isinstance(live.get("gemini_audio_bytes"), int)
-            and live["gemini_audio_bytes"] > 0
-            and isinstance(live.get("foundation_revision"), int)
-            and isinstance(live.get("package_binding"), dict)
-            and isinstance(live.get("decision_source_pointer"), dict)
-        )
-        checks.append({
-            "name": "SW-EV-024-live",
-            "status": "PASS" if receipt_passed else "FAIL",
-        })
-    live_requested = args.live or args.live_receipt
-    live_passed = not live_requested or (
-        LIVE_RECEIPT.is_file()
-        and checks[-1]["status"] == "PASS"
-    )
+    status = {item["name"]: item["status"] for item in checks}
     status_by_kind = {
-        "pytest": next(value["status"] for value in checks if value["name"] == "pytest"),
-        "vitest": next(value["status"] for value in checks if value["name"] == "vitest"),
-        "playwright": next(value["status"] for value in checks if value["name"] == "playwright"),
-        "live": next(
-            (value["status"] for value in checks if value["name"] == "SW-EV-024-live"),
-            "NOT_RUN",
-        ),
+        "pytest": status["pytest"],
+        "vitest": status["vitest"],
+        "playwright": status["playwright"],
     }
-    evidence = {
-        sw_id: [
+    evidence: dict[str, list[dict[str, str]]] = {}
+    for evidence_id in TASK28_SW_IDS:
+        evidence[evidence_id] = [
             {
                 "kind": kind,
                 "path": path,
                 "name": name,
                 "outcome": status_by_kind[kind],
             }
-            for kind, path, name in SW_EVIDENCE[sw_id]
+            for kind, path, name in SW_EVIDENCE[evidence_id]
         ]
-        for sw_id in SW_IDS
-    }
+    for evidence_id, (kind, path, name) in {**V0R_EVIDENCE, **AR_EVIDENCE}.items():
+        evidence[evidence_id] = [{
+            "kind": kind,
+            "path": path,
+            "name": name,
+            "outcome": status_by_kind[kind],
+        }]
+    passed = all(item["status"] == "PASS" for item in checks)
     receipt = {
         "schema_version": 1,
-        "inventory": list(SW_IDS),
+        "task": 28,
+        "inventory": [*TASK28_SW_IDS, *V0R_IDS, *AR_IDS],
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "mode": "credentialed" if live_requested else "deterministic",
+        "mode": "deterministic-no-provider-calls",
         "checks": checks,
         "evidence": evidence,
-        "passed": deterministic_passed and live_passed,
+        "excluded_independent_evaluation": "SW-EV-024",
+        "passed": passed,
     }
-    RECEIPT.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    RECEIPT.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(json.dumps(receipt, sort_keys=True))
-    return 0 if receipt["passed"] else 1
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

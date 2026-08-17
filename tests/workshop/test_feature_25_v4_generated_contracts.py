@@ -26,14 +26,16 @@ def test_openapi_publishes_strict_command_union_and_narrow_voice_operations():
         "/api/v4/voice/decision-responses",
         "/api/v4/voice/decision-selections",
         "/api/v4/voice/final-transcripts",
+        "/api/v4/workshop/complete",
     }
     foundation = paths["/api/v4/foundation/commands"]["post"]["requestBody"]["content"]["application/json"]["schema"]
-    assert len(foundation["oneOf"]) == 14
+    assert len(foundation["oneOf"]) == 15
     assert foundation["discriminator"]["propertyName"] == "command_type"
     assert set(foundation["discriminator"]["mapping"]) == {
         "ACTIVATE_ANALYZER_CONTEXT",
         "INVALIDATE_ANALYZER_CONTEXT",
         "RECORD_FINAL_TRANSCRIPT",
+        "CLAIM_WORKSHOP_COMPLETE",
         "ADMIT_INTERVIEW_BRIEF",
         "ADMIT_TURN_ANALYSIS",
         "ADMIT_GUIDANCE",

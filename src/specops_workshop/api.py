@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -19,23 +21,44 @@ from specops_workflow.workshop_protocol import FoundationProtocolError, Workshop
 from .bootstrap import BootstrapView, bootstrap_foundation, stable_id
 from .boundary import assert_downstream_boundary
 from .config import Settings
-from .contracts import FinalTurnInput
 from .delegation import load_delegation_fixture
 from .ports import LiveVoiceProvider
-from .providers import GeminiLiveProvider
 from .sources import SourceCatalog, SourceName
 from .v4.api import install_workshop_protocol_api
-from .v4.live_transport import V4LiveTransport
+from .v4.client_presence import WorkshopClientPresence
 from .v4.openai_adapter import ProviderAdapterError, ProviderSourceUpload, StoredConversationOpenAIAdapter
 from .v4.artifact_quality_adapter import (
     ArtifactQualityEvaluatorError,
     FreshConversationTerraQualityEvaluator,
 )
-from .v4.orchestrator import FinalTranscriptInput, V4ProductionOrchestrator
+from .v4.orchestrator import V4ProductionOrchestrator
+from .v4.scheduler import DurableAnalyzerWorker
+from .chat_application import (
+    ParticipantTurnError,
+    ParticipantTurnIngress,
+    VisualProposalActionService,
+    WorkshopConversationProjector,
+)
+from .chat_contracts import (
+    ExactTextPlaybackIntent,
+    ExactTextPlaybackReceipt,
+    FinishWorkshopIntent,
+    SubmitTypedResponseIntent,
+    VisualProposalActionIntent,
+    WorkshopConversationContext,
+)
+from .chatbot_provider import ChatbotProvider, OpenAIResponsesChatbotProvider
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-SPEC_ENG_ROOT = BACKEND_ROOT.parent / "Spec_Eng"
+SPEC_ENG_ROOT = next(
+    (
+        candidate
+        for candidate in (BACKEND_ROOT.parent / "Spec_Eng", *BACKEND_ROOT.parents)
+        if (candidate / "docs").is_dir() and (candidate / "app").is_dir()
+    ),
+    BACKEND_ROOT.parent / "Spec_Eng",
+)
 V4_ROOT = SPEC_ENG_ROOT / "spec-workshop-contracts-and-interaction-model-v4"
 QUALITY_CONTRACT_PATH = Path(specops_contracts.__file__).resolve().parent / "semantic-quality-contract.yaml"
 DEMO_SESSION_ID = stable_id("csv-export-workshop:session")
@@ -56,7 +79,7 @@ def _analyzer_contract() -> c.AnalyzerContractBinding:
         instruction_set_version=1,
         instruction_set_hash="sha256:" + hashlib.sha256(instruction).hexdigest(),
         semantic_quality_contract_id="SEMANTIC-QUALITY-CONTRACT",
-        semantic_quality_contract_version="2.1.0",
+        semantic_quality_contract_version="2.2.0",
         semantic_quality_contract_hash=_sha256(QUALITY_CONTRACT_PATH),
         provider_schema_version="1.0.0",
         model="gpt-5.6-terra",
@@ -71,6 +94,7 @@ def create_app(
     source_catalog: SourceCatalog | None = None,
     live_provider: LiveVoiceProvider | None = None,
     analyzer_adapter: StoredConversationOpenAIAdapter | Any | None = None,
+    chatbot_provider: ChatbotProvider | Any | None = None,
     quality_evaluator: Any | None = None,
 ) -> FastAPI:
     runtime_clock = clock or SystemClock()
@@ -123,6 +147,11 @@ def create_app(
     evaluator = quality_evaluator or FreshConversationTerraQualityEvaluator(
         api_key=runtime_settings.openai_api_key.get_secret_value(), now=runtime_clock.now
     )
+    chatbot = chatbot_provider
+    if chatbot is None and analyzer_adapter is None:
+        chatbot = OpenAIResponsesChatbotProvider(
+            api_key=runtime_settings.openai_api_key.get_secret_value()
+        )
     orchestrator = V4ProductionOrchestrator(
         foundation=foundation,
         adapter=adapter,
@@ -131,103 +160,180 @@ def create_app(
         sources=sources,
         analyzer_contract=_analyzer_contract(),
         quality_evaluator=evaluator,
+        chatbot_provider=chatbot,
         now=runtime_clock.now,
     )
-    voice = live_provider or GeminiLiveProvider(
-        api_key=runtime_settings.gemini_api_key.get_secret_value(),
-        model=runtime_settings.gemini_model,
+    client_presence = WorkshopClientPresence(orchestrator)
+    projector = WorkshopConversationProjector(
+        foundation,
+        case_id=bootstrap.case_id,
+        session_id=DEMO_SESSION_ID,
     )
-    live_transport = V4LiveTransport(voice, orchestrator)
+    ingress = ParticipantTurnIngress(
+        foundation,
+        case_id=bootstrap.case_id,
+        session_id=DEMO_SESSION_ID,
+        actor_id=bootstrap.pm_actor_id,
+    )
+    proposal_actions = VisualProposalActionService(projector, orchestrator)
 
-    app = FastAPI(title="SpecOps Workshop", docs_url=None, redoc_url=None)
+    worker = DurableAnalyzerWorker(
+        orchestrator, has_active_clients=client_presence.has_active_clients
+    )
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        worker_task = asyncio.create_task(worker.run_forever())
+        try:
+            yield
+        finally:
+            worker.stop()
+            await asyncio.gather(worker_task, return_exceptions=True)
+
+    app = FastAPI(
+        title="SpecOps Workshop", docs_url=None, redoc_url=None, lifespan=lifespan
+    )
     app.state.settings = runtime_settings
     app.state.bootstrap = bootstrap
     app.state.source_catalog = catalog
     app.state.session_id = DEMO_SESSION_ID
-    app.state.live_provider = voice
-    app.state.live_transport = live_transport
+    app.state.client_presence = client_presence
     app.state.v4_source_uploads = sources
     app.state.v4_source_set_hash = source_set_hash
     app.state.workshop_protocol_orchestrator = orchestrator
     app.state.openai_adapter = adapter
     app.state.artifact_quality_evaluator = evaluator
-    install_workshop_protocol_api(app, foundation)
+    app.state.analyzer_worker = worker
+    app.state.participant_turn_ingress = ingress
+    app.state.workshop_conversation_projector = projector
+    app.state.visual_proposal_actions = proposal_actions
+    install_workshop_protocol_api(app, foundation, participant_runtime=True)
 
     @app.get("/api/bootstrap", response_model=BootstrapView)
     async def bootstrap_view() -> BootstrapView:
         return bootstrap
 
-    @app.get("/api/workshop")
-    async def workshop_projection():
-        case = foundation.get_case(bootstrap.case_id)
-        transcripts = foundation.final_transcripts(bootstrap.case_id)
+    @app.get("/api/workshop", response_model=WorkshopConversationContext)
+    async def workshop_projection() -> WorkshopConversationContext:
+        return projector.project()
+
+    @app.get("/api/workshop/preparation")
+    async def workshop_preparation():
+        value = foundation.preparation_projection(bootstrap.case_id)
+        phase = {
+            "VALIDATING_DOCUMENTS": "UPLOADING_SOURCES",
+            "PREPARING_ANALYZER": "BOOTSTRAPPING",
+            "ANALYZER_REVIEWING_DOCUMENTS": "BOOTSTRAPPING",
+            "FORMULATING_WORKSHOP_PLAN": "ADMITTING_GUIDANCE",
+            "VALIDATING_INITIAL_RUNWAY": "ADMITTING_GUIDANCE",
+            "READY": "READY",
+            "FAILED": "FAILED",
+        }[value["phase"]]
+        message = {
+            "UPLOADING_SOURCES": "Preparing Workshop sources…",
+            "BOOTSTRAPPING": "Analyzing the PM Spec and Technical Contract…",
+            "ADMITTING_GUIDANCE": "Preparing the first questions…",
+            "READY": None,
+            "FAILED": "Workshop preparation needs attention. Retry preparation.",
+        }[phase]
         return {
-            "protocol_version": c.PROTOCOL_VERSION,
-            "case_id": str(case.case_id),
-            "session_id": str(case.session_id),
-            "case_revision": foundation.case_revision(case.case_id),
-            "readiness": case.readiness.value,
-            "review_obligation": case.review_obligation.value,
-            "session": {
-                "workshop_state": "ACTIVE",
-                "conversation_phase": "WORKSHOP",
-                "call_state": "READY",
-                "revision_locked": False,
-                "revision_lock_reason": None,
-            },
-            "final_transcripts": [
-                {
-                    "event_id": str(item.event_id),
-                    "turn_sequence": item.sequence_number,
-                    "version": item.transcript_version,
-                    "normalized_text": item.text,
-                    "correction_of_version": None,
-                    "speaker_actor_id": (
-                        None if item.speaker_actor_id is None else str(item.speaker_actor_id)
-                    ),
-                }
-                for item in transcripts
-            ],
-            "pending_proposal": None,
-            "governance": None,
-            "review_requests": [],
-            "handoff": None,
-            "analyzer_context_status": (
-                "ACTIVE"
-                if foundation.active_analyzer_context(case.case_id) is not None
-                else "REBUILD_REQUIRED"
+            "phase": phase,
+            "message": message,
+            "delayed_message": (
+                "Preparation is taking longer than 30 seconds. It is still running; "
+                "you may leave and return."
+                if value["delayed"] and phase not in {"READY", "FAILED"}
+                else None
             ),
-            "last_final_transcript_sequence": (
-                None if not transcripts else transcripts[-1].sequence_number
-            ),
-            "decision_review": foundation.current_decision_view(case.case_id),
-            "artifact_review": foundation.current_artifact_review(case.case_id),
         }
 
-    @app.post("/api/session/final-turn")
-    async def final_turn(value: FinalTurnInput):
+    @app.post("/api/workshop/responses")
+    async def submit_response(value: SubmitTypedResponseIntent):
         try:
-            return await orchestrator.record_final_transcript(
-                FinalTranscriptInput(
-                    turn_sequence=value.turn_sequence,
-                    text=value.text,
-                    provider_request_id=value.provider_request_id,
-                    speaker_actor_id=bootstrap.pm_actor_id,
-                    actor="PM",
+            return ingress.submit_typed(value)
+        except ParticipantTurnError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from None
+
+    @app.post("/api/workshop/proposals/{proposal_ref}/confirm")
+    async def confirm_proposal(proposal_ref: str, value: VisualProposalActionIntent):
+        if proposal_ref != value.binding.proposal_ref:
+            raise HTTPException(status_code=422, detail={"code": "MALFORMED_ACTION"})
+        try:
+            return proposal_actions.confirm(value)
+        except (ParticipantTurnError, FoundationProtocolError, ValueError) as exc:
+            code = exc.code if hasattr(exc, "code") else str(exc)
+            if hasattr(code, "value"):
+                code = code.value
+            raise HTTPException(status_code=409, detail={"code": code}) from None
+
+    @app.post("/api/workshop/proposals/{proposal_ref}/edit")
+    async def edit_proposal(proposal_ref: str, value: VisualProposalActionIntent):
+        if proposal_ref != value.binding.proposal_ref:
+            raise HTTPException(status_code=422, detail={"code": "MALFORMED_ACTION"})
+        try:
+            return proposal_actions.edit(value)
+        except ParticipantTurnError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from None
+
+    @app.post("/api/workshop/proposals/{proposal_ref}/reject")
+    async def reject_proposal(proposal_ref: str, value: VisualProposalActionIntent):
+        if proposal_ref != value.binding.proposal_ref:
+            raise HTTPException(status_code=422, detail={"code": "MALFORMED_ACTION"})
+        try:
+            return proposal_actions.reject(value)
+        except ParticipantTurnError as exc:
+            raise HTTPException(status_code=409, detail={"code": exc.code}) from None
+
+    @app.post("/api/workshop/finish")
+    async def finish_workshop(value: FinishWorkshopIntent):
+        context = projector.project()
+        existing_completion = foundation.workshop_completion_receipt(bootstrap.case_id)
+        if existing_completion is None:
+            if value.expected_case_revision != context.case_revision:
+                raise HTTPException(status_code=409, detail={"code": "STALE_STATE"})
+            if not context.committed_turns:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "NO_COMMITTED_TURNS"},
                 )
+            if any(
+                item.status.value in {"PENDING", "EDIT_REQUESTED"}
+                for item in context.proposal_statuses
+            ):
+                raise HTTPException(status_code=409, detail={"code": "PENDING_PROPOSALS"})
+        try:
+            return await orchestrator.complete_workshop(
+                operation_key=f"finish-{value.client_action_id}",
+                source=c.WorkshopCompletionSource.BUTTON,
             )
-        except ProviderAdapterError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail=exc.receipt.model_dump(mode="json"),
-            ) from None
         except (FoundationProtocolError, ValueError) as exc:
             code = exc.code.value if isinstance(exc, FoundationProtocolError) else str(exc)
             raise HTTPException(status_code=409, detail={"code": code}) from None
 
-    @app.websocket("/ws/live")
-    async def live_socket(websocket: WebSocket) -> None:
-        await live_transport.handle(websocket)
+    @app.post(
+        "/api/workshop/playback",
+        response_model=ExactTextPlaybackReceipt,
+    )
+    async def prepare_playback(
+        value: ExactTextPlaybackIntent,
+    ) -> ExactTextPlaybackReceipt:
+        context = projector.project()
+        question = next(
+            (
+                item
+                for item in context.question_runway.questions
+                if item.question_id == value.question_id
+                and item.question_version == value.question_version
+            ),
+            None,
+        )
+        if question is None or question.exact_text != value.exact_text:
+            raise HTTPException(status_code=409, detail={"code": "STALE_QUESTION"})
+        return ExactTextPlaybackReceipt(exact_text=question.exact_text)
+
+    @app.websocket("/ws/presence")
+    async def presence_socket(websocket: WebSocket) -> None:
+        await client_presence.handle(websocket)
 
     frontend_dist = BACKEND_ROOT / "frontend" / "dist"
     if frontend_dist.is_dir():

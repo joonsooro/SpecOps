@@ -25,6 +25,8 @@ from pydantic import (
 
 
 PROTOCOL_VERSION = "1.0.0"
+INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT = 3
+INITIAL_RUNWAY_DEPTH = 1 + INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT
 MAX_INT = 9_223_372_036_854_775_807
 
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0, le=MAX_INT)]
@@ -214,7 +216,7 @@ class AnalyzerContractBinding(ContractModel):
     instruction_set_version: PositiveInt
     instruction_set_hash: Sha256
     semantic_quality_contract_id: Literal["SEMANTIC-QUALITY-CONTRACT"]
-    semantic_quality_contract_version: Literal["2.1.0"]
+    semantic_quality_contract_version: Literal["2.2.0"]
     semantic_quality_contract_hash: Sha256
     provider_schema_version: Literal["1.0.0"]
     model: Literal["gpt-5.6-terra"]
@@ -400,6 +402,15 @@ class EvidenceCandidate(ContractModel):
     relevance_claim: Statement
     quoted_text_candidate: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=8000)] | None
 
+    @model_validator(mode="after")
+    def quote_matches_quote_search_locator(self) -> EvidenceCandidate:
+        if isinstance(self.locator, QuoteSearchLocator):
+            if self.quoted_text_candidate != self.locator.exact_quote:
+                raise ValueError(
+                    "QUOTE_SEARCH quoted_text_candidate must exactly equal locator exact_quote"
+                )
+        return self
+
 
 class ProblemKind(StrEnum):
     AMBIGUITY = "AMBIGUITY"
@@ -508,7 +519,13 @@ class QuestionCandidate(ContractModel):
 
 class QuestionRunwayCandidate(ContractModel):
     recommended_question_key: CandidateKey
-    safe_alternate_question_keys: Annotated[tuple[CandidateKey, ...], Field(min_length=0, max_length=5)]
+    safe_alternate_question_keys: Annotated[
+        tuple[CandidateKey, ...],
+        Field(
+            min_length=INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT,
+            max_length=INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT,
+        ),
+    ]
     do_not_ask_question_keys: Annotated[tuple[CandidateKey, ...], Field(min_length=0, max_length=50)]
 
     @model_validator(mode="after")
@@ -1161,7 +1178,28 @@ class PlannedArtifactIdentity(ContractModel):
         str,
         StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
     ]
-    source_entity_refs: Annotated[tuple[FoundationEntityRef, ...], Field(max_length=100)]
+
+
+ArtifactIdentitySlotKey = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        pattern=r"^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+        max_length=69,
+    ),
+]
+
+
+class ArtifactIdentitySlot(ContractModel):
+    slot_key: ArtifactIdentitySlotKey
+    entity_kind: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    ordinal: PositiveInt
+    owner: Literal["ANALYZER", "FOUNDATION"]
+    foundation_id: UUID
+    allocation_mode: Literal["NEW_ENTITY", "BOUND_EXISTING"]
 
 
 class ArtifactSynthesisIdentityPlan(ContractModel):
@@ -1170,13 +1208,241 @@ class ArtifactSynthesisIdentityPlan(ContractModel):
     target: ArtifactDraftTarget
     based_on_case_revision: NonNegativeInt
     semantic_state_hash: Sha256
+    source_entity_refs: Annotated[
+        tuple[FoundationEntityRef, ...], Field(max_length=100)
+    ]
     planned_identities: Annotated[tuple[PlannedArtifactIdentity, ...], Field(min_length=1, max_length=10_000)]
+    slots: Annotated[tuple[ArtifactIdentitySlot, ...], Field(max_length=10_000)] = ()
 
     @model_validator(mode="after")
     def unique_identities(self) -> ArtifactSynthesisIdentityPlan:
         identities = [item.foundation_id for item in self.planned_identities]
         if len(identities) != len(set(identities)):
             raise ValueError("planned Foundation identities must be unique")
+        if not self.slots:
+            return self
+        slot_keys = [item.slot_key for item in self.slots]
+        ordinals = [(item.entity_kind, item.ordinal) for item in self.slots]
+        slot_identities = [item.foundation_id for item in self.slots]
+        if len(slot_keys) != len(set(slot_keys)):
+            raise ValueError("identity-plan slot keys must be unique")
+        if len(ordinals) != len(set(ordinals)):
+            raise ValueError("identity-plan kind ordinals must be unique")
+        if len(slot_identities) != len(set(slot_identities)):
+            raise ValueError("identity-plan slots must bind unique Foundation identities")
+        planned = {
+            (item.foundation_id, item.entity_kind) for item in self.planned_identities
+        }
+        slotted = {(item.foundation_id, item.entity_kind) for item in self.slots}
+        if planned != slotted:
+            raise ValueError("identity-plan slots must exactly cover planned identities")
+        if any(
+            item.allocation_mode == "BOUND_EXISTING" and item.owner != "FOUNDATION"
+            for item in self.slots
+        ):
+            raise ValueError("bound-existing slots must be Foundation-owned")
+        return self
+
+
+class ArtifactConstructionSlot(ContractModel):
+    slot_key: ArtifactIdentitySlotKey
+    foundation_id: UUID
+    foundation_version: PositiveInt
+    entity_kind: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    ordinal: PositiveInt
+    owner: Literal["ANALYZER", "FOUNDATION"]
+    allocation_mode: Literal["NEW_ENTITY", "BOUND_EXISTING"]
+    purpose: Statement
+
+
+class ArtifactConstructionBlueprint(ContractModel):
+    blueprint_version: Literal["1.0.0"]
+    slots: Annotated[
+        tuple[ArtifactConstructionSlot, ...], Field(min_length=1, max_length=10_000)
+    ]
+
+    @model_validator(mode="after")
+    def unique_slots(self) -> ArtifactConstructionBlueprint:
+        identities = [(item.foundation_id, item.foundation_version) for item in self.slots]
+        if len(identities) != len(set(identities)):
+            raise ValueError("construction slots must bind unique Foundation identities")
+        slot_keys = [item.slot_key for item in self.slots]
+        if len(slot_keys) != len(set(slot_keys)):
+            raise ValueError("construction slot keys must be unique")
+        return self
+
+
+class ConfirmedDecisionSynthesisBinding(ContractModel):
+    """Exact Foundation ceremony needed to project one confirmed decision."""
+
+    decision_id: UUID
+    decision_version: PositiveInt
+    classification: Domain
+    statement: Statement
+    rationale: Statement
+    alternatives_considered: Annotated[tuple[Statement, ...], Field(max_length=20)]
+    problem_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=25)]
+    evidence_ids: Annotated[tuple[UUID, ...], Field(min_length=1, max_length=100)]
+    confirmation_id: UUID
+    decision_batch_view_id: UUID
+    decision_batch_view_hash: Sha256
+    review_item_id: UUID
+    confirmed_case_revision: PositiveInt
+    actor_ref: UUID
+    authority_validation_id: UUID
+    transcript_event_id: UUID
+    confirmed_at: datetime
+
+
+class ArtifactSynthesisQualityRule(ContractModel):
+    """Exact quality-contract rule supplied as a construction constraint."""
+
+    rule_id: Annotated[
+        str, StringConstraints(strict=True, pattern=r"^(?:SPEC|TECH)-Q-[0-9]{3}$")
+    ]
+    name: Statement
+    dimension: ShortText
+    check_types: Annotated[
+        tuple[Literal["structural", "referential", "semantic", "authority", "human"], ...],
+        Field(min_length=1, max_length=5),
+    ]
+    gate: Literal["block_confirmation", "block_handoff"]
+    primary_evaluator: Literal["analyzer", "foundation"]
+    requirement: Statement
+    pass_condition: Statement
+    evidence_of_pass: Statement
+    failure_effect: Literal[
+        "NEEDS_CLARIFICATION", "BLOCKED", "CONDITIONAL", "REJECT_MUTATION"
+    ]
+
+
+TECHNICAL_CLOSURE_RULE_LAYOUT = (
+    (
+        "ARCHITECTURE_CLOSURE",
+        "ARCHITECTURE",
+        "Represent every component and substrate dependency exactly once as an architecture node, and define every interaction purpose, data or signal, and trust-boundary crossing.",
+    ),
+    (
+        "RESPONSIBILITY_CLOSURE",
+        "RESPONSIBILITY",
+        "Assign every technical responsibility to exactly one owned component and connect build units, interfaces, data contracts, failures, and dependencies to those components.",
+    ),
+    (
+        "INTERFACE_CLOSURE",
+        "INTERFACE",
+        "For every independently executable operation define producer, consumers, input, output, preconditions, postconditions, errors, authorization, idempotency, timeout, and versioning.",
+    ),
+    (
+        "DATA_CLOSURE",
+        "DATA",
+        "Map every material Spec data rule to field-level source, representation, null and invalid behavior, classification, retention, consistency, and temporal or numeric boundaries.",
+    ),
+    (
+        "WORKFLOW_CLOSURE",
+        "WORKFLOW",
+        "For every workflow define exactly one initial state, transitions for every nonterminal state, failure behavior, concurrency behavior, and invalid-transition behavior.",
+    ),
+    (
+        "DELIVERY_GOVERNANCE_CLOSURE",
+        "DELIVERY_GOVERNANCE",
+        "Assign rollout ownership; materialize every Ask First obligation as one owned approval interface, durable receipt, lifecycle, fail-closed control, audit record, verification, and exact trace; keep only concrete evidence-backed choices in engineering decisions and place unresolved choices in review obligations with an owner, required evidence, and downstream effect.",
+    ),
+)
+
+TECHNICAL_CLOSURE_OBLIGATION_PATHS = (
+    ("requirements", "requirement"),
+    ("data_rules", "data_rule"),
+    ("acceptance_checks", "acceptance_check"),
+    ("quality_attributes", "quality_attribute"),
+)
+
+
+def technical_closure_obligations_from_spec_payload(
+    payload: dict[str, Any],
+) -> tuple[tuple[str, UUID, str], ...]:
+    """Return the exact ordered Spec identities that Technical must cover."""
+
+    result: list[tuple[str, UUID, str]] = []
+    for collection, source_kind in TECHNICAL_CLOSURE_OBLIGATION_PATHS:
+        values = payload.get(collection, [])
+        if not isinstance(values, list):
+            raise ValueError("confirmed Spec closure collection is invalid")
+        for index, item in enumerate(values):
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                raise ValueError("confirmed Spec closure item has no identity")
+            result.append((source_kind, UUID(item["id"]), f"/{collection}/{index}"))
+    behaviour = payload.get("behaviour_contract", {})
+    if not isinstance(behaviour, dict):
+        raise ValueError("confirmed Spec behavior contract is invalid")
+    for collection in ("always", "ask_first", "never"):
+        values = behaviour.get(collection, [])
+        if not isinstance(values, list):
+            raise ValueError("confirmed Spec behavior collection is invalid")
+        for index, item in enumerate(values):
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                raise ValueError("confirmed Spec behavior item has no identity")
+            result.append(
+                (
+                    "behaviour_rule",
+                    UUID(item["id"]),
+                    f"/behaviour_contract/{collection}/{index}",
+                )
+            )
+    return tuple(result)
+
+
+class TechnicalClosureRule(ContractModel):
+    rule_key: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    section: Literal[
+        "ARCHITECTURE",
+        "RESPONSIBILITY",
+        "INTERFACE",
+        "DATA",
+        "WORKFLOW",
+        "DELIVERY_GOVERNANCE",
+    ]
+    requirement: Statement
+
+
+class TechnicalClosureObligation(ContractModel):
+    source_kind: Literal[
+        "requirement",
+        "data_rule",
+        "acceptance_check",
+        "quality_attribute",
+        "behaviour_rule",
+    ]
+    source_ref: UUID
+    source_pointer: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^/(?:[a-z][a-z0-9_]*|[0-9]+)(?:/(?:[a-z][a-z0-9_]*|[0-9]+))*$"),
+    ]
+
+
+class TechnicalClosureManifest(ContractModel):
+    manifest_version: Literal["1.0.0"]
+    rules: Annotated[tuple[TechnicalClosureRule, ...], Field(min_length=6, max_length=6)]
+    obligations: Annotated[
+        tuple[TechnicalClosureObligation, ...], Field(min_length=1, max_length=1_000)
+    ]
+
+    @model_validator(mode="after")
+    def exact_rules_and_unique_obligations(self) -> TechnicalClosureManifest:
+        supplied_rules = tuple(
+            (item.rule_key, item.section, item.requirement) for item in self.rules
+        )
+        if supplied_rules != TECHNICAL_CLOSURE_RULE_LAYOUT:
+            raise ValueError("Technical closure manifest rules changed")
+        identities = [item.source_ref for item in self.obligations]
+        pointers = [item.source_pointer for item in self.obligations]
+        if len(identities) != len(set(identities)) or len(pointers) != len(set(pointers)):
+            raise ValueError("Technical closure obligations must be unique")
         return self
 
 
@@ -1200,16 +1466,17 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
     request_type: Literal[AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS]
     target: ArtifactDraftTarget
     identity_plan: ArtifactSynthesisIdentityPlan
+    construction_blueprint: ArtifactConstructionBlueprint
     foundation_snapshot: FoundationSemanticSnapshot
-    canonical_semantic_state_json: JsonObjectText
+    quality_rule_manifest: Annotated[
+        tuple[ArtifactSynthesisQualityRule, ...], Field(min_length=26, max_length=26)
+    ]
+    confirmed_decision_bindings: Annotated[
+        tuple[ConfirmedDecisionSynthesisBinding, ...], Field(max_length=26)
+    ]
     payload_schema_id: Literal["spec-package-payload"]
-    payload_schema_version: Literal["4.0.0"]
+    payload_schema_version: Literal["4.0.2"]
     requested_output: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
-
-    @field_validator("canonical_semantic_state_json")
-    @classmethod
-    def valid_semantic_state(cls, value: str) -> str:
-        return validate_json_object_text(value, "canonical semantic state")
 
     @model_validator(mode="after")
     def matching_snapshot_and_target(self) -> SpecPackageSynthesisRequest:
@@ -1223,6 +1490,50 @@ class SpecPackageSynthesisRequest(AnalyzerRequestEnvelope):
             raise ValueError("request and snapshot case revisions must match")
         if self.source_set_hash != self.foundation_snapshot.source_set_hash:
             raise ValueError("request and snapshot source-set hashes must match")
+        expected_rules = tuple(f"SPEC-Q-{index:03d}" for index in range(1, 27))
+        if tuple(item.rule_id for item in self.quality_rule_manifest) != expected_rules:
+            raise ValueError("Spec synthesis requires the exact ordered 26-rule manifest")
+        snapshot_decisions = {
+            (item.decision_id, item.decision_version): item
+            for item in self.foundation_snapshot.decisions
+            if item.status is SemanticRecordStatus.CONFIRMED
+        }
+        supplied = {
+            (item.decision_id, item.decision_version): item
+            for item in self.confirmed_decision_bindings
+        }
+        if set(supplied) != set(snapshot_decisions):
+            raise ValueError("Spec synthesis must bind every confirmed Foundation decision")
+        if any(
+            supplied[key].statement != snapshot_decisions[key].statement
+            or supplied[key].problem_ids != snapshot_decisions[key].problem_ids
+            or supplied[key].evidence_ids != snapshot_decisions[key].evidence_ids
+            for key in supplied
+        ):
+            raise ValueError("confirmed decision synthesis binding changed semantic content")
+        planned = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.identity_plan.planned_identities
+        }
+        blueprint = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.construction_blueprint.slots
+        }
+        if blueprint != planned:
+            raise ValueError("construction blueprint must bind every planned identity exactly")
+        blueprint_owners = {
+            (item.foundation_id, item.foundation_version): item.owner
+            for item in self.construction_blueprint.slots
+        }
+        if any(planned.get(key) != "DECISION" for key in supplied):
+            raise ValueError("every confirmed decision must retain its canonical planned identity")
+        if any(blueprint_owners.get(key) != "FOUNDATION" for key in supplied):
+            raise ValueError("confirmed decisions must be Foundation-owned construction slots")
+        actor_refs = {item.actor_ref for item in self.confirmed_decision_bindings}
+        if any(planned.get((actor_ref, 1)) != "ACTOR" for actor_ref in actor_refs):
+            raise ValueError("every confirming actor must retain its canonical planned identity")
+        if any(blueprint_owners.get((actor_ref, 1)) != "FOUNDATION" for actor_ref in actor_refs):
+            raise ValueError("confirming actors must be Foundation-owned construction slots")
         return self
 
 
@@ -1230,17 +1541,13 @@ class TechnicalContractSynthesisRequest(AnalyzerRequestEnvelope):
     request_type: Literal[AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS]
     target: ArtifactDraftTarget
     identity_plan: ArtifactSynthesisIdentityPlan
+    construction_blueprint: ArtifactConstructionBlueprint
+    technical_closure_manifest: TechnicalClosureManifest
     confirmed_spec: ConfirmedSpecSynthesisBinding
     foundation_snapshot: FoundationSemanticSnapshot
-    canonical_semantic_state_json: JsonObjectText
     payload_schema_id: Literal["technical-contract-payload"]
     payload_schema_version: Literal["4.0.0"]
     requested_output: Literal["TECHNICAL_CONTRACT_SYNTHESIS_CANDIDATE"]
-
-    @field_validator("canonical_semantic_state_json")
-    @classmethod
-    def valid_semantic_state(cls, value: str) -> str:
-        return validate_json_object_text(value, "canonical semantic state")
 
     @model_validator(mode="after")
     def matching_snapshot_and_target(self) -> TechnicalContractSynthesisRequest:
@@ -1256,6 +1563,24 @@ class TechnicalContractSynthesisRequest(AnalyzerRequestEnvelope):
             raise ValueError("request and snapshot source-set hashes must match")
         if self.based_on_case_revision < self.confirmed_spec.confirmed_case_revision:
             raise ValueError("Technical synthesis cannot precede the confirmed Spec commit")
+        planned = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.identity_plan.planned_identities
+        }
+        blueprint = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.construction_blueprint.slots
+        }
+        if blueprint != planned:
+            raise ValueError("construction blueprint must bind every planned identity exactly")
+        spec_payload = json.loads(self.confirmed_spec.canonical_payload_json)
+        expected_obligations = technical_closure_obligations_from_spec_payload(spec_payload)
+        supplied_obligations = tuple(
+            (item.source_kind, item.source_ref, item.source_pointer)
+            for item in self.technical_closure_manifest.obligations
+        )
+        if supplied_obligations != expected_obligations:
+            raise ValueError("Technical closure manifest changed confirmed Spec obligations")
         return self
 
 
@@ -1277,10 +1602,53 @@ class ArtifactPayloadSynthesisCandidate(ContractModel):
         return validate_json_object_text(value, "candidate payload")
 
 
+class ArtifactIdentityAssignment(ContractModel):
+    slot_key: ArtifactIdentitySlotKey
+    entity_kind: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Z][A-Z0-9_]{1,63}$"),
+    ]
+    ordinal: PositiveInt
+    foundation_id: UUID
+    canonical_pointer: Annotated[
+        str,
+        StringConstraints(
+            strict=True,
+            pattern=r"^(?:/(?:[^~/]|~0|~1)*)+$",
+            max_length=2_048,
+        ),
+    ]
+
+
 class SpecPackageSynthesisCandidate(ArtifactPayloadSynthesisCandidate):
     output_type: Literal["SPEC_PACKAGE_SYNTHESIS_CANDIDATE"]
     payload_schema_id: Literal["spec-package-payload"]
-    payload_schema_version: Literal["4.0.0"]
+    payload_schema_version: Literal["4.0.2"]
+    evidence_support_proposals: Annotated[
+        tuple["SpecEvidenceSupportProposalCandidate", ...], Field(max_length=1_000)
+    ] = ()
+    identity_assignment_map: Annotated[
+        tuple[ArtifactIdentityAssignment, ...], Field(max_length=10_000)
+    ] = ()
+
+
+class SpecEvidenceSupportProposalCandidate(ContractModel):
+    evidence_ref: UUID | ArtifactIdentitySlotKey
+    finding_ref: UUID | ArtifactIdentitySlotKey
+    claim_ref: UUID | ArtifactIdentitySlotKey
+    claim_pointer: Annotated[
+        str,
+        StringConstraints(
+            strict=True,
+            pattern=r"^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
+            max_length=2_048,
+        ),
+    ]
+    source_role: SourceRole
+    locator: Statement
+    exact_excerpt: Annotated[
+        str, StringConstraints(strict=True, min_length=1, max_length=8_000)
+    ]
 
 
 class TechnicalContractSynthesisCandidate(ArtifactPayloadSynthesisCandidate):
@@ -1507,11 +1875,63 @@ class ProviderFailureReceipt(ContractModel):
             raise ValueError("safe invalid-request categories require HTTP 400")
         if self.code in {ProviderFailureCode.TIMEOUT, ProviderFailureCode.CONNECTION} and self.status_code is not None:
             raise ValueError("transport failures do not carry an HTTP status")
-        if self.validation_diagnostics and (
-            self.code is not ProviderFailureCode.OUTPUT_INVALID
-            or self.stage is not ProviderProcessingStage.LOCAL_VALIDATION
+        local_output_diagnostics = (
+            self.code is ProviderFailureCode.OUTPUT_INVALID
+            and self.stage is ProviderProcessingStage.LOCAL_VALIDATION
+        )
+        safe_schema_terms = {
+            "additional_properties",
+            "all_of",
+            "any_of",
+            "const",
+            "contains",
+            "defs",
+            "dependent_required",
+            "dependent_schemas",
+            "enum",
+            "exclusive_maximum",
+            "exclusive_minimum",
+            "format",
+            "items",
+            "max_contains",
+            "max_items",
+            "max_length",
+            "maximum",
+            "min_contains",
+            "min_items",
+            "min_length",
+            "minimum",
+            "multiple_of",
+            "not",
+            "one_of",
+            "pattern",
+            "pattern_properties",
+            "property_names",
+            "ref",
+            "required",
+            "type",
+            "unevaluated_properties",
+            "unique_items",
+        }
+        provider_schema_diagnostics = (
+            self.code
+            in {
+                ProviderFailureCode.SCHEMA_REJECTED,
+                ProviderFailureCode.UNSUPPORTED_SCHEMA_KEYWORD,
+            }
+            and self.status_code == 400
+            and all(
+                item.code is SafeValidationCode.INVARIANT_FAILED
+                and len(item.path) == 2
+                and item.path[0] == "provider_schema"
+                and item.path[1] in safe_schema_terms
+                for item in self.validation_diagnostics
+            )
+        )
+        if self.validation_diagnostics and not (
+            local_output_diagnostics or provider_schema_diagnostics
         ):
-            raise ValueError("field-path diagnostics are only for local output validation")
+            raise ValueError("validation diagnostics are outside the safe allowlist")
         return self
 
 
@@ -1539,6 +1959,7 @@ class InvalidateAnalyzerContextCommand(StrictRevisionCommandEnvelope):
         "PROFILE_MISMATCH",
         "ANALYZER_CONTRACT_CHANGED",
         "CONTEXT_MISMATCH",
+        "PREPARATION_REJECTED",
         "WORKSHOP_CLOSED",
     ]
 
@@ -1558,6 +1979,43 @@ class RecordFinalTranscriptCommand(StrictRevisionCommandEnvelope):
             raise ValueError("command and transcript correlation_id must match")
         if self.expected_case_revision != self.transcript.observed_case_revision:
             raise ValueError("command revision must match transcript observation")
+        return self
+
+
+class WorkshopCompletionSource(StrEnum):
+    BUTTON = "BUTTON"
+    VOICE_EXPLICIT = "VOICE_EXPLICIT"
+    VOICE_CONFIRMED = "VOICE_CONFIRMED"
+
+
+class ClaimWorkshopCompleteCommand(StrictRevisionCommandEnvelope):
+    command_type: Literal["CLAIM_WORKSHOP_COMPLETE"]
+    acting_actor_id: UUID
+    completion_source: WorkshopCompletionSource
+    completion_transcript_event_id: UUID | None
+    confirmation_transcript_event_id: UUID | None
+
+    @model_validator(mode="after")
+    def source_binding(self) -> ClaimWorkshopCompleteCommand:
+        if self.completion_source is WorkshopCompletionSource.BUTTON:
+            if (
+                self.completion_transcript_event_id is not None
+                or self.confirmation_transcript_event_id is not None
+            ):
+                raise ValueError("button completion cannot carry transcript bindings")
+        elif self.completion_source is WorkshopCompletionSource.VOICE_EXPLICIT:
+            if (
+                self.completion_transcript_event_id is None
+                or self.confirmation_transcript_event_id is not None
+            ):
+                raise ValueError("explicit voice completion requires exactly one transcript")
+        elif (
+            self.completion_transcript_event_id is None
+            or self.confirmation_transcript_event_id is None
+            or self.completion_transcript_event_id
+            == self.confirmation_transcript_event_id
+        ):
+            raise ValueError("confirmed voice completion requires two distinct transcripts")
         return self
 
 
@@ -1650,6 +2108,9 @@ class AdmitSpecPackageSynthesisCommand(StrictRevisionCommandEnvelope):
     acting_actor_id: Literal["SYSTEM"]
     target: ArtifactDraftTarget
     identity_plan: ArtifactSynthesisIdentityPlan
+    confirmed_decision_bindings: Annotated[
+        tuple[ConfirmedDecisionSynthesisBinding, ...], Field(max_length=26)
+    ] = ()
     provider_request_hash: Sha256
     candidate: SpecPackageSynthesisCandidate
 
@@ -1674,6 +2135,15 @@ class AdmitSpecPackageSynthesisCommand(StrictRevisionCommandEnvelope):
             raise ValueError("command and candidate case revision must match")
         if self.expected_case_revision != self.identity_plan.based_on_case_revision:
             raise ValueError("command and identity plan case revision must match")
+        planned = {
+            (item.foundation_id, item.foundation_version): item.entity_kind
+            for item in self.identity_plan.planned_identities
+        }
+        if any(
+            planned.get((item.decision_id, item.decision_version)) != "DECISION"
+            for item in self.confirmed_decision_bindings
+        ):
+            raise ValueError("confirmed decisions must retain their canonical planned identities")
         return self
 
 
@@ -1842,12 +2312,35 @@ class ArtifactConfirmationBinding(ArtifactReviewSubjectBinding):
     view_hash: Sha256
 
 
+class ResidualQualityRiskAcceptance(ContractModel):
+    policy_id: Literal["V0_EXPLICIT_RESIDUAL_SPEC_RISK"]
+    audit_id: UUID
+    accepted_failed_rule_ids: Annotated[
+        tuple[
+            Annotated[
+                str,
+                StringConstraints(strict=True, pattern=r"^SPEC-Q-[0-9]{3}$"),
+            ],
+            ...,
+        ],
+        Field(min_length=1, max_length=26),
+    ]
+    acceptance_statement: Statement
+
+    @model_validator(mode="after")
+    def exact_ordered_rule_set(self) -> ResidualQualityRiskAcceptance:
+        if tuple(sorted(set(self.accepted_failed_rule_ids))) != self.accepted_failed_rule_ids:
+            raise ValueError("accepted failed rule IDs must be unique and sorted")
+        return self
+
+
 class ConfirmArtifactCommand(StrictRevisionCommandEnvelope):
     command_type: Literal["CONFIRM_ARTIFACT"]
     actor_authentication: ActorAuthentication
     binding: ArtifactConfirmationBinding
     confirmation_transcript_event_id: UUID
     approved_exception_ids: Annotated[tuple[UUID, ...], Field(max_length=100)]
+    residual_quality_risk_acceptance: ResidualQualityRiskAcceptance | None = None
 
     @model_validator(mode="after")
     def human_actor(self) -> ConfirmArtifactCommand:
@@ -1863,6 +2356,11 @@ class ConfirmArtifactCommand(StrictRevisionCommandEnvelope):
             raise ValueError("verbal assertion must bind the artifact confirmation transcript")
         if len(self.approved_exception_ids) != len(set(self.approved_exception_ids)):
             raise ValueError("approved exception IDs must be unique")
+        if (
+            self.residual_quality_risk_acceptance is not None
+            and self.binding.artifact_type != "SPEC_PACKAGE"
+        ):
+            raise ValueError("residual quality risk acceptance applies only to a Spec Package")
         return self
 
 
@@ -1870,6 +2368,7 @@ FoundationCommand = Annotated[
     ActivateAnalyzerContextCommand
     | InvalidateAnalyzerContextCommand
     | RecordFinalTranscriptCommand
+    | ClaimWorkshopCompleteCommand
     | AdmitInterviewBriefCommand
     | AdmitTurnAnalysisCommand
     | AdmitGuidanceCommand
@@ -1974,6 +2473,7 @@ class DecisionBatchResponseReceipt(ContractModel):
     receipt_type: Literal["DECISION_BATCH_RESPONSE"]
     command: FoundationCommandReceipt
     decision_batch_view_id: UUID
+    response_transcript_event_id: UUID | None = None
     item_results: Annotated[tuple[DecisionBatchItemReceipt, ...], Field(min_length=1, max_length=26)]
     resulting_readiness: Readiness
     resulting_review_obligation: ReviewObligation
@@ -1991,6 +2491,22 @@ class TranscriptRecordedReceipt(ContractModel):
     command: FoundationCommandReceipt
     transcript_event_id: UUID
     transcript_hash: Sha256
+
+
+class WorkshopCompletionState(StrEnum):
+    FINISHING_ANALYSIS = "FINISHING_ANALYSIS"
+    CLEANUP_PENDING = "CLEANUP_PENDING"
+    COMPLETE = "COMPLETE"
+
+
+class WorkshopCompletionReceipt(ContractModel):
+    receipt_type: Literal["WORKSHOP_COMPLETION"]
+    command: FoundationCommandReceipt
+    completion_source: WorkshopCompletionSource
+    completed_at: datetime
+    completion_transcript_event_id: UUID | None
+    confirmation_transcript_event_id: UUID | None
+    state: Literal[WorkshopCompletionState.FINISHING_ANALYSIS]
 
 
 class ProposalAdmissionReceipt(ContractModel):
@@ -2053,6 +2569,7 @@ class ArtifactConfirmationReceipt(ContractModel):
 FoundationReceipt = Annotated[
     AnalyzerContextCommandReceipt
     | TranscriptRecordedReceipt
+    | WorkshopCompletionReceipt
     | ProposalAdmissionReceipt
     | ArtifactSynthesisAdmissionReceipt
     | ReviewNarrationAdmissionReceipt
@@ -2175,6 +2692,7 @@ class AnalyzerContextInvalidatedEvent(EventEnvelope):
         "PROFILE_MISMATCH",
         "ANALYZER_CONTRACT_CHANGED",
         "CONTEXT_MISMATCH",
+        "PREPARATION_REJECTED",
         "WORKSHOP_CLOSED",
     ]
 
@@ -2271,6 +2789,8 @@ AnalyzerProviderCandidate = Annotated[
 
 __all__ = [
     "PROTOCOL_VERSION",
+    "INITIAL_RUNWAY_DEPTH",
+    "INITIAL_RUNWAY_SAFE_ALTERNATE_COUNT",
     "ActivateAnalyzerContextCommand",
     "AdmitSpecPackageSynthesisCommand",
     "AdmitTechnicalContractSynthesisCommand",
@@ -2286,11 +2806,17 @@ __all__ = [
     "AnalyzerProviderRequest",
     "AnalyzeFinalTurnRequest",
     "ApplyDecisionBatchResponseCommand",
+    "ArtifactConstructionBlueprint",
+    "ArtifactConstructionSlot",
     "ArtifactConfirmationBinding",
+    "ArtifactIdentityAssignment",
+    "ArtifactIdentitySlot",
+    "ArtifactSynthesisQualityRule",
     "ArtifactReviewSubjectBinding",
     "BootstrapAnalyzerRequest",
     "CaptureLowRiskFactCommand",
     "ConfirmArtifactCommand",
+    "ConfirmedDecisionSynthesisBinding",
     "GenerateReviewNarrationRequest",
     "DecisionBatchResponseReceipt",
     "DecisionBatchReviewView",
@@ -2309,6 +2835,12 @@ __all__ = [
     "SpecPackageSynthesisRequest",
     "TechnicalContractSynthesisCandidate",
     "TechnicalContractSynthesisRequest",
+    "TechnicalClosureManifest",
+    "TechnicalClosureObligation",
+    "TechnicalClosureRule",
+    "TECHNICAL_CLOSURE_OBLIGATION_PATHS",
+    "TECHNICAL_CLOSURE_RULE_LAYOUT",
+    "technical_closure_obligations_from_spec_payload",
     "TurnAnalysisCandidate",
     "VoiceConfirmationSelectionCandidate",
     "VoiceSessionCard",

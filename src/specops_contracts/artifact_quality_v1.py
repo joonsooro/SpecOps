@@ -6,12 +6,20 @@ attestations only; Foundation owns deterministic reduction and readiness.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 
 PROTOCOL_VERSION = "1.0.0"
@@ -19,7 +27,10 @@ Sha256 = Annotated[str, StringConstraints(pattern=r"^sha256:[a-f0-9]{64}$")]
 NonEmpty = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100_000)]
 CompleteText = Annotated[str, StringConstraints(min_length=1, max_length=2_000_000)]
 ProviderIdentifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9._:-]{1,512}$")]
-JsonPointer = Annotated[str, StringConstraints(pattern=r"^(?:|/(?:[^~/]|~0|~1)*)$", max_length=2_048)]
+JsonPointer = Annotated[
+    str,
+    StringConstraints(pattern=r"^(?:|(?:/(?:[^~/]|~0|~1)*)+)$", max_length=2_048),
+]
 
 
 class StrictModel(BaseModel):
@@ -135,7 +146,7 @@ class ArtifactAuditSubject(StrictModel):
     artifact_version: int = Field(strict=True, ge=1)
     record_revision: int = Field(strict=True, ge=1)
     payload_hash: Sha256
-    canonical_payload_json: NonEmpty
+    canonical_payload_json: CompleteText
 
 
 class AuditSourceDocument(StrictModel):
@@ -147,6 +158,180 @@ class AuditSourceDocument(StrictModel):
     filename: Annotated[str, StringConstraints(min_length=1, max_length=255)]
     media_type: Literal["text/markdown", "text/plain"]
     complete_text: CompleteText
+
+
+class ExactEvidenceSupportPair(StrictModel):
+    pair_id: UUID
+    finding_id: UUID
+    claim_ref: UUID
+    claim_pointer: JsonPointer
+    claim_hash: Sha256
+    exact_claim: NonEmpty
+    evidence_ref: UUID
+    source_id: UUID
+    source_hash: Sha256
+    locator: NonEmpty
+    exact_excerpt: NonEmpty
+    excerpt_hash: Sha256
+
+
+class ArtifactEvidenceSupportRequest(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    request_id: UUID
+    evaluator_run_id: UUID
+    request_hash: Sha256
+    artifact_id: UUID
+    artifact_version: int = Field(strict=True, ge=1)
+    record_revision: int = Field(strict=True, ge=1)
+    payload_hash: Sha256
+    pairs: tuple[ExactEvidenceSupportPair, ...] = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def unique_pairs(self):
+        pair_ids = [item.pair_id for item in self.pairs]
+        evidence_ids = [item.evidence_ref for item in self.pairs]
+        finding_ids = [item.finding_id for item in self.pairs]
+        if len(pair_ids) != len(set(pair_ids)):
+            raise ValueError("evidence-support pair IDs must be unique")
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("evidence identities must be unique")
+        if len(finding_ids) != len(set(finding_ids)):
+            raise ValueError("evidence finding identities must be unique")
+        return self
+
+
+class EvidenceSupportResult(StrEnum):
+    SUPPORTS = "SUPPORTS"
+    SUGGESTS = "SUGGESTS"
+    CONTRADICTS = "CONTRADICTS"
+    INSUFFICIENT = "INSUFFICIENT"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class EvidenceSupportAssessment(StrictModel):
+    pair_id: UUID
+    assessment: EvidenceSupportResult
+    confidence: float = Field(strict=True, ge=0, le=1)
+
+
+class ArtifactEvidenceSupportCandidate(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    output_type: Literal["ARTIFACT_EVIDENCE_SUPPORT_CANDIDATE"]
+    request_id: UUID
+    evaluator_run_id: UUID
+    request_hash: Sha256
+    artifact_id: UUID
+    artifact_version: int = Field(strict=True, ge=1)
+    record_revision: int = Field(strict=True, ge=1)
+    payload_hash: Sha256
+    assessments: tuple[EvidenceSupportAssessment, ...] = Field(
+        min_length=1, max_length=1_000
+    )
+
+    @model_validator(mode="after")
+    def unique_assessments(self):
+        pair_ids = [item.pair_id for item in self.assessments]
+        if len(pair_ids) != len(set(pair_ids)):
+            raise ValueError("evidence-support assessments must be unique")
+        return self
+
+
+class AllocatedRevisionIdentity(StrictModel):
+    foundation_id: UUID
+    foundation_version: int = Field(strict=True, ge=1)
+    entity_kind: Annotated[
+        str, StringConstraints(pattern=r"^[A-Z][A-Z0-9_]{1,63}$")
+    ]
+
+
+class ArtifactQualityRevisionRequest(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    revision_request_id: UUID
+    revision_request_version: Literal[1]
+    request_hash: Sha256
+    artifact_id: UUID
+    artifact_version: int = Field(strict=True, ge=1)
+    record_revision: int = Field(strict=True, ge=1)
+    based_on_case_revision: int = Field(strict=True, ge=0)
+    payload_hash: Sha256
+    canonical_payload_json: CompleteText
+    audit_id: UUID
+    finding_ids: tuple[UUID, ...] = Field(min_length=1, max_length=1_000)
+    failed_rule_ids: tuple[
+        Annotated[str, StringConstraints(pattern=r"^(?:SPEC|TECH)-Q-[0-9]{3}$")],
+        ...,
+    ] = Field(min_length=1, max_length=26)
+    canonical_artifact_pointers: tuple[JsonPointer, ...] = Field(
+        min_length=1, max_length=1_000
+    )
+    allocated_identities: tuple[AllocatedRevisionIdentity, ...] = Field(max_length=10_000)
+    immutable_projection_hash: Sha256
+    max_revision_attempts: Literal[1]
+
+    @model_validator(mode="after")
+    def unique_revision_bindings(self):
+        for values, label in (
+            (self.finding_ids, "finding IDs"),
+            (self.failed_rule_ids, "failed rule IDs"),
+            (self.canonical_artifact_pointers, "artifact pointers"),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"revision request {label} must be unique")
+        identities = [item.foundation_id for item in self.allocated_identities]
+        if len(identities) != len(set(identities)):
+            raise ValueError("allocated revision identities must be unique")
+        return self
+
+
+class ArtifactQualityRevisionReceipt(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    revision_request_id: UUID
+    revision_request_version: Literal[1]
+    request_hash: Sha256
+    artifact_id: UUID
+    artifact_version: int = Field(strict=True, ge=1)
+    prior_record_revision: int = Field(strict=True, ge=1)
+    resulting_record_revision: int = Field(strict=True, ge=2)
+    prior_payload_hash: Sha256
+    resulting_payload_hash: Sha256
+    audit_id: UUID
+    resulting_case_revision: int = Field(strict=True, ge=1)
+    replayed: bool
+
+
+class ArtifactRevisionPatch(StrictModel):
+    pointer: JsonPointer
+    replacement_value_json: CompleteText
+
+    @field_validator("replacement_value_json")
+    @classmethod
+    def valid_json_value(cls, value: str) -> str:
+        try:
+            json.loads(value)
+        except ValueError as exc:
+            raise ValueError("revision replacement must be valid JSON") from exc
+        return value
+
+
+class ArtifactQualityRevisionCandidate(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    output_type: Literal["ARTIFACT_QUALITY_REVISION_CANDIDATE"]
+    revision_request_id: UUID
+    revision_request_version: Literal[1]
+    request_hash: Sha256
+    artifact_id: UUID
+    artifact_version: int = Field(strict=True, ge=1)
+    record_revision: int = Field(strict=True, ge=1)
+    payload_hash: Sha256
+    attempt: Literal[1]
+    patches: tuple[ArtifactRevisionPatch, ...] = Field(min_length=1, max_length=1_000)
+
+    @model_validator(mode="after")
+    def unique_patch_pointers(self):
+        pointers = [item.pointer for item in self.patches]
+        if len(pointers) != len(set(pointers)):
+            raise ValueError("revision patch pointers must be unique")
+        return self
 
 
 class AuditTranscript(StrictModel):
@@ -162,7 +347,7 @@ class AuditTranscript(StrictModel):
 
 class QualityContractBinding(StrictModel):
     contract_id: Literal["SEMANTIC-QUALITY-CONTRACT"]
-    version: Literal["2.1.0"]
+    version: Literal["2.2.0"]
     content_hash: Sha256
 
 
@@ -193,7 +378,7 @@ class ConfirmedSpecAuditBinding(StrictModel):
     payload_hash: Sha256
     confirmation_id: UUID
     confirmed_case_revision: int = Field(strict=True, ge=1)
-    canonical_payload_json: NonEmpty
+    canonical_payload_json: CompleteText
 
 
 class ArtifactQualityAuditBundle(StrictModel):
@@ -313,6 +498,19 @@ class EvaluatorExecutionBinding(StrictModel):
     completed_at: datetime
 
 
+class StandaloneEvaluatorExecutionBinding(StrictModel):
+    """One stored Response whose request carries all required state."""
+
+    provider: Annotated[str, StringConstraints(pattern=r"^[A-Z][A-Z0-9_]{1,31}$")]
+    model: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    reasoning_effort: Literal["medium"]
+    provider_response_id: ProviderIdentifier
+    client_request_id: ProviderIdentifier
+    store_enabled: Literal[True]
+    started_at: datetime
+    completed_at: datetime
+
+
 class PrepareArtifactQualityAuditCommand(StrictModel):
     protocol_version: Literal["1.0.0"]
     command_id: UUID
@@ -332,6 +530,15 @@ class BindArtifactQualityEvaluatorCommand(StrictModel):
     provider_conversation_id: ProviderIdentifier
     client_request_id: ProviderIdentifier
     started_at: datetime
+
+
+class CheckpointArtifactQualityResponseCommand(StrictModel):
+    protocol_version: Literal["1.0.0"]
+    command_id: UUID
+    audit_id: UUID
+    request_hash: Sha256
+    client_request_id: ProviderIdentifier
+    provider_response_id: ProviderIdentifier
 
 
 class AdmitArtifactQualityAuditCommand(StrictModel):

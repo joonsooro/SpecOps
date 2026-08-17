@@ -12,8 +12,9 @@ from specops_contracts import workshop_v1 as c
 from specops_contracts import artifact_quality_v1 as q
 from specops_workflow.workshop_protocol import FoundationProtocolError, WorkshopFoundationService
 
-from .openai_adapter import safe_validation_diagnostics
+from .openai_adapter import ProviderAdapterError, safe_validation_diagnostics
 from .artifact_quality_adapter import ArtifactQualityEvaluatorError
+from .orchestrator import WorkshopCompletionOutcome
 
 
 router = APIRouter(prefix="/api/v4", tags=["Workshop Protocol 1.0.0"])
@@ -84,6 +85,7 @@ class ArtifactConfirmationIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     actor_authentication: c.ActorAuthentication
     confirmation_transcript_event_id: UUID
+    residual_quality_risk_acceptance: c.ResidualQualityRiskAcceptance | None = None
 
 
 class DecisionResponseIntent(BaseModel):
@@ -95,6 +97,11 @@ class DecisionResponseIntent(BaseModel):
         tuple[c.VoiceConfirmationSelectionItemCandidate, ...],
         Field(min_length=1, max_length=26),
     ]
+
+
+class WorkshopCompletionIntent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    operation_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
 
 
 
@@ -183,6 +190,25 @@ async def execute_foundation_command(
     request: Request, command=Depends(_parse_foundation_command)
 ) -> c.FoundationReceipt:
     return _execute(request, command)
+
+
+@router.post(
+    "/workshop/complete",
+    response_model=WorkshopCompletionOutcome,
+    responses={409: {"model": FoundationErrorEnvelope}},
+)
+async def complete_workshop(
+    request: Request, value: WorkshopCompletionIntent
+) -> WorkshopCompletionOutcome:
+    try:
+        return await request.app.state.workshop_protocol_orchestrator.complete_workshop(
+            operation_key=value.operation_key,
+            source=c.WorkshopCompletionSource.BUTTON,
+        )
+    except FoundationProtocolError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code.value}) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": str(exc)}) from None
 
 
 @router.post(
@@ -282,8 +308,26 @@ async def synthesize_artifact(
             status_code=503,
             detail=exc.receipt.model_dump(mode="json"),
         ) from None
+    except ProviderAdapterError as exc:
+        provider_failure = exc.receipt
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": provider_failure.code.value,
+                "stage": provider_failure.stage.value,
+                "status_code": provider_failure.status_code,
+                "retryable": provider_failure.retryable,
+                "validation_diagnostics": [
+                    item.model_dump(mode="json")
+                    for item in provider_failure.validation_diagnostics
+                ],
+            },
+        ) from None
     except FoundationProtocolError as exc:
-        raise HTTPException(status_code=409, detail={"code": exc.code.value}) from None
+        detail: dict[str, object] = {"code": exc.code.value}
+        if exc.safe_diagnostic_pointers:
+            detail["diagnostic_pointers"] = list(exc.safe_diagnostic_pointers)
+        raise HTTPException(status_code=409, detail=detail) from None
     except ValueError as exc:
         raise HTTPException(status_code=409, detail={"code": str(exc)}) from None
 
@@ -320,6 +364,7 @@ async def confirm_current_artifact(
         return request.app.state.workshop_protocol_orchestrator.confirm_current_artifact(
             actor_authentication=value.actor_authentication,
             confirmation_transcript_event_id=value.confirmation_transcript_event_id,
+            residual_quality_risk_acceptance=value.residual_quality_risk_acceptance,
         )
     except FoundationProtocolError as exc:
         raise HTTPException(status_code=409, detail={"code": exc.code.value}) from None
@@ -353,11 +398,29 @@ async def confirmed_artifact(
     return None if value is None else ConfirmedArtifactProjection.model_validate(value)
 
 
-def install_workshop_protocol_api(app: FastAPI, foundation: WorkshopFoundationService) -> None:
+def install_workshop_protocol_api(
+    app: FastAPI,
+    foundation: WorkshopFoundationService,
+    *,
+    participant_runtime: bool = False,
+) -> None:
     app.state.workshop_protocol_foundation = foundation
     # Append concrete routes so the established runtime's route-inspection
     # safety checks continue to see only path-bearing route objects.
-    app.router.routes.extend(router.routes)
+    excluded = {
+        "/api/v4/foundation/commands",
+        "/api/v4/workshop/complete",
+        "/api/v4/decisions/current/respond",
+    }
+    app.router.routes.extend(
+        route
+        for route in router.routes
+        if not participant_runtime
+        or (
+            route.path not in excluded
+            and not route.path.startswith("/api/v4/voice/")
+        )
+    )
     _install_raw_contract_definitions(app)
 
 

@@ -1,6 +1,6 @@
 {
   "artifact_quality_audit_protocol_version": "1.0.0",
-  "artifact_quality_contract_sha256": "b65435dae4b0858451d4af87968f99574f0e8c9b4e2ba83b5f9fcee48c17a763",
+  "artifact_quality_contract_sha256": "da67ab28631f7f8b93a00cb94b5c09863600b4504b33ee66870104815e01b441",
   "artifact_quality_contract_source": "artifact_quality_audit_v1.py",
   "artifact_schema_versions": {
     "envelope": "2.0.0",
@@ -8,7 +8,7 @@
     "spec_package": "4.0.0",
     "technical_contract": "4.0.0"
   },
-  "contract_sha256": "78e75dbe272b48ad7399d55da0ab405a28ce8063c985f91bffb227b5411ca66a",
+  "contract_sha256": "69d63eff0fd40967bb4b232ee7ee8ebd206d85d6a41319fcf8c4f89a99f7593f",
   "contract_source": "workshop_interaction_protocol_v1.py",
   "openai_artifact_quality_schema": "artifact_quality_audit",
   "openai_operations": [
@@ -20,6 +20,6 @@
     "TURN_ANALYSIS"
   ],
   "protocol_version": "1.0.0",
-  "semantic_quality_contract_sha256": "dec6100048189492a8d7c328724159c9cb46cc425fab76e981ade52a31983065",
-  "semantic_quality_contract_version": "2.1.0"
+  "semantic_quality_contract_sha256": "2241ba88f0dc26c10ce93e666d51f1a8ef711eb43cc83c350a539df50dac015c",
+  "semantic_quality_contract_version": "2.2.0"
 }

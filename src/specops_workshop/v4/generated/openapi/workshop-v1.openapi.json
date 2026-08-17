@@ -7,7 +7,7 @@
           "artifact_pointers": {
             "items": {
               "maxLength": 2048,
-              "pattern": "^(?:|/(?:[^~/]|~0|~1)*)$",
+              "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
               "type": "string"
             },
             "title": "Artifact Pointers",
@@ -790,6 +790,18 @@
             "const": "DECISION_BATCH_RESPONSE",
             "title": "Receipt Type",
             "type": "string"
+          },
+          "response_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Transcript Event Id"
           },
           "resulting_readiness": {
             "$ref": "#/components/schemas/Readiness"
@@ -1889,6 +1901,15 @@
             "title": "Command Type",
             "type": "string"
           },
+          "confirmed_decision_bindings": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_ConfirmedDecisionSynthesisBinding"
+            },
+            "maxItems": 26,
+            "title": "Confirmed Decision Bindings",
+            "type": "array"
+          },
           "correlation_id": {
             "format": "uuid",
             "title": "Correlation Id",
@@ -2326,7 +2347,7 @@
             "type": "string"
           },
           "semantic_quality_contract_version": {
-            "const": "2.1.0",
+            "const": "2.2.0",
             "title": "Semantic Quality Contract Version",
             "type": "string"
           }
@@ -2599,6 +2620,101 @@
         "title": "ArtifactDraftTarget",
         "type": "object"
       },
+      "V4_ArtifactIdentityAssignment": {
+        "additionalProperties": false,
+        "properties": {
+          "canonical_pointer": {
+            "maxLength": 2048,
+            "pattern": "^(?:/(?:[^~/]|~0|~1)*)+$",
+            "title": "Canonical Pointer",
+            "type": "string"
+          },
+          "entity_kind": {
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+            "title": "Entity Kind",
+            "type": "string"
+          },
+          "foundation_id": {
+            "format": "uuid",
+            "title": "Foundation Id",
+            "type": "string"
+          },
+          "ordinal": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "slot_key": {
+            "maxLength": 69,
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+            "title": "Slot Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_key",
+          "entity_kind",
+          "ordinal",
+          "foundation_id",
+          "canonical_pointer"
+        ],
+        "title": "ArtifactIdentityAssignment",
+        "type": "object"
+      },
+      "V4_ArtifactIdentitySlot": {
+        "additionalProperties": false,
+        "properties": {
+          "allocation_mode": {
+            "enum": [
+              "NEW_ENTITY",
+              "BOUND_EXISTING"
+            ],
+            "title": "Allocation Mode",
+            "type": "string"
+          },
+          "entity_kind": {
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}$",
+            "title": "Entity Kind",
+            "type": "string"
+          },
+          "foundation_id": {
+            "format": "uuid",
+            "title": "Foundation Id",
+            "type": "string"
+          },
+          "ordinal": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "owner": {
+            "enum": [
+              "ANALYZER",
+              "FOUNDATION"
+            ],
+            "title": "Owner",
+            "type": "string"
+          },
+          "slot_key": {
+            "maxLength": 69,
+            "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+            "title": "Slot Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_key",
+          "entity_kind",
+          "ordinal",
+          "owner",
+          "foundation_id",
+          "allocation_mode"
+        ],
+        "title": "ArtifactIdentitySlot",
+        "type": "object"
+      },
       "V4_ArtifactReviewSubjectBinding": {
         "additionalProperties": false,
         "properties": {
@@ -2683,6 +2799,23 @@
             "title": "Semantic State Hash",
             "type": "string"
           },
+          "slots": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_ArtifactIdentitySlot"
+            },
+            "maxItems": 10000,
+            "title": "Slots",
+            "type": "array"
+          },
+          "source_entity_refs": {
+            "items": {
+              "$ref": "#/components/schemas/V4_FoundationEntityRef"
+            },
+            "maxItems": 100,
+            "title": "Source Entity Refs",
+            "type": "array"
+          },
           "target": {
             "$ref": "#/components/schemas/V4_ArtifactDraftTarget"
           }
@@ -2693,6 +2826,7 @@
           "target",
           "based_on_case_revision",
           "semantic_state_hash",
+          "source_entity_refs",
           "planned_identities"
         ],
         "title": "ArtifactSynthesisIdentityPlan",
@@ -2849,6 +2983,119 @@
         "title": "CapturePolicy",
         "type": "string"
       },
+      "V4_ClaimWorkshopCompleteCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "acting_actor_id": {
+            "format": "uuid",
+            "title": "Acting Actor Id",
+            "type": "string"
+          },
+          "case_id": {
+            "format": "uuid",
+            "title": "Case Id",
+            "type": "string"
+          },
+          "causation_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Causation Id"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "command_type": {
+            "const": "CLAIM_WORKSHOP_COMPLETE",
+            "title": "Command Type",
+            "type": "string"
+          },
+          "completion_source": {
+            "$ref": "#/components/schemas/V4_WorkshopCompletionSource"
+          },
+          "completion_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Transcript Event Id"
+          },
+          "confirmation_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmation Transcript Event Id"
+          },
+          "correlation_id": {
+            "format": "uuid",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "expected_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 0,
+            "title": "Expected Case Revision",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$",
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "issued_at": {
+            "format": "date-time",
+            "title": "Issued At",
+            "type": "string"
+          },
+          "protocol_version": {
+            "const": "1.0.0",
+            "title": "Protocol Version",
+            "type": "string"
+          },
+          "session_id": {
+            "format": "uuid",
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "protocol_version",
+          "command_id",
+          "case_id",
+          "session_id",
+          "correlation_id",
+          "causation_id",
+          "idempotency_key",
+          "issued_at",
+          "acting_actor_id",
+          "expected_case_revision",
+          "command_type",
+          "completion_source",
+          "completion_transcript_event_id",
+          "confirmation_transcript_event_id"
+        ],
+        "title": "ClaimWorkshopCompleteCommand",
+        "type": "object"
+      },
       "V4_ClusterCouplingType": {
         "enum": [
           "SHARED_OUTCOME",
@@ -2965,6 +3212,17 @@
             "title": "Protocol Version",
             "type": "string"
           },
+          "residual_quality_risk_acceptance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/V4_ResidualQualityRiskAcceptance"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "session_id": {
             "format": "uuid",
             "title": "Session Id",
@@ -3043,6 +3301,135 @@
         ],
         "title": "ConfirmationMappingStatus",
         "type": "string"
+      },
+      "V4_ConfirmedDecisionSynthesisBinding": {
+        "additionalProperties": false,
+        "description": "Exact Foundation ceremony needed to project one confirmed decision.",
+        "properties": {
+          "actor_ref": {
+            "format": "uuid",
+            "title": "Actor Ref",
+            "type": "string"
+          },
+          "alternatives_considered": {
+            "items": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Alternatives Considered",
+            "type": "array"
+          },
+          "authority_validation_id": {
+            "format": "uuid",
+            "title": "Authority Validation Id",
+            "type": "string"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/V4_Domain"
+          },
+          "confirmation_id": {
+            "format": "uuid",
+            "title": "Confirmation Id",
+            "type": "string"
+          },
+          "confirmed_at": {
+            "format": "date-time",
+            "title": "Confirmed At",
+            "type": "string"
+          },
+          "confirmed_case_revision": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Confirmed Case Revision",
+            "type": "integer"
+          },
+          "decision_batch_view_hash": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Decision Batch View Hash",
+            "type": "string"
+          },
+          "decision_batch_view_id": {
+            "format": "uuid",
+            "title": "Decision Batch View Id",
+            "type": "string"
+          },
+          "decision_id": {
+            "format": "uuid",
+            "title": "Decision Id",
+            "type": "string"
+          },
+          "decision_version": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Decision Version",
+            "type": "integer"
+          },
+          "evidence_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "problem_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Problem Ids",
+            "type": "array"
+          },
+          "rationale": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "review_item_id": {
+            "format": "uuid",
+            "title": "Review Item Id",
+            "type": "string"
+          },
+          "statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          },
+          "transcript_event_id": {
+            "format": "uuid",
+            "title": "Transcript Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision_id",
+          "decision_version",
+          "classification",
+          "statement",
+          "rationale",
+          "alternatives_considered",
+          "problem_ids",
+          "evidence_ids",
+          "confirmation_id",
+          "decision_batch_view_id",
+          "decision_batch_view_hash",
+          "review_item_id",
+          "confirmed_case_revision",
+          "actor_ref",
+          "authority_validation_id",
+          "transcript_event_id",
+          "confirmed_at"
+        ],
+        "title": "ConfirmedDecisionSynthesisBinding",
+        "type": "object"
       },
       "V4_ConfirmedSpecSynthesisBinding": {
         "additionalProperties": false,
@@ -3787,6 +4174,7 @@
               "PROFILE_MISMATCH",
               "ANALYZER_CONTRACT_CHANGED",
               "CONTEXT_MISMATCH",
+              "PREPARATION_REJECTED",
               "WORKSHOP_CLOSED"
             ],
             "title": "Reason Code",
@@ -4144,21 +4532,12 @@
             "minimum": 1,
             "title": "Foundation Version",
             "type": "integer"
-          },
-          "source_entity_refs": {
-            "items": {
-              "$ref": "#/components/schemas/V4_FoundationEntityRef"
-            },
-            "maxItems": 100,
-            "title": "Source Entity Refs",
-            "type": "array"
           }
         },
         "required": [
           "foundation_id",
           "foundation_version",
-          "entity_kind",
-          "source_entity_refs"
+          "entity_kind"
         ],
         "title": "PlannedArtifactIdentity",
         "type": "object"
@@ -4490,8 +4869,8 @@
               "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+){0,11}$",
               "type": "string"
             },
-            "maxItems": 5,
-            "minItems": 0,
+            "maxItems": 3,
+            "minItems": 3,
             "title": "Safe Alternate Question Keys",
             "type": "array"
           }
@@ -4630,6 +5009,45 @@
           "transcript"
         ],
         "title": "RecordFinalTranscriptCommand",
+        "type": "object"
+      },
+      "V4_ResidualQualityRiskAcceptance": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_statement": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Acceptance Statement",
+            "type": "string"
+          },
+          "accepted_failed_rule_ids": {
+            "items": {
+              "pattern": "^SPEC-Q-[0-9]{3}$",
+              "type": "string"
+            },
+            "maxItems": 26,
+            "minItems": 1,
+            "title": "Accepted Failed Rule Ids",
+            "type": "array"
+          },
+          "audit_id": {
+            "format": "uuid",
+            "title": "Audit Id",
+            "type": "string"
+          },
+          "policy_id": {
+            "const": "V0_EXPLICIT_RESIDUAL_SPEC_RISK",
+            "title": "Policy Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "policy_id",
+          "audit_id",
+          "accepted_failed_rule_ids",
+          "acceptance_statement"
+        ],
+        "title": "ResidualQualityRiskAcceptance",
         "type": "object"
       },
       "V4_ReviewConsideration": {
@@ -4985,6 +5403,85 @@
         "title": "SpeakerAttributionMethod",
         "type": "string"
       },
+      "V4_SpecEvidenceSupportProposalCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_pointer": {
+            "maxLength": 2048,
+            "pattern": "^(?:|(?:/(?:[^~/]|~0|~1)*)+)$",
+            "title": "Claim Pointer",
+            "type": "string"
+          },
+          "claim_ref": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "maxLength": 69,
+                "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+                "type": "string"
+              }
+            ],
+            "title": "Claim Ref"
+          },
+          "evidence_ref": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "maxLength": 69,
+                "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+                "type": "string"
+              }
+            ],
+            "title": "Evidence Ref"
+          },
+          "exact_excerpt": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Exact Excerpt",
+            "type": "string"
+          },
+          "finding_ref": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "maxLength": 69,
+                "pattern": "^[A-Z][A-Z0-9_]{1,63}:[0-9]{4}$",
+                "type": "string"
+              }
+            ],
+            "title": "Finding Ref"
+          },
+          "locator": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Locator",
+            "type": "string"
+          },
+          "source_role": {
+            "$ref": "#/components/schemas/V4_SourceRole"
+          }
+        },
+        "required": [
+          "evidence_ref",
+          "finding_ref",
+          "claim_ref",
+          "claim_pointer",
+          "source_role",
+          "locator",
+          "exact_excerpt"
+        ],
+        "title": "SpecEvidenceSupportProposalCandidate",
+        "type": "object"
+      },
       "V4_SpecPackageSynthesisCandidate": {
         "additionalProperties": false,
         "properties": {
@@ -5010,10 +5507,28 @@
             "title": "Context Id",
             "type": "string"
           },
+          "evidence_support_proposals": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_SpecEvidenceSupportProposalCandidate"
+            },
+            "maxItems": 1000,
+            "title": "Evidence Support Proposals",
+            "type": "array"
+          },
           "foundation_artifact_id": {
             "format": "uuid",
             "title": "Foundation Artifact Id",
             "type": "string"
+          },
+          "identity_assignment_map": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/V4_ArtifactIdentityAssignment"
+            },
+            "maxItems": 10000,
+            "title": "Identity Assignment Map",
+            "type": "array"
           },
           "identity_plan_id": {
             "format": "uuid",
@@ -5037,7 +5552,7 @@
             "type": "string"
           },
           "payload_schema_version": {
-            "const": "4.0.0",
+            "const": "4.0.2",
             "title": "Payload Schema Version",
             "type": "string"
           },
@@ -6095,6 +6610,15 @@
         "title": "VoiceConfirmationSelectionItemCandidate",
         "type": "object"
       },
+      "V4_WorkshopCompletionSource": {
+        "enum": [
+          "BUTTON",
+          "VOICE_EXPLICIT",
+          "VOICE_CONFIRMED"
+        ],
+        "title": "WorkshopCompletionSource",
+        "type": "string"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -6134,6 +6658,119 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WorkshopCompletionIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "operation_key": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+            "title": "Operation Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_key"
+        ],
+        "title": "WorkshopCompletionIntent",
+        "type": "object"
+      },
+      "WorkshopCompletionOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "receipt": {
+            "$ref": "#/components/schemas/WorkshopCompletionReceipt"
+          },
+          "replayed": {
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "FINISHING_ANALYSIS",
+              "CLEANUP_PENDING",
+              "COMPLETE"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt",
+          "state",
+          "replayed"
+        ],
+        "title": "WorkshopCompletionOutcome",
+        "type": "object"
+      },
+      "WorkshopCompletionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "$ref": "#/components/schemas/FoundationCommandReceipt"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "title": "Completed At",
+            "type": "string"
+          },
+          "completion_source": {
+            "$ref": "#/components/schemas/WorkshopCompletionSource"
+          },
+          "completion_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Transcript Event Id"
+          },
+          "confirmation_transcript_event_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirmation Transcript Event Id"
+          },
+          "receipt_type": {
+            "const": "WORKSHOP_COMPLETION",
+            "title": "Receipt Type",
+            "type": "string"
+          },
+          "state": {
+            "const": "FINISHING_ANALYSIS",
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_type",
+          "command",
+          "completion_source",
+          "completed_at",
+          "completion_transcript_event_id",
+          "confirmation_transcript_event_id",
+          "state"
+        ],
+        "title": "WorkshopCompletionReceipt",
+        "type": "object"
+      },
+      "WorkshopCompletionSource": {
+        "enum": [
+          "BUTTON",
+          "VOICE_EXPLICIT",
+          "VOICE_CONFIRMED"
+        ],
+        "title": "WorkshopCompletionSource",
+        "type": "string"
       }
     }
   },
@@ -6174,6 +6811,16 @@
                     "format": "uuid",
                     "title": "Confirmation Transcript Event Id",
                     "type": "string"
+                  },
+                  "residual_quality_risk_acceptance": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/V4_ResidualQualityRiskAcceptance"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -6590,6 +7237,7 @@
                     "ADMIT_TURN_ANALYSIS": "#/components/schemas/V4_AdmitTurnAnalysisCommand",
                     "APPLY_DECISION_BATCH_RESPONSE": "#/components/schemas/V4_ApplyDecisionBatchResponseCommand",
                     "CAPTURE_LOW_RISK_FACT": "#/components/schemas/V4_CaptureLowRiskFactCommand",
+                    "CLAIM_WORKSHOP_COMPLETE": "#/components/schemas/V4_ClaimWorkshopCompleteCommand",
                     "CONFIRM_ARTIFACT": "#/components/schemas/V4_ConfirmArtifactCommand",
                     "INVALIDATE_ANALYZER_CONTEXT": "#/components/schemas/V4_InvalidateAnalyzerContextCommand",
                     "MATERIALIZE_ARTIFACT_REVIEW": "#/components/schemas/V4_MaterializeArtifactReviewCommand",
@@ -6607,6 +7255,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/V4_RecordFinalTranscriptCommand"
+                  },
+                  {
+                    "$ref": "#/components/schemas/V4_ClaimWorkshopCompleteCommand"
                   },
                   {
                     "$ref": "#/components/schemas/V4_AdmitInterviewBriefCommand"
@@ -6663,7 +7314,8 @@
                       "LOW_RISK_FACT_CAPTURE": "#/components/schemas/LowRiskFactCaptureReceipt",
                       "PROPOSAL_ADMISSION": "#/components/schemas/ProposalAdmissionReceipt",
                       "REVIEW_NARRATION_ADMISSION": "#/components/schemas/ReviewNarrationAdmissionReceipt",
-                      "TRANSCRIPT_RECORDED": "#/components/schemas/TranscriptRecordedReceipt"
+                      "TRANSCRIPT_RECORDED": "#/components/schemas/TranscriptRecordedReceipt",
+                      "WORKSHOP_COMPLETION": "#/components/schemas/WorkshopCompletionReceipt"
                     },
                     "propertyName": "receipt_type"
                   },
@@ -6673,6 +7325,9 @@
                     },
                     {
                       "$ref": "#/components/schemas/TranscriptRecordedReceipt"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkshopCompletionReceipt"
                     },
                     {
                       "$ref": "#/components/schemas/ProposalAdmissionReceipt"
@@ -7128,6 +7783,57 @@
           }
         },
         "summary": "Record Voice Final Transcript",
+        "tags": [
+          "Workshop Protocol 1.0.0"
+        ]
+      }
+    },
+    "/api/v4/workshop/complete": {
+      "post": {
+        "operationId": "complete_workshop_api_v4_workshop_complete_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkshopCompletionIntent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkshopCompletionOutcome"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FoundationErrorEnvelope"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Complete Workshop",
         "tags": [
           "Workshop Protocol 1.0.0"
         ]

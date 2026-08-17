@@ -9,6 +9,7 @@ from sqlalchemy import func, insert, select, update
 from fastapi.testclient import TestClient
 
 from specops_contracts import workshop_v1 as c
+from specops_workflow import WorkflowService
 from specops_workflow.persistence import (
     TASK28_RUNTIME_TABLES,
     V0_RUNTIME_TABLES,
@@ -288,6 +289,10 @@ def test_ingress_idempotency_correction_and_channel_provenance_survive_restart(t
         session_id=foundation.get_case(CASE_ID).session_id,
     )
     assert restarted.project().committed_turns == projector.project().committed_turns
+    legacy_restart = WorkflowService(
+        database_url=foundation.engine.url.render_as_string(hide_password=False)
+    )
+    assert legacy_restart._cases[CASE_ID].revision == foundation.case_revision(CASE_ID)
 
 
 def test_voice_confirmed_is_rejected_before_any_ingress_transaction(tmp_path):

@@ -96,7 +96,7 @@ test("renders canonical question messages and submits the exact typed response i
   await page.goto("/");
   await expect(page.getByText(question.exact_text)).toBeVisible();
   await expect(page.getByText(priorQuestion.exact_text)).toBeVisible();
-  await expect(page.getByText("PM · CHAT")).toBeVisible();
+  await expect(page.getByText("You · chat")).toBeVisible();
   await page.getByLabel("Your typed response").fill("Use the organization timezone.");
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText("Your response is saved. Analysis will resume automatically.")).toBeVisible();
@@ -109,6 +109,43 @@ test("renders canonical question messages and submits the exact typed response i
   });
   expect(body).not.toHaveProperty("input_channel");
   expect(body).not.toHaveProperty("channel_confirmation_receipt_id");
+});
+
+test("presents active and completed Workshop states as an honest chat", async ({ page }) => {
+  await page.goto("/");
+
+  const chatPanel = page.locator(".chat-panel");
+  const conversation = page.getByRole("log", { name: "Workshop conversation" });
+  const composer = page.getByRole("form", { name: "Workshop response" });
+  await expect(conversation.getByText(question.exact_text)).toBeVisible();
+  await expect(conversation.getByText(priorQuestion.exact_text)).toBeVisible();
+  await expect(conversation.getByText("Luna · canonical question")).toHaveCount(2);
+  await expect(conversation.getByText("You · chat")).toBeVisible();
+  await expect(page.getByLabel("Your typed response")).toBeEnabled();
+
+  const [panelBox, conversationBox, composerBox] = await Promise.all([
+    chatPanel.boundingBox(),
+    conversation.boundingBox(),
+    composer.boundingBox(),
+  ]);
+  expect(panelBox).not.toBeNull();
+  expect(conversationBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(conversationBox!.y + conversationBox!.height).toBeLessThanOrEqual(composerBox!.y + 1);
+  expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(panelBox!.y + panelBox!.height + 1);
+
+  const completedWorkshop = {
+    ...workshop,
+    workshop_state: "COMPLETED",
+    conversation_phase: "COMPLETE",
+  };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: completedWorkshop }));
+  await page.reload();
+
+  await expect(page.getByText("Workshop complete")).toBeVisible();
+  await expect(page.getByText(question.exact_text)).not.toBeVisible();
+  await expect(page.getByRole("form", { name: "Workshop response" })).not.toBeVisible();
 });
 
 test("correction control loads the exact latest response binding and text", async ({ page }) => {

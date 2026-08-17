@@ -322,14 +322,14 @@ export function App() {
   return (
     <main className="workshop-shell">
       <section className="panel voice-panel chat-panel" aria-labelledby="chat-title">
-        <header className="panel-header">
+        <header className="panel-header chat-header">
           <div>
             <p className="eyebrow">Canonical Workshop chat</p>
-            <h1 id="chat-title">CSV Export<br />Workshop</h1>
+            <h1 id="chat-title">CSV Export Workshop</h1>
           </div>
           <span className="phase-mark">{context?.workshop_state ?? "LOADING"}</span>
         </header>
-        {bootstrap && <p className="fixed-identity">Fixed PM identity · {shortId(bootstrap.pm_actor_id)}</p>}
+        {bootstrap && <p className="fixed-identity">Fixed participant identity · {shortId(bootstrap.pm_actor_id)}</p>}
 
         <div className="context-strip" aria-label="Durable Workshop state">
           <div><span>Revision</span><strong>{context?.case_revision ?? "—"}</strong></div>
@@ -342,66 +342,82 @@ export function App() {
           {failure && <strong>{failure}</strong>}
         </div>
 
-        <div className="transcript-head">
-          <h2>Authoritative turns</h2>
-          <span>{context?.committed_turns.length ?? 0} snapshots</span>
-        </div>
-        <ol className="conversation-ledger">
-          {(context?.committed_turns ?? []).map(({ question, response }) => (
-            <li key={response.response_id}>
-              <article className="question-message">
-                <div><span>QUESTION</span><code>{shortId(question.question_id)} · v{question.question_version}</code></div>
-                <p>{question.exact_text}</p>
-              </article>
-              <article className="response-message">
-                <div><span>PM · CHAT</span><code>turn {response.turn_sequence} · v{response.response_version}</code></div>
-                <p>{response.normalized_text}</p>
-                <small>Evidence {shortId(response.final_source_ref.artifact_id)} / {response.content_hash.slice(0, 12)}…</small>
-                {latestByTurn.get(response.turn_sequence) === response.response_id && context?.workshop_state === "ACTIVE" && (
-                  <button type="button" onClick={() => beginCorrection(response)} disabled={!!pendingSubmission || context.turn_submission_status !== "READY"}>Correct response</button>
-                )}
-              </article>
-            </li>
-          ))}
-          {!context?.committed_turns.length && <li className="empty-row">No response evidence is committed yet.</li>}
-        </ol>
-
-        {nextQuestion && !correction && (
-          <article className="current-question">
-            <div className="question-kicker"><span>QUESTION · NEXT</span><code>v{nextQuestion.question_version}</code></div>
-            <h2>{nextQuestion.exact_text}</h2>
-            <p>{nextQuestion.reason}</p>
-            <button type="button" className="playback-button" onClick={() => void playQuestion(nextQuestion)} disabled={busy !== null}>
-              Play exact question
-            </button>
-          </article>
-        )}
-        {runwayMessage && preparation?.phase === "READY" && !correction && (
-          <div className="recovery-card" role="status">{runwayMessage}</div>
-        )}
-
-        <form className="text-fallback composer" onSubmit={submitResponse}>
-          <label htmlFor="response-text">{correction ? "Correct committed response" : "Your typed response"}</label>
-          {editTarget && <p className="composer-binding">Editing proposal · {shortId(editTarget.proposal_ref)}</p>}
-          <div>
-            <textarea
-              ref={composer}
-              id="response-text"
-              rows={4}
-              value={text}
-              disabled={!canDraft || !!pendingSubmission || busy !== null}
-              onChange={(event) => setText(event.target.value)}
-              placeholder={preparation?.phase === "READY" ? "Answer the canonical question…" : "Composer unlocks when preparation is ready"}
-            />
-            <button type="submit" disabled={!canSend || !text.trim()}>{sendLabel}</button>
+        <div className="chat-transcript" role="log" aria-label="Workshop conversation">
+          <div className="transcript-head">
+            <h2>Conversation</h2>
+            <span>{context?.committed_turns.length ?? 0} committed</span>
           </div>
-          {correction && !pendingSubmission && <button className="cancel-mode" type="button" onClick={() => { setCorrection(null); setText(""); }}>Cancel correction</button>}
-          <small aria-live="polite">{context?.turn_submission_status === "ANALYSIS_PENDING"
-            ? "Your previous response is saved. Analysis must finish before you send another."
-            : context?.turn_submission_status === "ANALYSIS_FAILED"
-              ? "The previous analysis did not complete. Sending another response remains locked."
-              : "Only a successful Send receipt finalizes evidence. Draft text has no authority."}</small>
-        </form>
+          <ol className="conversation-ledger">
+            {(context?.committed_turns ?? []).map(({ question, response }) => (
+              <li key={response.response_id}>
+                <article className="question-message">
+                  <div><span>Luna · canonical question</span><code>{shortId(question.question_id)} · v{question.question_version}</code></div>
+                  <p>{question.exact_text}</p>
+                </article>
+                <article className="response-message">
+                  <div><span>You · chat</span><code>turn {response.turn_sequence} · v{response.response_version}</code></div>
+                  <p>{response.normalized_text}</p>
+                  <small>Evidence {shortId(response.final_source_ref.artifact_id)} / {response.content_hash.slice(0, 12)}…</small>
+                  {latestByTurn.get(response.turn_sequence) === response.response_id && context?.workshop_state === "ACTIVE" && (
+                    <button type="button" onClick={() => beginCorrection(response)} disabled={!!pendingSubmission || context.turn_submission_status !== "READY"}>Correct response</button>
+                  )}
+                </article>
+              </li>
+            ))}
+            {nextQuestion && !correction && context?.workshop_state === "ACTIVE" && (
+              <li className="current-turn">
+                <article className="question-message current-question">
+                  <div><span>Luna · canonical question</span><code>next · v{nextQuestion.question_version}</code></div>
+                  <p>{nextQuestion.exact_text}</p>
+                  <small className="current-question-reason">{nextQuestion.reason}</small>
+                  <button type="button" className="playback-button" onClick={() => void playQuestion(nextQuestion)} disabled={busy !== null}>
+                    Play exact question
+                  </button>
+                </article>
+              </li>
+            )}
+            {!context?.committed_turns.length && !(nextQuestion && context?.workshop_state === "ACTIVE") && (
+              <li className="empty-row">No response evidence is committed yet.</li>
+            )}
+          </ol>
+          {runwayMessage && preparation?.phase === "READY" && !correction && context?.workshop_state === "ACTIVE" && (
+            <div className="recovery-card" role="status">{runwayMessage}</div>
+          )}
+          {context && context.workshop_state !== "ACTIVE" && (
+            <div className="chat-closed-state" role="status">
+              <span>{context.workshop_state}</span>
+              <strong>{context.workshop_state === "COMPLETED" ? "Workshop complete" : "Workshop input unavailable"}</strong>
+              <p>{context.workshop_state === "COMPLETED"
+                ? "This conversation is read-only. Start a new active Workshop to answer another question."
+                : "The composer returns when the Workshop is active."}</p>
+            </div>
+          )}
+        </div>
+
+        {context?.workshop_state === "ACTIVE" && (
+          <form className="text-fallback composer" aria-label="Workshop response" onSubmit={submitResponse}>
+            <label htmlFor="response-text">{correction ? "Correct committed response" : "Your typed response"}</label>
+            {editTarget && <p className="composer-binding">Editing proposal · {shortId(editTarget.proposal_ref)}</p>}
+            <div>
+              <textarea
+                ref={composer}
+                id="response-text"
+                rows={3}
+                value={text}
+                disabled={!canDraft || !!pendingSubmission || busy !== null}
+                onChange={(event) => setText(event.target.value)}
+                placeholder={preparation?.phase === "READY" ? "Answer Luna’s canonical question…" : "Composer unlocks when preparation is ready"}
+              />
+              <button type="submit" disabled={!canSend || !text.trim()}>{sendLabel}</button>
+            </div>
+            {correction && !pendingSubmission && <button className="cancel-mode" type="button" onClick={() => { setCorrection(null); setText(""); }}>Cancel correction</button>}
+            <small aria-live="polite">{context.turn_submission_status === "ANALYSIS_PENDING"
+              ? "Your previous response is saved. Analysis must finish before you send another."
+              : context.turn_submission_status === "ANALYSIS_FAILED"
+                ? "The previous analysis did not complete. Sending another response remains locked."
+                : "Only a successful Send receipt finalizes evidence. Draft text has no authority."}</small>
+          </form>
+        )}
       </section>
 
       <section className="panel source-panel" aria-labelledby="source-title">

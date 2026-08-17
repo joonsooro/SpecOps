@@ -384,6 +384,33 @@ class _BackgroundResponses:
         )
 
 
+class _IncompleteResponses:
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        self.create_calls: list[dict] = []
+        self.retrieve_ids: list[str] = []
+
+    async def create(self, **kwargs):
+        self.create_calls.append(kwargs)
+        return SimpleNamespace(
+            id="resp_incomplete_bootstrap",
+            status="queued",
+            output_text="",
+            _request_id="req_incomplete_create",
+        )
+
+    async def retrieve(self, response_id, **_kwargs):
+        self.retrieve_ids.append(response_id)
+        return SimpleNamespace(
+            id=response_id,
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason=self.reason),
+            output_text="private incomplete provider output",
+            _request_id="req_incomplete_retrieve",
+            usage=None,
+        )
+
+
 def test_all_six_native_schemas_are_openai_strict_root_objects():
     assert len(NATIVE_SCHEMA_SPECS) == 6
     for spec in NATIVE_SCHEMA_SPECS:
@@ -1586,6 +1613,59 @@ def test_background_bootstrap_polls_one_stored_response_past_60_second_slow_obse
         encoded = json.dumps([event.__dict__ for event in adapter.lifecycle_events])
         assert "private PM source" not in encoded
         assert "private technical source" not in encoded
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    (
+        ("max_output_tokens", "max_output_tokens"),
+        ("content_filter", "content_filter"),
+        ("private participant response text", None),
+    ),
+)
+def test_incomplete_response_preserves_only_the_bounded_provider_reason(
+    reason: str,
+    expected: str | None,
+):
+    async def scenario():
+        responses = _IncompleteResponses(reason)
+        adapter = StoredConversationOpenAIAdapter(
+            api_key="unused",
+            client=SimpleNamespace(responses=responses),
+            now=lambda: NOW,
+            sleep=lambda _seconds: asyncio.sleep(0),
+        )
+        sources = (
+            _source(c.SourceRole.PM_SPEC, 10, "pm-spec.md", b"private PM source"),
+            _source(
+                c.SourceRole.TECHNICAL_CONTRACT,
+                11,
+                "technical-contract.md",
+                b"private technical source",
+            ),
+        )
+        prepared = adapter.prepared_from_ids(
+            sources, ("file_pm", "file_technical"), "conv_incomplete"
+        )
+        request = _bootstrap_request(prepared)
+
+        response_id = await adapter.start_bootstrap(request, prepared=prepared)
+        with pytest.raises(ProviderAdapterError) as failure:
+            await adapter.finish_bootstrap(
+                request,
+                prepared=prepared,
+                session_id=SESSION_ID,
+                response_id=response_id,
+            )
+
+        assert failure.value.receipt.code is c.ProviderFailureCode.UNKNOWN_SAFE
+        assert adapter.lifecycle_events[-1].incomplete_reason == expected
+        dumped = repr(adapter.lifecycle_events[-1])
+        assert "private incomplete provider output" not in dumped
+        if expected is None:
+            assert reason not in dumped
 
     asyncio.run(scenario())
 

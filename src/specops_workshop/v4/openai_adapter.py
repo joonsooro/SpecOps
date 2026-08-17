@@ -87,6 +87,7 @@ class ProviderLifecycleEvent:
     response_id: str | None
     provider_request_id: str | None
     status: str | None
+    incomplete_reason: Literal["max_output_tokens", "content_filter"] | None
     duration_ms: int
     input_tokens: int | None
     cached_input_tokens: int | None
@@ -157,6 +158,17 @@ def _safe_provider_identifier(value: Any) -> str | None:
 def _safe_token_count(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return value
+    return None
+
+
+def _safe_incomplete_reason(
+    response: Any | None,
+) -> Literal["max_output_tokens", "content_filter"] | None:
+    reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+    if reason == "max_output_tokens":
+        return "max_output_tokens"
+    if reason == "content_filter":
+        return "content_filter"
     return None
 
 
@@ -2007,6 +2019,7 @@ class StoredConversationOpenAIAdapter:
                 getattr(response, "_request_id", None)
             ),
             status=status or _safe_provider_identifier(getattr(response, "status", None)),
+            incomplete_reason=_safe_incomplete_reason(response),
             duration_ms=max(0, int((self._monotonic() - started_at) * 1000)),
             input_tokens=_safe_token_count(getattr(usage, "input_tokens", None)),
             cached_input_tokens=_safe_token_count(

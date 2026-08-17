@@ -213,6 +213,45 @@ test("keeps the Workshop usable while zero-runway analysis looks for ambiguities
   await expect(page.getByRole("button", { name: "Finish Workshop" })).toBeEnabled();
 });
 
+test("surfaces clarification when analysis completes without a new decision proposal", async ({ page }) => {
+  const secondResponse = {
+    ...response,
+    response_id: "87777777-7777-4777-8777-777777777777",
+    question_id: question.question_id,
+    question_version: question.question_version,
+    turn_sequence: 2,
+    normalized_text: "Use request-time qualification, but use the current price.",
+    client_submission_id: "65555555-5555-4555-8555-555555555555",
+    created_at: "2026-08-16T12:01:00Z",
+  };
+  const followUpQuestion = {
+    ...question,
+    question_id: "38888888-8888-4888-8888-888888888888",
+    question_version: 1,
+    exact_text: "What does current price mean, and when should that value be read?",
+  };
+  const clarificationWorkshop = {
+    ...workshop,
+    case_revision: 14,
+    committed_turns: [
+      { question: priorQuestion, response },
+      { question, response: secondResponse },
+    ],
+    question_runway: { questions: [followUpQuestion], runway_depth: 1 },
+    proposal_statuses: [{ ...proposal, status: "COMMITTED" }],
+  };
+  await page.unroute("**/api/workshop");
+  await page.route("**/api/workshop", (route) => route.fulfill({ json: clarificationWorkshop }));
+
+  await page.goto("/");
+
+  await expect(page.getByText(
+    "Analysis complete. No decision proposal is waiting for review. Luna needs another clarification. Continue with the next question, or finish with 1 confirmed decision.",
+  )).toBeVisible();
+  await expect(page.getByText(followUpQuestion.exact_text)).toBeInViewport();
+  await expect(page.getByRole("button", { name: "Finish Workshop" })).toBeEnabled();
+});
+
 test("playback is user-triggered, exact-text, and does not open a live input socket", async ({ page }) => {
   let playback: Record<string, unknown> | null = null;
   const sockets: string[] = [];

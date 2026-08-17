@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { INITIAL_RUNWAY_DEPTH, formulationEnabled, proposalControlPayload, turnSubmissionEnabled, typedResponsePayload, workshopStartEnabled, zeroRunwayMessage } from "./uiModel";
+import { INITIAL_RUNWAY_DEPTH, formulationEnabled, proposalControlPayload, turnAnalysisOutcomeMessage, turnSubmissionEnabled, typedResponsePayload, workshopStartEnabled, zeroRunwayMessage } from "./uiModel";
 
 describe("Workshop server-projection UI rules", () => {
   it("fails closed until the server admits the exact four-question runway", () => {
@@ -30,6 +30,25 @@ describe("Workshop server-projection UI rules", () => {
     expect(zeroRunwayMessage(0, "READY")).toBe(
       "No more questions are available. Review any proposals, then finish the workshop.",
     );
+  });
+
+  it("explains a completed turn that needs clarification instead of a proposal", () => {
+    expect(turnAnalysisOutcomeMessage({
+      committedTurnCount: 2,
+      status: "READY",
+      pendingProposalCount: 0,
+      committedProposalCount: 1,
+      hasNextQuestion: true,
+    })).toBe(
+      "Analysis complete. No decision proposal is waiting for review. Luna needs another clarification. Continue with the next question, or finish with 1 confirmed decision.",
+    );
+    expect(turnAnalysisOutcomeMessage({
+      committedTurnCount: 2,
+      status: "READY",
+      pendingProposalCount: 1,
+      committedProposalCount: 1,
+      hasNextQuestion: true,
+    })).toBeNull();
   });
 
   it("keeps proposal control shapes exact", () => {

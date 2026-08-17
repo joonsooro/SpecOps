@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { WorkshopPresenceClient } from "./presenceClient";
-import { turnSubmissionEnabled, type TurnSubmissionStatus, zeroRunwayMessage } from "./uiModel";
+import { turnAnalysisOutcomeMessage, turnSubmissionEnabled, type TurnSubmissionStatus, zeroRunwayMessage } from "./uiModel";
 
 type Bootstrap = {
   case_id: string;
@@ -123,6 +123,7 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [boundLine, setBoundLine] = useState<number | null>(null);
   const composer = useRef<HTMLTextAreaElement | null>(null);
+  const transcript = useRef<HTMLDivElement | null>(null);
   const finishIntent = useRef<{ client_action_id: string; expected_case_revision: number } | null>(null);
 
   const refresh = async () => {
@@ -164,8 +165,22 @@ export function App() {
   }, []);
 
   const nextQuestion = context?.question_runway.questions[0] ?? null;
+  const nextQuestionIdentity = nextQuestion
+    ? `${nextQuestion.question_id}:${nextQuestion.question_version}`
+    : null;
   const runwayMessage = context
     ? zeroRunwayMessage(context.question_runway.runway_depth, context.turn_submission_status)
+    : null;
+  const pendingProposalCount = context?.proposal_statuses.filter((item) => item.status === "PENDING").length ?? 0;
+  const committedProposalCount = context?.proposal_statuses.filter((item) => item.status === "COMMITTED").length ?? 0;
+  const analysisOutcomeMessage = context
+    ? turnAnalysisOutcomeMessage({
+      committedTurnCount: context.committed_turns.length,
+      status: context.turn_submission_status,
+      pendingProposalCount,
+      committedProposalCount,
+      hasNextQuestion: nextQuestion !== null,
+    })
     : null;
   const latestByTurn = useMemo(() => {
     const result = new Map<number, string>();
@@ -184,6 +199,14 @@ export function App() {
     : context?.turn_submission_status === "ANALYSIS_FAILED"
       ? "Analysis needs attention"
       : busy === "send" ? "Saving…" : pendingSubmission ? "Retry" : correction ? "Save correction" : "Send";
+
+  useEffect(() => {
+    if (!analysisOutcomeMessage || !nextQuestion || context?.workshop_state !== "ACTIVE") return;
+    requestAnimationFrame(() => transcript.current?.scrollTo({
+      top: transcript.current.scrollHeight,
+      behavior: "smooth",
+    }));
+  }, [analysisOutcomeMessage, context?.committed_turns.length, context?.workshop_state, nextQuestionIdentity]);
 
   const submitResponse = async (event: FormEvent) => {
     event.preventDefault();
@@ -342,7 +365,7 @@ export function App() {
           {failure && <strong>{failure}</strong>}
         </div>
 
-        <div className="chat-transcript" role="log" aria-label="Workshop conversation">
+        <div ref={transcript} className="chat-transcript" role="log" aria-label="Workshop conversation">
           <div className="transcript-head">
             <h2>Conversation</h2>
             <span>{context?.committed_turns.length ?? 0} committed</span>
@@ -380,6 +403,9 @@ export function App() {
               <li className="empty-row">No response evidence is committed yet.</li>
             )}
           </ol>
+          {analysisOutcomeMessage && !correction && context?.workshop_state === "ACTIVE" && (
+            <div className="turn-outcome-card" role="status">{analysisOutcomeMessage}</div>
+          )}
           {runwayMessage && preparation?.phase === "READY" && !correction && context?.workshop_state === "ACTIVE" && (
             <div className="recovery-card" role="status">{runwayMessage}</div>
           )}
@@ -489,7 +515,9 @@ export function App() {
         <section className="finish-zone" aria-labelledby="finish-title">
           <p className="eyebrow">Separate terminal action</p>
           <h3 id="finish-title">Finish Workshop</h3>
-          <p>Finishing is deliberate and becomes available after your first committed chat response.</p>
+          <p>{analysisOutcomeMessage
+            ? `Continue with Luna if you want another proposal. Finish preserves ${committedProposalCount} already confirmed decision${committedProposalCount === 1 ? "" : "s"}.`
+            : "Finishing is deliberate and becomes available after your first committed chat response."}</p>
           <button className="finish-button" type="button" onClick={() => void finishWorkshop()} disabled={context?.workshop_state !== "ACTIVE" || !context.committed_turns.length || busy !== null || !!context?.proposal_statuses.some((item) => ["PENDING", "EDIT_REQUESTED"].includes(item.status))}>
             <span>{busy === "finish" ? "Finishing…" : "Finish Workshop"}</span><span>→</span>
           </button>

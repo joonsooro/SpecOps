@@ -16,7 +16,7 @@ SpecOps inserts a governed specification layer before downstream delivery. The w
 
 ## What the Capstone demonstrates
 
-- A live voice and text workshop for refining a product request.
+- A text-authoritative workshop presented as a compact, scrollable Luna chat.
 - Evidence-grounded analysis of registered product and technical sources.
 - Structured proposals for requirements, decisions, checks, and delivery items.
 - Explicit confirmation, edit, rejection, and finish controls.
@@ -25,31 +25,22 @@ SpecOps inserts a governed specification layer before downstream delivery. The w
 - Contract-first boundaries between probabilistic AI providers and trusted application state.
 - A release suite covering schemas, migrations, API behavior, browser behavior, and workflow invariants.
 
-The included `resources/` directory contains the source material used by the Capstone demonstration.
+The demonstration reads its registered project sources from the adjacent Spec Engineering workspace; provider credentials and runtime state remain server-side.
 
 ## Architecture
 
 ```text
-PM voice or text
+Participant typed response or explicit review action
        |
        v
 React workshop UI
+  compact, scrollable Luna conversation
        |
        | HTTP + WebSocket
        v
-FastAPI boundary + live transport
+FastAPI boundary + conversation projector
        |
-       +<------ real-time audio ------> Gemini 3.1 Flash Live Voice Agent
-       |
-       | final transcripts and user controls
-       v
-Deterministic V4 orchestrator
-       |
-       +------ typed, hash-bound request ------> GPT-5.6 Terra
-       |                                         Analyzer / evaluator
-       |<------------- candidate proposal --------------+
-       |
-       | Foundation commands and candidate admission
+       | idempotent CHAT ingress and review commands
        v
 Deterministic foundation
        - authority and identity
@@ -58,29 +49,52 @@ Deterministic foundation
        - revisions and idempotent replay
        - readiness and handoff
        |
-       v
-SQLite storage
+       +------ durable leased job ------> Durable Analyzer worker
+                                               |
+                                               v
+                                      Deterministic V4 orchestrator
+                                               |
+              +--------------------------------+-------------------------------+
+              |                                                                |
+              | supplied canonical question refs                               | typed, hash-bound request
+              v                                                                v
+     OpenAI GPT-5.6 Luna                                              OpenAI GPT-5.6 Terra
+     Guidance selector                                               Analyzer / evaluator
+              |                                                                |
+              | selected question ref                                          | semantic candidate
+              +--------------------------------+-------------------------------+
+                                               |
+                                               | validated Foundation commands only
+                                               v
+                                      Deterministic foundation
+                                               |
+                                               v
+                                         SQLite storage
 ```
 
 ### Frontend
 
-The React and TypeScript frontend in `frontend/` presents the workshop, captures microphone audio, communicates over HTTP and WebSocket, and renders server-owned projections. It does not hold provider credentials or own canonical workflow state.
+The React and TypeScript frontend in `frontend/` presents the canonical workshop as a compact conversation, keeps Luna and participant messages in a scrollable history, and provides a composer at the bottom. It sends typed responses and explicit review actions to the server and renders server-owned projections. It does not hold provider credentials or own canonical workflow state.
 
 ### Application boundary
 
-The FastAPI application in `src/specops_workshop/` exposes the HTTP and WebSocket boundary. The live transport manages the real-time Gemini connection and passes finalized transcripts and mapped user controls into the V4 orchestrator.
+The FastAPI application in `src/specops_workshop/` exposes the HTTP and WebSocket boundary. `ParticipantTurnIngress` commits an idempotent typed `CHAT` turn against the exact active question, while the conversation projector reconstructs the durable participant view. Committed typed text and explicit user controls are the only authoritative V0 input path.
 
 ### Deterministic orchestrator
 
-The V4 orchestrator is **deterministic application logic, not an orchestrator agent or another AI model**. It does not invent requirements, choose product semantics, or autonomously pursue goals. Its rule-bound control flow selects the operation, constructs a typed and hash-bound request from committed state, derives stable command identities, applies revision and idempotency checks, and routes the resulting candidate through the corresponding Foundation command.
+The V4 orchestrator is **deterministic application logic, not an orchestrator agent or another AI model**. It does not invent requirements, choose product semantics, or autonomously pursue goals. Its rule-bound control flow selects the operation, constructs typed and hash-bound requests from committed state, derives stable command identities, applies revision and idempotency checks, and routes provider candidates through the corresponding Foundation command.
 
-Its job is to coordinate the trusted sequence around probabilistic provider calls: load the current Foundation snapshot, manage the Analyzer context, call the appropriate Terra operation, receive a candidate proposal, and ask the Foundation to admit or reject it. For artifact generation it also triggers a separate quality-evaluation context and records the resulting audit through the Foundation.
+Its job is to coordinate the trusted sequence around probabilistic provider calls: load the current Foundation snapshot, manage the Analyzer context, call the appropriate Terra operation, request bounded Luna Guidance when needed, and ask the Foundation to admit or reject the result. For artifact generation it also triggers a separate quality-evaluation context and records the resulting audit through the Foundation.
 
-“Deterministic” describes this orchestration and admission path—not the content returned by Gemini or Terra. Provider responses remain probabilistic.
+“Deterministic” describes this orchestration and admission path—not provider-generated content. Luna and Terra responses remain probabilistic.
 
 ### AI adapters
 
-**The SpecOps Voice Agent is Google Gemini 3.1 Flash Live Preview** (`gemini-3.1-flash-live-preview`), which supplies the real-time conversational voice channel. **The SpecOps Analyzer is OpenAI GPT-5.6 Terra, configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. The orchestrator treats provider output as untrusted input and submits it to the Foundation; it cannot directly become committed application state.
+**The SpecOps Guidance model is OpenAI GPT-5.6 Luna, configured at medium reasoning effort.** Luna can select only from canonical question references already supplied by the Foundation. It cannot author evidence, mutate workflow state, or commit a decision.
+
+**The SpecOps Analyzer is OpenAI GPT-5.6 Terra, also configured at medium reasoning effort.** Through the OpenAI Responses API, Terra produces bounded semantic proposals and performs independent artifact-quality evaluations. The orchestrator treats every provider response as untrusted input and submits it to the Foundation; it cannot directly become committed application state.
+
+The repository retains a Gemini live-voice transport, but microphone and voice-authoritative input are outside the current text-authoritative V0 demo path.
 
 ### Deterministic foundation
 
@@ -90,12 +104,26 @@ The packages in `src/specops_workflow/` and `src/specops_contracts/` form the tr
 
 SQLite and Alembic provide local persistence and migrations. JSON Schema, generated OpenAPI artifacts, Pydantic models, and generated TypeScript types keep the provider, server, and browser boundaries aligned.
 
+## Latest development update
+
+The active V0 branch now supports one focused specification-workshop cycle:
+
+- Luna and participant turns appear together in a compact chat, with the active composer fixed below the scrollable history.
+- Preparation admits an initial four-question runway from the registered product and technical sources.
+- Participant turns are serialized: the participant can keep drafting locally while Terra analyzes the previous committed turn, but Send remains pending until analysis finishes.
+- Luna Guidance is selection-only and bounded to exact Foundation-admitted question references.
+- A shallow or empty runway produces participant-facing waiting guidance instead of stopping the prototype.
+- Analysis that produces no decision proposal surfaces a clarification outcome and preserves the revised next question.
+- Finish requires at least one committed typed turn and no unresolved proposal.
+- Canonical conversation context and typed-turn audit receipts recover across refresh and server restart.
+
+A manual live V0 demo has completed successfully. The formal credentialed full-cycle evaluation remains postponed, so this README does not claim that the complete production-readiness scorecard has passed.
+
 ## Repository map
 
 ```text
 frontend/                 React/TypeScript workshop interface
 migrations/               Alembic database migrations
-resources/                Capstone demonstration sources
 scripts/                  Contract generation and release verification
 src/specops_contracts/    Versioned schemas and protocol contracts
 src/specops_workflow/     Deterministic policy and state foundation
@@ -110,8 +138,8 @@ tests/                    Foundation, workshop, contract, and release tests
 - Pydantic and JSON Schema
 - SQLAlchemy, Alembic, and SQLite
 - React, TypeScript, and Vite
-- Google Gemini 3.1 Flash Live Preview for the Voice Agent
-- OpenAI GPT-5.6 Terra for the Analyzer and artifact-quality evaluator
+- OpenAI GPT-5.6 Luna for bounded Guidance selection
+- OpenAI GPT-5.6 Terra for analysis and artifact-quality evaluation
 - Pytest, Vitest, and Playwright
 
 ## Local foundation setup
@@ -143,6 +171,6 @@ The release suite exercises the workflow contracts, schema snapshots, authority 
 
 ## Scope and limitations
 
-SpecOps is a local Capstone demonstration, not a production SaaS release. The current scope does not claim production authentication, multi-tenant isolation, managed cloud deployment, or direct Jira/GitHub execution. AI-backed behavior also depends on provider availability and valid credentials. The deterministic foundation reduces workflow drift; it cannot make probabilistic model output fully deterministic.
+SpecOps is a local Capstone demonstration, not a production SaaS release. The current scope does not claim production authentication, multi-tenant isolation, managed cloud deployment, direct Jira/GitHub execution, or a voice-authoritative workshop. AI-backed behavior also depends on provider availability and valid credentials. The deterministic foundation reduces workflow drift; it cannot make probabilistic model output fully deterministic.
 
 Secrets belong only in a local `.env` file and must never be committed. Runtime databases, generated build output, test reports, and local environment files are excluded through `.gitignore`.

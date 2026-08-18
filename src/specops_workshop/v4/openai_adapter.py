@@ -1440,7 +1440,12 @@ class StoredConversationOpenAIAdapter:
                     "name": schema_name,
                     "strict": True,
                     "schema": schema,
-                }
+                },
+                **(
+                    {"verbosity": "low"}
+                    if operation is contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS
+                    else {}
+                ),
             },
             "max_output_tokens": MAX_OUTPUT_TOKENS[operation],
         }

@@ -668,6 +668,7 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
 
     arguments = adapter._response_arguments(request, bootstrap=False)
     assert arguments["max_output_tokens"] == 128_000
+    assert arguments["text"]["verbosity"] == "low"
     content = arguments["input"][0]["content"]
     assert [item["type"] for item in content] == ["input_text", "input_text"]
     prefix = "Provider-owned artifact payload JSON Schema: "
@@ -2211,6 +2212,7 @@ async def _sdk_serialization_case():
     assert response_body["store"] is True
     assert response_body["background"] is True
     assert response_body["text"]["format"]["strict"] is True
+    assert "verbosity" not in response_body["text"]
     assert [item["type"] for item in response_body["input"][0]["content"]] == [
         "input_file",
         "input_file",
@@ -2219,6 +2221,7 @@ async def _sdk_serialization_case():
     synthesis_body = response_bodies[1]
     assert synthesis_body["max_output_tokens"] == 128_000
     assert synthesis_body["text"]["format"]["strict"] is True
+    assert synthesis_body["text"]["verbosity"] == "low"
 
 
 def test_adapter_rejects_source_hash_mismatch_before_any_provider_call():

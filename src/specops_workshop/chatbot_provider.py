@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from openai import AsyncOpenAI
+from pydantic import ValidationError
 from sqlalchemy import select
 from specops_contracts import workshop_v1 as c
 from specops_workflow.persistence import (
@@ -29,6 +30,61 @@ from .chat_contracts import (
 
 
 CHATBOT_MODEL = "gpt-5.6-luna"
+_SAFE_RESPONSE_STATUSES = frozenset(
+    {"cancelled", "completed", "failed", "in_progress", "incomplete", "queued"}
+)
+_SAFE_INCOMPLETE_REASONS = frozenset({"content_filter", "max_output_tokens"})
+_SAFE_SELECTION_PATH_SEGMENTS = frozenset(
+    {
+        "acknowledgement_suggestion",
+        "do_not_ask_question_refs",
+        "question_id",
+        "question_version",
+        "recommended_question_ref",
+        "safe_alternate_refs",
+    }
+)
+
+
+class ChatbotGuidanceValidationError(RuntimeError):
+    """Content-safe metadata for a Luna selection that failed local validation."""
+
+    def __init__(
+        self,
+        *,
+        provider_status: str | None,
+        incomplete_reason: str | None,
+        output_text_present: bool,
+        validation_paths: tuple[str, ...],
+    ) -> None:
+        super().__init__("LUNA_GUIDANCE_SELECTION_INVALID")
+        self.provider_status = provider_status
+        self.incomplete_reason = incomplete_reason
+        self.output_text_present = output_text_present
+        self.validation_paths = validation_paths
+
+
+def _safe_selection_validation_paths(error: ValidationError) -> tuple[str, ...]:
+    paths: set[str] = set()
+    for item in error.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    ):
+        location = item.get("loc", ())
+        segments: list[str] = []
+        for segment in location[:16]:
+            if isinstance(segment, int) and 0 <= segment <= 99:
+                segments.append(str(segment))
+            elif isinstance(segment, str) and segment in _SAFE_SELECTION_PATH_SEGMENTS:
+                segments.append(segment.replace("~", "~0").replace("/", "~1"))
+            else:
+                segments.append("$unknown")
+                break
+        paths.add("/" + "/".join(segments))
+        if len(paths) == 16:
+            break
+    return tuple(sorted(paths))
 
 
 class ChatbotProvider(Protocol):
@@ -74,7 +130,27 @@ class OpenAIResponsesChatbotProvider:
                 }
             },
         )
-        return ChatbotGuidanceSelection.model_validate_json(response.output_text)
+        try:
+            return ChatbotGuidanceSelection.model_validate_json(response.output_text)
+        except ValidationError as error:
+            raw_status = getattr(response, "status", None)
+            provider_status = (
+                raw_status if raw_status in _SAFE_RESPONSE_STATUSES else None
+            )
+            raw_reason = getattr(
+                getattr(response, "incomplete_details", None), "reason", None
+            )
+            incomplete_reason = (
+                raw_reason if raw_reason in _SAFE_INCOMPLETE_REASONS else None
+            )
+            raise ChatbotGuidanceValidationError(
+                provider_status=provider_status,
+                incomplete_reason=incomplete_reason,
+                output_text_present=bool(
+                    isinstance(response.output_text, str) and response.output_text
+                ),
+                validation_paths=_safe_selection_validation_paths(error),
+            ) from None
 
 
 class ChatbotGuidanceCoordinator:

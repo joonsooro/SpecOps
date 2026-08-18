@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -34,6 +35,7 @@ from specops_workshop.chat_contracts import (
 )
 from specops_workshop.chatbot_provider import (
     ChatbotGuidanceCoordinator,
+    ChatbotGuidanceValidationError,
     OpenAIResponsesChatbotProvider,
 )
 from specops_workshop.api import create_app
@@ -393,6 +395,83 @@ def test_openai_chatbot_provider_is_luna_medium_stateless_and_selection_only():
     assert "exact_text" not in serialized
     assert "source_ref" not in serialized.casefold()
     assert "provider_conversation" not in serialized
+
+
+def test_luna_selection_validation_exposes_only_bounded_diagnostics():
+    private_output = json.dumps(
+        {
+            "recommended_question_ref": {
+                "question_id": "private-participant-content",
+                "question_version": 1,
+            },
+            "safe_alternate_refs": [],
+            "do_not_ask_question_refs": [],
+            "acknowledgement_suggestion": "private provider output",
+        }
+    )
+
+    class Responses:
+        @staticmethod
+        async def create(**_arguments):
+            return SimpleNamespace(
+                status="incomplete",
+                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                output_text=private_output,
+            )
+
+    provider = OpenAIResponsesChatbotProvider(
+        api_key="fixture", client=SimpleNamespace(responses=Responses())
+    )
+    request = ChatbotGuidanceRequest(
+        request_identity="chatbot-guidance:fixture",
+        session_id=uuid4(),
+        case_revision=7,
+        readiness=c.Readiness.NEEDS_CLARIFICATION,
+        review_obligation=c.ReviewObligation.NONE,
+        askable_question_refs=(
+            ChatbotQuestionRef(question_id=uuid4(), question_version=1),
+        ),
+        consumed_question_refs=(),
+        latest_response_id=None,
+        latest_question_ref=None,
+    )
+
+    with pytest.raises(ChatbotGuidanceValidationError) as captured:
+        asyncio.run(provider.select_guidance(request))
+
+    error = captured.value
+    assert error.provider_status == "incomplete"
+    assert error.incomplete_reason == "max_output_tokens"
+    assert error.output_text_present is True
+    assert error.validation_paths == ("/recommended_question_ref/question_id",)
+    serialized = repr(error.__dict__)
+    assert "private-participant-content" not in serialized
+    assert "private provider output" not in serialized
+
+    class UnsafeMetadataResponses:
+        @staticmethod
+        async def create(**_arguments):
+            return SimpleNamespace(
+                status="private provider status",
+                incomplete_details=SimpleNamespace(
+                    reason="private incomplete detail"
+                ),
+                output_text="",
+            )
+
+    provider = OpenAIResponsesChatbotProvider(
+        api_key="fixture",
+        client=SimpleNamespace(responses=UnsafeMetadataResponses()),
+    )
+    with pytest.raises(ChatbotGuidanceValidationError) as captured:
+        asyncio.run(provider.select_guidance(request))
+
+    assert captured.value.provider_status is None
+    assert captured.value.incomplete_reason is None
+    assert captured.value.output_text_present is False
+    assert captured.value.validation_paths == ("/",)
+    assert "private provider status" not in repr(captured.value.__dict__)
+    assert "private incomplete detail" not in repr(captured.value.__dict__)
 
 
 def test_luna_selection_is_materialized_from_exact_supplied_foundation_questions(tmp_path):

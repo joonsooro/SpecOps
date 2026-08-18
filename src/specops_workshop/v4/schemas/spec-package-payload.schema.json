@@ -408,7 +408,6 @@
           "items": {
             "$ref": "#/$defs/nonEmptyString"
           },
-          "minItems": 1,
           "type": "array"
         },
         "authority": {

@@ -27,7 +27,11 @@ from specops_workflow.persistence import (
     cases,
     engine_for,
 )
-from specops_workflow.workshop_protocol import FoundationProtocolError, WorkshopFoundationService
+from specops_workflow.workshop_protocol import (
+    FoundationProtocolError,
+    WorkshopFoundationService,
+    _payload_validator,
+)
 from specops_workflow.artifact_projection import draft_governance
 from specops_workflow.artifact_evidence_support import (
     EvidenceSupportProposal,
@@ -2194,7 +2198,7 @@ def test_rule_derived_blueprint_projects_cross_domain_authority_deterministicall
         classification=c.Domain.CROSS_DOMAIN,
         statement="Commit the accepted export snapshot immutably.",
         rationale="Acceptance fixes membership and values.",
-        alternatives_considered=("Re-evaluate the export during download.",),
+        alternatives_considered=(),
         problem_ids=(uuid4(),),
         evidence_ids=(uuid4(),),
         confirmation_id=uuid4(),
@@ -2216,9 +2220,16 @@ def test_rule_derived_blueprint_projects_cross_domain_authority_deterministicall
     assert projection["actors"][0]["authority_domains"] == ["cross_domain"]
     assert projection["decisions"][0]["id"] == str(decision_id)
     assert projection["decisions"][0]["decision"] == binding.statement
+    assert projection["decisions"][0]["alternatives_considered"] == []
     assert projection["decisions"][0]["confirmation_binding"][
         "confirmation_id"
     ] == str(binding.confirmation_id)
+
+    payload = PayloadFactory().payload("spec-package-payload.schema.json")
+    payload.update(projection)
+    assert list(
+        _payload_validator("spec-package-payload.schema.json").iter_errors(payload)
+    ) == []
 
     policy = WorkshopFoundationService.artifact_construction_policy(
         "SPEC_PACKAGE",

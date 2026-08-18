@@ -209,4 +209,4 @@ class ChatbotGuidanceSelection(ContractModel):
     recommended_question_ref: ChatbotQuestionRef
     safe_alternate_refs: Annotated[tuple[ChatbotQuestionRef, ...], Field(max_length=5)]
     do_not_ask_question_refs: Annotated[tuple[ChatbotQuestionRef, ...], Field(max_length=50)]
-    acknowledgement_suggestion: str
+    acknowledgement_suggestion: c.Statement

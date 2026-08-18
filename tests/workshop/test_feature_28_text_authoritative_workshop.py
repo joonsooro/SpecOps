@@ -391,6 +391,11 @@ def test_openai_chatbot_provider_is_luna_medium_stateless_and_selection_only():
     assert captured["model"] == "gpt-5.6-luna"
     assert captured["reasoning"] == {"effort": "medium"}
     assert captured["store"] is False
+    acknowledgement_schema = captured["text"]["format"]["schema"]["properties"][
+        "acknowledgement_suggestion"
+    ]
+    assert acknowledgement_schema["minLength"] == 1
+    assert acknowledgement_schema["maxLength"] == 20_000
     serialized = captured["input"][1]["content"]
     assert "exact_text" not in serialized
     assert "source_ref" not in serialized.casefold()

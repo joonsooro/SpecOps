@@ -766,6 +766,9 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     assert "Do not emit evidence_refs or source_evidence_refs" in instructions
     assert len(json.loads(content[1]["text"])["quality_rule_manifest"]) == 26
     assert "Foundation alone assigns canonical UUIDs" in instructions
+    assert "Return the shortest complete candidate" in instructions
+    assert "one concise sentence" in instructions
+    assert "Do not merge independently testable obligations" in instructions
 
     wire_candidate = {
         "analyzer_run_id": str(request.analyzer_run_id),
@@ -874,6 +877,7 @@ def test_technical_closure_schema_and_capacity_are_generic_and_strict():
     )
     assert "technical_closure_manifest" in instructions
     assert "unresolved choice" in instructions
+    assert "Return the shortest complete candidate" not in instructions
 
 
 def test_rule_derived_blueprint_is_executable_in_the_provider_schema():

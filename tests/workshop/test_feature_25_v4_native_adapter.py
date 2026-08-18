@@ -664,6 +664,7 @@ def test_artifact_synthesis_supplies_normative_payload_schema_and_encoding_rules
     request = _spec_synthesis_request(prepared)
 
     arguments = adapter._response_arguments(request, bootstrap=False)
+    assert arguments["max_output_tokens"] == 128_000
     content = arguments["input"][0]["content"]
     assert [item["type"] for item in content] == ["input_text", "input_text"]
     prefix = "Provider-owned artifact payload JSON Schema: "

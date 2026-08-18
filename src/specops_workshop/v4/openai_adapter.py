@@ -45,7 +45,7 @@ MAX_OUTPUT_TOKENS = {
     contracts.AnalyzerOperation.TURN_ANALYSIS: 20_000,
     contracts.AnalyzerOperation.GUIDANCE: 8_000,
     contracts.AnalyzerOperation.REVIEW_NARRATION: 8_000,
-    contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS: 40_000,
+    contracts.AnalyzerOperation.SPEC_PACKAGE_SYNTHESIS: 128_000,
     contracts.AnalyzerOperation.TECHNICAL_CONTRACT_SYNTHESIS: 24_000,
 }
 ARTIFACT_PAYLOAD_SCHEMAS = {

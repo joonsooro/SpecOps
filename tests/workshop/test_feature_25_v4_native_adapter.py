@@ -23,6 +23,7 @@ from specops_workshop.v4.openai_adapter import (
     ProviderAdapterError,
     ProviderSourceUpload,
     StoredConversationOpenAIAdapter,
+    _safe_request_envelope,
     safe_validation_diagnostics,
 )
 from specops_workshop.v4.schema_compiler import (
@@ -405,6 +406,8 @@ class _IncompleteResponses:
             id=response_id,
             status="incomplete",
             incomplete_details=SimpleNamespace(reason=self.reason),
+            max_output_tokens=12_800,
+            output=[SimpleNamespace(type="message")],
             output_text="private incomplete provider output",
             _request_id="req_incomplete_retrieve",
             usage=None,
@@ -1662,13 +1665,60 @@ def test_incomplete_response_preserves_only_the_bounded_provider_reason(
             )
 
         assert failure.value.receipt.code is c.ProviderFailureCode.UNKNOWN_SAFE
-        assert adapter.lifecycle_events[-1].incomplete_reason == expected
-        dumped = repr(adapter.lifecycle_events[-1])
+        completed = adapter.lifecycle_events[-1]
+        assert completed.incomplete_reason == expected
+        assert completed.submitted_max_output_tokens == 24_000
+        assert completed.response_max_output_tokens == 12_800
+        assert completed.strict_schema_bytes is not None
+        assert completed.strict_schema_bytes > 0
+        assert completed.strict_schema_shape_sha256 is not None
+        assert len(completed.strict_schema_shape_sha256) == 64
+        assert completed.output_item_count == 1
+        assert completed.output_text_present is True
+        assert completed.output_text_character_count == len(
+            "private incomplete provider output"
+        )
+        dumped = repr(completed)
         assert "private incomplete provider output" not in dumped
         if expected is None:
             assert reason not in dumped
 
     asyncio.run(scenario())
+
+
+def test_request_envelope_fingerprint_redacts_schema_scalar_values() -> None:
+    base = {
+        "max_output_tokens": 128_000,
+        "text": {
+            "format": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "participant_choice": {
+                            "type": "string",
+                            "enum": ["private choice one"],
+                        }
+                    },
+                    "required": ["participant_choice"],
+                }
+            }
+        },
+    }
+    changed_value = deepcopy(base)
+    changed_value["text"]["format"]["schema"]["properties"][
+        "participant_choice"
+    ]["enum"] = ["different private choice"]
+    changed_shape = deepcopy(base)
+    changed_shape["text"]["format"]["schema"]["properties"][
+        "participant_choice"
+    ]["minLength"] = 1
+
+    cap, fingerprint, schema_bytes = _safe_request_envelope(base)
+
+    assert cap == 128_000
+    assert fingerprint == _safe_request_envelope(changed_value)[1]
+    assert fingerprint != _safe_request_envelope(changed_shape)[1]
+    assert schema_bytes is not None and schema_bytes > 0
 
 
 def test_non_bootstrap_generation_checkpoints_one_background_response_and_waits_past_60_seconds():
@@ -2119,6 +2169,26 @@ async def _sdk_serialization_case():
         request = _bootstrap_request(prepared)
         candidate_outputs.append(_brief(request).model_dump_json())
         result = await adapter.bootstrap(request, prepared=prepared, session_id=SESSION_ID)
+        synthesis_request = _spec_synthesis_request(prepared)
+        synthesis_candidate = c.SpecPackageSynthesisCandidate(
+            output_type="SPEC_PACKAGE_SYNTHESIS_CANDIDATE",
+            analyzer_run_id=synthesis_request.analyzer_run_id,
+            context_id=synthesis_request.context_id,
+            request_hash=synthesis_request.request_hash,
+            source_set_hash=synthesis_request.source_set_hash,
+            based_on_case_revision=synthesis_request.based_on_case_revision,
+            foundation_artifact_id=synthesis_request.target.foundation_artifact_id,
+            identity_plan_id=synthesis_request.identity_plan.identity_plan_id,
+            identity_plan_version=synthesis_request.identity_plan.identity_plan_version,
+            semantic_state_hash=synthesis_request.identity_plan.semantic_state_hash,
+            payload_schema_id=synthesis_request.payload_schema_id,
+            payload_schema_version=synthesis_request.payload_schema_version,
+            candidate_payload_json="{}",
+        )
+        synthesis_wire = synthesis_candidate.model_dump(mode="json")
+        synthesis_wire["candidate_payload_json"] = {}
+        candidate_outputs.append(json.dumps(synthesis_wire))
+        await adapter.execute(synthesis_request, context=result.context)
     finally:
         await sdk.close()
 
@@ -2128,9 +2198,13 @@ async def _sdk_serialization_case():
         ("POST", "/v1/files"),
         ("POST", "/v1/conversations"),
         ("POST", "/v1/responses"),
+        ("POST", "/v1/responses"),
     ]
     assert all("multipart/form-data" in content_type for _, path, _, content_type in captured if path == "/v1/files")
-    response_body = json.loads(next(body for _, path, body, _ in captured if path == "/v1/responses"))
+    response_bodies = [
+        json.loads(body) for _, path, body, _ in captured if path == "/v1/responses"
+    ]
+    response_body = response_bodies[0]
     assert response_body["model"] == "gpt-5.6-terra"
     assert response_body["conversation"] == "conv_sdk"
     assert response_body["reasoning"] == {"context": "all_turns", "effort": "medium"}
@@ -2142,6 +2216,9 @@ async def _sdk_serialization_case():
         "input_file",
         "input_text",
     ]
+    synthesis_body = response_bodies[1]
+    assert synthesis_body["max_output_tokens"] == 128_000
+    assert synthesis_body["text"]["format"]["strict"] is True
 
 
 def test_adapter_rejects_source_hash_mismatch_before_any_provider_call():

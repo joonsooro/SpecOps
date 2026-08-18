@@ -94,6 +94,13 @@ class ProviderLifecycleEvent:
     output_tokens: int | None
     reasoning_output_tokens: int | None
     total_tokens: int | None
+    submitted_max_output_tokens: int | None
+    response_max_output_tokens: int | None
+    strict_schema_shape_sha256: str | None
+    strict_schema_bytes: int | None
+    output_item_count: int | None
+    output_text_present: bool | None
+    output_text_character_count: int | None
 
 
 @dataclass(frozen=True)
@@ -170,6 +177,70 @@ def _safe_incomplete_reason(
     if reason == "content_filter":
         return "content_filter"
     return None
+
+
+_REDACTED_SCHEMA_VALUE_KEYS = frozenset(
+    {"const", "default", "description", "enum", "examples", "title"}
+)
+
+
+def _schema_shape(value: Any, *, parent_key: str | None = None) -> Any:
+    """Project a JSON Schema to structure without retaining scalar text values."""
+
+    if parent_key in _REDACTED_SCHEMA_VALUE_KEYS:
+        if isinstance(value, list):
+            return {
+                "kind": "list",
+                "length": len(value),
+                "item_kinds": sorted({type(item).__name__ for item in value}),
+            }
+        return {"kind": type(value).__name__}
+    if isinstance(value, dict):
+        return {
+            key: _schema_shape(item, parent_key=key)
+            for key, item in sorted(value.items())
+            if isinstance(key, str)
+        }
+    if isinstance(value, list):
+        return [_schema_shape(item) for item in value]
+    if isinstance(value, str):
+        return "<string>"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return f"<{type(value).__name__}>"
+
+
+def _safe_request_envelope(
+    request_arguments: dict[str, Any] | None,
+) -> tuple[int | None, str | None, int | None]:
+    if request_arguments is None:
+        return None, None, None
+    submitted_max_output_tokens = _safe_token_count(
+        request_arguments.get("max_output_tokens")
+    )
+    text = request_arguments.get("text")
+    output_format = text.get("format") if isinstance(text, dict) else None
+    schema = output_format.get("schema") if isinstance(output_format, dict) else None
+    if not isinstance(schema, dict):
+        return submitted_max_output_tokens, None, None
+    encoded = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    shape = json.dumps(
+        _schema_shape(schema), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return submitted_max_output_tokens, hashlib.sha256(shape).hexdigest(), len(encoded)
+
+
+def _safe_output_shape(
+    response: Any | None,
+) -> tuple[int | None, bool | None, int | None]:
+    if response is None:
+        return None, None, None
+    output = getattr(response, "output", None)
+    output_item_count = len(output) if isinstance(output, (list, tuple)) else None
+    output_text = getattr(response, "output_text", None)
+    if not isinstance(output_text, str):
+        return output_item_count, None, None
+    return output_item_count, bool(output_text), len(output_text)
 
 
 _KNOWN_SCHEMA_PATHS = frozenset(
@@ -577,13 +648,6 @@ class StoredConversationOpenAIAdapter:
         if request.source_set != prepared.source_set:
             raise ValueError("bootstrap request does not bind the two uploaded sources")
         operation = contracts.AnalyzerOperation.BOOTSTRAP
-        started_at = self._monotonic()
-        self._emit_lifecycle(
-            event="provider_request.started",
-            operation=operation,
-            client_request_id=request.client_request_id,
-            started_at=started_at,
-        )
         if grounding_correction and graph_correction:
             raise ValueError("bootstrap correction reason must be singular")
         arguments = self._response_arguments(
@@ -593,6 +657,14 @@ class StoredConversationOpenAIAdapter:
             graph_correction=graph_correction,
         )
         arguments["background"] = True
+        started_at = self._monotonic()
+        self._emit_lifecycle(
+            event="provider_request.started",
+            operation=operation,
+            client_request_id=request.client_request_id,
+            started_at=started_at,
+            request_arguments=arguments,
+        )
         try:
             response = await asyncio.wait_for(
                 self._client.responses.create(**arguments),
@@ -605,6 +677,7 @@ class StoredConversationOpenAIAdapter:
                 client_request_id=request.client_request_id,
                 started_at=started_at,
                 status="CREATE_CANCELLED",
+                request_arguments=arguments,
             )
             raise
         except TimeoutError as exc:
@@ -614,6 +687,7 @@ class StoredConversationOpenAIAdapter:
                 client_request_id=request.client_request_id,
                 started_at=started_at,
                 status="CREATE_ID_UNCERTAIN",
+                request_arguments=arguments,
             )
             raise self._provider_error(
                 exc,
@@ -637,6 +711,7 @@ class StoredConversationOpenAIAdapter:
             client_request_id=request.client_request_id,
             started_at=started_at,
             response=response,
+            request_arguments=arguments,
         )
         return response_id
 
@@ -658,6 +733,8 @@ class StoredConversationOpenAIAdapter:
             raise ValueError("unsafe stored bootstrap response identifier")
         operation = contracts.AnalyzerOperation.BOOTSTRAP
         started_at = self._background_started_at.setdefault(response_id, self._monotonic())
+        request_arguments = self._response_arguments(request, bootstrap=True)
+        request_arguments["background"] = True
         response = self._background_responses.get(response_id)
         slow_observed = False
         try:
@@ -684,6 +761,7 @@ class StoredConversationOpenAIAdapter:
                         client_request_id=request.client_request_id,
                         started_at=started_at,
                         response=response,
+                        request_arguments=request_arguments,
                     )
                 if status not in {"queued", "in_progress"}:
                     break
@@ -696,6 +774,7 @@ class StoredConversationOpenAIAdapter:
                 client_request_id=request.client_request_id,
                 started_at=started_at,
                 response=self._background_responses.get(response_id),
+                request_arguments=request_arguments,
             )
             raise
         except Exception as exc:
@@ -711,6 +790,7 @@ class StoredConversationOpenAIAdapter:
             client_request_id=request.client_request_id,
             started_at=started_at,
             response=response,
+            request_arguments=request_arguments,
         )
         if status != "completed":
             raise self._provider_error(
@@ -1120,6 +1200,7 @@ class StoredConversationOpenAIAdapter:
             operation=operation,
             client_request_id=request.client_request_id,
             started_at=started_at,
+            request_arguments=arguments,
         )
         try:
             response = await asyncio.wait_for(
@@ -1133,6 +1214,7 @@ class StoredConversationOpenAIAdapter:
                 client_request_id=request.client_request_id,
                 started_at=started_at,
                 status="CREATE_CANCELLED",
+                request_arguments=arguments,
             )
             raise
         except TimeoutError as exc:
@@ -1142,6 +1224,7 @@ class StoredConversationOpenAIAdapter:
                 client_request_id=request.client_request_id,
                 started_at=started_at,
                 status="CREATE_ID_UNCERTAIN",
+                request_arguments=arguments,
             )
             raise self._provider_error(
                 exc,
@@ -1168,6 +1251,7 @@ class StoredConversationOpenAIAdapter:
             client_request_id=request.client_request_id,
             started_at=started_at,
             response=response,
+            request_arguments=arguments,
         )
         if response_checkpoint is not None:
             response_checkpoint(response_id)
@@ -1200,6 +1284,7 @@ class StoredConversationOpenAIAdapter:
                         client_request_id=request.client_request_id,
                         started_at=started_at,
                         response=response,
+                        request_arguments=arguments,
                     )
         except asyncio.CancelledError:
             self._emit_lifecycle(
@@ -1209,6 +1294,7 @@ class StoredConversationOpenAIAdapter:
                 started_at=started_at,
                 response=response,
                 status="KNOWN_RESPONSE_WAIT_CANCELLED",
+                request_arguments=arguments,
             )
             raise
         except Exception as exc:
@@ -1224,6 +1310,7 @@ class StoredConversationOpenAIAdapter:
             client_request_id=request.client_request_id,
             started_at=started_at,
             response=response,
+            request_arguments=arguments,
         )
         if status != "completed":
             raise self._provider_error(
@@ -2006,10 +2093,21 @@ class StoredConversationOpenAIAdapter:
         started_at: float,
         response: Any | None = None,
         status: str | None = None,
+        request_arguments: dict[str, Any] | None = None,
     ) -> None:
         usage = getattr(response, "usage", None)
         input_details = getattr(usage, "input_tokens_details", None)
         output_details = getattr(usage, "output_tokens_details", None)
+        (
+            submitted_max_output_tokens,
+            strict_schema_shape_sha256,
+            strict_schema_bytes,
+        ) = _safe_request_envelope(request_arguments)
+        (
+            output_item_count,
+            output_text_present,
+            output_text_character_count,
+        ) = _safe_output_shape(response)
         value = ProviderLifecycleEvent(
             event=event,
             operation=operation.value,
@@ -2030,6 +2128,15 @@ class StoredConversationOpenAIAdapter:
                 getattr(output_details, "reasoning_tokens", None)
             ),
             total_tokens=_safe_token_count(getattr(usage, "total_tokens", None)),
+            submitted_max_output_tokens=submitted_max_output_tokens,
+            response_max_output_tokens=_safe_token_count(
+                getattr(response, "max_output_tokens", None)
+            ),
+            strict_schema_shape_sha256=strict_schema_shape_sha256,
+            strict_schema_bytes=strict_schema_bytes,
+            output_item_count=output_item_count,
+            output_text_present=output_text_present,
+            output_text_character_count=output_text_character_count,
         )
         self._lifecycle_events.append(value)
         self._logger.info(

@@ -119,6 +119,21 @@ The active V0 branch now supports one focused specification-workshop cycle:
 
 A manual live V0 demo has completed successfully. The formal credentialed full-cycle evaluation remains postponed, so this README does not claim that the complete production-readiness scorecard has passed.
 
+## What the 120-case evaluation showed
+
+We evaluated SpecOps’ ambiguity and approval-blocking decisions across **120 cases**: 60 ambiguous requirements and 60 fully specified controls. Every case produced a valid structured result on the first attempt.
+
+| Measure | Result |
+|---|---:|
+| Ambiguities detected | **56/60 (93.3%)** |
+| Clean controls incorrectly flagged | **1/60 (1.7%)** |
+| Approval-blocking issues detected | **42/47 (89.4%)** |
+| Non-blocking cases incorrectly blocked | **4/73 (5.5%)** |
+
+The final configuration substantially limits unnecessary blocking, but it is not reliable enough to make autonomous approval decisions. It missed four ambiguities and five genuine blockers.
+
+SpecOps should therefore act as **decision support, not the final decision-maker**. High-impact, uncertain, or contested findings require human review before approval or release. This evaluation covers the ambiguity-decision layer—not the complete Workshop UI, persistence, or production workflow.
+
 ## Repository map
 
 ```text
